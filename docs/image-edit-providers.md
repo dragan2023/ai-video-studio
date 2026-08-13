@@ -77,7 +77,6 @@ requests when the configured checkpoint is single-image.
 export STUDIO_IMAGE_EDIT_PROVIDER=vllm-omni
 export STUDIO_IMAGE_EDIT_BASE_URL=http://127.0.0.1:8093
 export STUDIO_IMAGE_EDIT_MODEL=Qwen/Qwen-Image-Edit-2511
-export STUDIO_IMAGE_EDIT_TOKENIZER_PATH=/models/Qwen-Image-Edit-2511/processor
 export STUDIO_IMAGE_EDIT_MAX_REFERENCES=4
 export STUDIO_IMAGE_EDIT_TRUE_CFG_SCALE=4.0
 export STUDIO_IMAGE_EDIT_GUIDANCE_SCALE=1.0
@@ -93,7 +92,12 @@ The planner writes the complete direct-to-model anchor prompt, including
 ordered reference names, roles, and visual contributions. The shot editor keeps
 it editable with a 1000-character cap. When the tokenizer path is configured,
 the adapter also rejects prompts above 1000 exact Qwen text tokens before any
-generation request; prompts are never silently truncated.
+generation request; prompts are never silently truncated. The tokenizer path is
+optional: for a remote vLLM-Omni server, the tokenizer is already mounted in
+the serving container and should not be pointed at that container-only path on
+the Studio host. If the configured host path does not contain `tokenizer.json`,
+the exact local check is skipped while the 1000-character cap remains active;
+the provider then performs its own token validation.
 
 For hosted APIs, use `openai-compatible` and provide
 `STUDIO_IMAGE_EDIT_API_KEY` through the environment. Never place provider keys

@@ -154,10 +154,17 @@ character, and prop references. It is optional and disabled by default.
 export STUDIO_IMAGE_EDIT_PROVIDER=vllm-omni
 export STUDIO_IMAGE_EDIT_BASE_URL=http://127.0.0.1:8093
 export STUDIO_IMAGE_EDIT_MODEL=Qwen/Qwen-Image-Edit-2511
-export STUDIO_IMAGE_EDIT_TOKENIZER_PATH=/models/Qwen-Image-Edit-2511/processor
 export STUDIO_IMAGE_EDIT_MAX_REFERENCES=4
 export STUDIO_IMAGE_EDIT_ANCHOR_MODE=scene-cuts
 ```
+
+The tokenizer is normally inside the vLLM-Omni image-edit container; the
+Studio host does not need a second checkpoint download. `STUDIO_IMAGE_EDIT_TOKENIZER_PATH`
+is optional and only enables an exact local Qwen-token preflight. If it is set,
+it must point to a host-visible directory containing `tokenizer.json` (not a
+path that exists only inside the remote serving container). Nautilus always
+keeps the 1000-character cap and lets the remote provider enforce its exact
+token limit when no local tokenizer is available.
 
 Use `openai-compatible` instead of `vllm-omni` for a hosted provider. See
 [Image-edit providers](docs/image-edit-providers.md) for the request contract,
