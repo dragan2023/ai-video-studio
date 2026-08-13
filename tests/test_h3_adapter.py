@@ -54,6 +54,25 @@ def test_h3_adapter_exposes_actionable_endpoint_error(tmp_path: Path):
     assert "start the selected service" in str(error.value)
 
 
+def test_h3_adapter_preserves_server_status_errors(tmp_path: Path):
+    image = tmp_path / "start.png"
+    image.write_bytes(b"image")
+    shot = ShotSpec(
+        index=0,
+        title="Opening",
+        purpose="Exercise server diagnostics",
+        duration_seconds=4,
+        prompt="A continuous shot.",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, request=request, text="worker OOM")
+
+    client = H3Client("http://h3.example:8091", transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.HTTPStatusError, match="500"):
+        asyncio.run(client.generate_fl2va(shot, image, tmp_path / "shot.mp4"))
+
+
 def test_fl2va_adapter_uses_current_video_api(tmp_path: Path):
     request_body = b""
 

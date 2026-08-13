@@ -264,7 +264,7 @@ class H3Client:
                 async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
                     response = await client.post(self.endpoint, data=data, files=multipart)
                 response.raise_for_status()
-            except httpx.HTTPError as error:
+            except httpx.RequestError as error:
                 task = json.loads(data.get("extra_params", "{}")).get("task", "video")
                 raise self.unavailable_error(task, error) from error
             content_type = response.headers.get("content-type", "")
@@ -302,8 +302,7 @@ class H3Client:
             try:
                 response = await client.post(base_url, data=data, files=multipart)
                 response.raise_for_status()
-            except httpx.HTTPError as error:
-                await client.aclose()
+            except httpx.RequestError as error:
                 task = json.loads(data.get("extra_params", "{}")).get("task", "video")
                 raise self.unavailable_error(task, error) from error
             payload = response.json()
