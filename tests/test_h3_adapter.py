@@ -34,6 +34,26 @@ def test_h3_adapter_rejects_legacy_fifteen_second_shot(tmp_path: Path):
         asyncio.run(client.generate_fl2va(shot, image, tmp_path / "shot.mp4"))
 
 
+def test_h3_adapter_exposes_actionable_endpoint_error(tmp_path: Path):
+    image = tmp_path / "start.png"
+    image.write_bytes(b"image")
+    shot = ShotSpec(
+        index=0,
+        title="Opening",
+        purpose="Exercise endpoint diagnostics",
+        duration_seconds=4,
+        prompt="A continuous shot.",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("All connection attempts failed", request=request)
+
+    client = H3Client("http://ref2va.example:8092", transport=httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError, match="H3 fl2va endpoint is unavailable") as error:
+        asyncio.run(client.generate_fl2va(shot, image, tmp_path / "shot.mp4"))
+    assert "start the selected service" in str(error.value)
+
+
 def test_fl2va_adapter_uses_current_video_api(tmp_path: Path):
     request_body = b""
 

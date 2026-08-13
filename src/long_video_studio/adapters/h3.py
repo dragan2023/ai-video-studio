@@ -43,6 +43,14 @@ class H3Client:
         except httpx.HTTPError:
             return False
 
+    def unavailable_error(self, task: str, error: BaseException) -> RuntimeError:
+        base_url = self.endpoint.removesuffix("/v1/videos/sync")
+        return RuntimeError(
+            f"H3 {task} endpoint is unavailable at {base_url}; "
+            "start the selected service before rendering. "
+            f"Underlying error: {error}"
+        )
+
     async def generate_fl2va(
         self,
         shot: ShotSpec,
@@ -252,9 +260,13 @@ class H3Client:
                 handle = path.open("rb")
                 handles.append(handle)
                 multipart.append((field, (filename, handle, media_type)))
-            async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
-                response = await client.post(self.endpoint, data=data, files=multipart)
-            response.raise_for_status()
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+                    response = await client.post(self.endpoint, data=data, files=multipart)
+                response.raise_for_status()
+            except httpx.HTTPError as error:
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                raise self.unavailable_error(task, error) from error
             content_type = response.headers.get("content-type", "")
             if "video" not in content_type and not response.content.startswith(b"\x00\x00"):
                 raise RuntimeError(
@@ -286,65 +298,68 @@ class H3Client:
                 handle = path.open("rb")
                 handles.append(handle)
                 multipart.append((field, (filename, handle, media_type)))
-            async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            client = httpx.AsyncClient(timeout=self.timeout, transport=self.transport)
+            try:
                 response = await client.post(base_url, data=data, files=multipart)
                 response.raise_for_status()
-                payload = response.json()
-                job_id = payload.get("id")
-                if not job_id:
-                    raise RuntimeError(f"H3 async endpoint returned no job id: {payload}")
-                deadline = time.monotonic() + self.timeout_seconds
-                status_url = f"{base_url}/{job_id}"
-                resolved_job_id = False
-                while True:
-                    status_response = await client.get(status_url)
-                    if status_response.status_code == 404 and not resolved_job_id:
-                        # Some vLLM-Omni builds return a submission id that
-                        # differs from the id stored in VIDEO_JOBS. Resolve the
-                        # newest matching prompt once, then continue polling.
-                        jobs_response = await client.get(base_url)
-                        jobs_response.raise_for_status()
-                        candidates = [
-                            job
-                            for job in jobs_response.json().get("data", [])
-                            if job.get("prompt") == data.get("prompt")
-                        ]
-                        if candidates:
-                            job_id = max(candidates, key=lambda job: job.get("created_at") or 0)["id"]
-                            status_url = f"{base_url}/{job_id}"
-                            resolved_job_id = True
-                            continue
-                    if status_response.is_error:
-                        # vLLM-Omni serializes a failed async job as HTTP 500
-                        # while still returning the durable job payload. Keep
-                        # the model error instead of exposing only an opaque
-                        # httpx status exception to the render job.
-                        try:
-                            failed_payload = status_response.json()
-                        except ValueError:
-                            failed_payload = {}
-                        if failed_payload.get("status") == "failed":
-                            error = failed_payload.get("error") or failed_payload
-                            raise RuntimeError(f"H3 async job {job_id} failed: {error}")
-                    status_response.raise_for_status()
-                    status_payload = status_response.json()
-                    status = status_payload.get("status")
-                    if status == "completed":
-                        content_response = await client.get(f"{status_url}/content")
-                        content_response.raise_for_status()
-                        break
-                    if status == "failed":
-                        raise RuntimeError(
-                            f"H3 async job {job_id} failed: {status_payload.get('error') or status_payload}"
-                        )
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(f"H3 async job {job_id} exceeded {self.timeout_seconds}s")
-                    await asyncio.sleep(2)
+            except httpx.HTTPError as error:
+                await client.aclose()
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                raise self.unavailable_error(task, error) from error
+            payload = response.json()
+            job_id = payload.get("id")
+            if not job_id:
+                raise RuntimeError(f"H3 async endpoint returned no job id: {payload}")
+            deadline = time.monotonic() + self.timeout_seconds
+            status_url = f"{base_url}/{job_id}"
+            resolved_job_id = False
+            while True:
+                status_response = await client.get(status_url)
+                if status_response.status_code == 404 and not resolved_job_id:
+                    # Some vLLM-Omni builds return a submission id that
+                    # differs from the id stored in VIDEO_JOBS. Resolve the
+                    # newest matching prompt once, then continue polling.
+                    jobs_response = await client.get(base_url)
+                    jobs_response.raise_for_status()
+                    candidates = [
+                        job for job in jobs_response.json().get("data", []) if job.get("prompt") == data.get("prompt")
+                    ]
+                    if candidates:
+                        job_id = max(candidates, key=lambda job: job.get("created_at") or 0)["id"]
+                        status_url = f"{base_url}/{job_id}"
+                        resolved_job_id = True
+                        continue
+                if status_response.is_error:
+                    # vLLM-Omni serializes a failed async job as HTTP 500
+                    # while still returning the durable job payload. Keep
+                    # the model error instead of exposing only an opaque
+                    # httpx status exception to the render job.
+                    try:
+                        failed_payload = status_response.json()
+                    except ValueError:
+                        failed_payload = {}
+                    if failed_payload.get("status") == "failed":
+                        error = failed_payload.get("error") or failed_payload
+                        raise RuntimeError(f"H3 async job {job_id} failed: {error}")
+                status_response.raise_for_status()
+                status_payload = status_response.json()
+                status = status_payload.get("status")
+                if status == "completed":
+                    content_response = await client.get(f"{status_url}/content")
+                    content_response.raise_for_status()
+                    break
+                if status == "failed":
+                    raise RuntimeError(f"H3 async job {job_id} failed: {status_payload.get('error') or status_payload}")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"H3 async job {job_id} exceeded {self.timeout_seconds}s")
+                await asyncio.sleep(2)
             temporary = output_path.with_suffix(output_path.suffix + ".tmp")
             temporary.write_bytes(content_response.content)
             os.replace(temporary, output_path)
             return output_path
         finally:
+            if "client" in locals():
+                await client.aclose()
             for handle in handles:
                 handle.close()
 
