@@ -261,6 +261,14 @@ class OpenAICompatibleImageEditProvider:
             tokenizer_json = (
                 self.tokenizer_path if self.tokenizer_path.is_file() else self.tokenizer_path / "tokenizer.json"
             )
+            if not tokenizer_json.is_file():
+                # The tokenizer path is an optional local optimization. A
+                # remote vLLM-Omni image endpoint may have the checkpoint
+                # mounted inside its container while the Studio host does
+                # not. Keep the hard character cap, and let the provider
+                # enforce its exact token budget instead of failing with an
+                # opaque ENOENT before the request is sent.
+                return
             self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
         token_count = len(self._tokenizer.encode(request.prompt, add_special_tokens=False).ids)
         if token_count > 1000:

@@ -192,6 +192,24 @@ def test_image_edit_uses_exact_qwen_token_budget(tmp_path: Path):
         provider._validate_prompt_budget(request)
 
 
+def test_image_edit_skips_missing_optional_tokenizer(tmp_path: Path):
+    image = tmp_path / "image.png"
+    image.write_bytes(PNG)
+    provider = OpenAICompatibleImageEditProvider(
+        "http://image-edit.test",
+        "Qwen-Image-Edit-2511",
+        protocol="images-edits",
+        tokenizer_path=tmp_path / "mounted-only-processor",
+    )
+    request = ImageEditRequest(
+        prompt="compose",
+        references=(ImageEditReference(image, "scene", "location"),),
+        output_path=tmp_path / "output.png",
+    )
+
+    provider._validate_prompt_budget(request)
+
+
 def test_provider_enforces_reference_cap(tmp_path: Path):
     image = tmp_path / "image.png"
     image.write_bytes(PNG)
