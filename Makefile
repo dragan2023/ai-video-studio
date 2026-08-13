@@ -7,7 +7,6 @@ RUFF ?= $(if $(wildcard $(VENV)/bin/ruff),$(VENV)/bin/ruff,ruff)
 lint:
 	$(RUFF) format --check src tests scripts/build-continuation-comparison.py scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
 	$(RUFF) check src tests scripts/build-continuation-comparison.py scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
-	node --check src/long_video_studio/static/app.js
 
 test:
 	$(PYTHON) -m pytest -q

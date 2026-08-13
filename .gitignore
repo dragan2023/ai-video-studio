@@ -10,14 +10,49 @@ build/
 *.tar.gz
 .coverage
 htmlcov/
-data/assets/
-data/outputs/
-data/studio.db
-data/*.db-*
+# Local runtime state and generated media. Keep the directories themselves
+# available through .gitkeep files only if a future contributor needs them.
+data/*
+!data/.gitkeep
+assets/*
+!assets/.gitkeep
+outputs/
 generated/
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.mp4
+*.mov
+*.webm
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+# Keep the reviewed public README screenshot while ignoring runtime media.
+!assets/screenshot.webp
 todo.md
+
+# Local leases, tunnels, reports, caches, and editor state.
+.codex/
+.claude/
+.mypy_cache/
+.pyright/
+.cache/
+.coverage.*
+*.pid
+*.sock
+*.tmp
+*.swp
 web/node_modules/
 web/dist/
+.env
 .env.*
 !.env.example
 .DS_Store

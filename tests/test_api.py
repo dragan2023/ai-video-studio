@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 from test_assets import png_bytes
 
@@ -64,6 +65,26 @@ def test_creator_flow_upload_plan_edit_compile(settings):
     assert render.status_code == 409
     assert "STUDIO_H3_FL2VA_URL" in render.json()["detail"]
     assert client.get("/").status_code == 200
+
+
+def test_style_presets_api_exposes_canonical_h3_contracts(settings):
+    client = TestClient(create_app(settings))
+    response = client.get("/api/style-presets")
+
+    assert response.status_code == 200
+    values = {item["id"]: item for item in response.json()}
+    assert {
+        "cinematic",
+        "documentary",
+        "music_video",
+        "commercial",
+        "noir",
+        "animation",
+        "retro",
+        "surreal",
+    } <= set(values)
+    assert "Palette:" in values["cinematic"]["instructions"]
+    assert values["cinematic"]["negative_constraints"]
 
 
 def test_asset_content_rejects_paths_outside_media_roots(settings):
@@ -248,7 +269,7 @@ def test_render_preflight_keeps_ordinary_ref2va_asset_contract(settings):
         index=0,
         title="Asset reference",
         purpose="Use explicit references",
-        duration_seconds=15,
+        duration_seconds=14,
         task=ShotTask.REF2VA,
         prompt="Animate the supplied reference media.",
     )
@@ -310,7 +331,46 @@ def test_project_and_shot_dialog_updates_persist_and_invalidate_old_take(setting
         json={
             "title": "Edited opening",
             "purpose": "Introduce the prop before the reveal.",
+            "anchor_prompt": "A zero-second still of the creator facing the glowing prop.",
             "prompt": "A slow push-in toward the glowing prop, no jump cut.",
+            "audio_prompt": "A low electrical hum and soft footsteps.",
+            "music_prompt": "A sparse, audience-only cello texture.",
+            "opening_state": "The creator stands at the workshop threshold.",
+            "ending_state": "The creator settles beside the glowing prop.",
+            "continuity_handoff": "Keep the blue jacket, warm light, prop position, and room tone stable.",
+            "reference_anchors": [
+                "Character identity: creator in a blue jacket",
+                "Prop identity: the same glowing object",
+            ],
+            "hook": "The prop brightens as the creator reaches it.",
+            "visual_beats": [
+                {
+                    "start_seconds": 0,
+                    "end_seconds": 4,
+                    "visual_action": "The creator approaches the prop.",
+                    "state_change": "The distance closes.",
+                    "camera": "Small-amplitude slow Push In.",
+                    "sound": "Soft footsteps synchronize with each step.",
+                },
+                {
+                    "start_seconds": 4,
+                    "end_seconds": 8,
+                    "visual_action": "The creator stops beside the prop.",
+                    "state_change": "The prop becomes the visual focus.",
+                    "camera": "The camera brakes into a Static Shot.",
+                    "sound": "The final footstep decays into the electrical hum.",
+                },
+            ],
+            "dialogue": [
+                {
+                    "speaker": "Creator",
+                    "text": "There you are.",
+                    "language": "English",
+                    "delivery": "quietly relieved",
+                    "start_seconds": 2,
+                    "end_seconds": 4,
+                }
+            ],
             "negative_prompt": "text, logo, watermark",
             "duration_seconds": 8,
             "inference_steps": 50,
@@ -325,9 +385,62 @@ def test_project_and_shot_dialog_updates_persist_and_invalidate_old_take(setting
     assert edited_shot["duration_seconds"] == 8
     assert edited_shot["start_frame_asset_id"] is None
     assert edited_shot["continuation_mode"] == "fast"
+    assert edited_shot["anchor_prompt"].startswith("A zero-second still")
+    assert edited_shot["audio_prompt"].startswith("A low electrical hum")
+    assert edited_shot["music_prompt"].startswith("A sparse")
+    assert edited_shot["opening_state"].startswith("The creator stands")
+    assert edited_shot["ending_state"].startswith("The creator settles")
+    assert len(edited_shot["reference_anchors"]) == 2
+    assert edited_shot["hook"].startswith("The prop brightens")
+    assert edited_shot["visual_beats"][-1]["end_seconds"] == 8
+    assert edited_shot["dialogue"][0]["text"] == "There you are."
     assert edited_shot["status"] == "planned"
     assert edited_shot["selected_take_path"] is None
     assert shot_update.json()["timeline"][1]["start_seconds"] == 8
+
+
+def test_shot_dialogue_validation_rejects_invalid_lines(settings):
+    client = TestClient(create_app(settings))
+    project = client.post(
+        "/api/projects/plan",
+        json={"title": "Dialogue validation", "prompt": "A short conversation.", "duration_seconds": 15},
+    ).json()
+    shot = project["shots"][0]
+
+    empty_speaker = client.patch(
+        f"/api/projects/{project['id']}/shots/{shot['id']}",
+        json={"dialogue": [{"speaker": "", "text": "Hello."}]},
+    )
+    invalid_timing = client.patch(
+        f"/api/projects/{project['id']}/shots/{shot['id']}",
+        json={
+            "dialogue": [
+                {
+                    "speaker": "Lead",
+                    "text": "Hello.",
+                    "start_seconds": 5,
+                    "end_seconds": 2,
+                }
+            ]
+        },
+    )
+    past_shot = client.patch(
+        f"/api/projects/{project['id']}/shots/{shot['id']}",
+        json={
+            "dialogue": [
+                {
+                    "speaker": "Lead",
+                    "text": "Hello.",
+                    "start_seconds": 1,
+                    "end_seconds": shot["duration_seconds"] + 1,
+                }
+            ]
+        },
+    )
+
+    assert empty_speaker.status_code == 422
+    assert invalid_timing.status_code == 422
+    assert past_shot.status_code == 422
 
 
 def test_completed_video_is_inline_unless_download_is_requested(settings):
@@ -427,3 +540,15 @@ def test_react_web_root_serves_vite_assets(settings, tmp_path):
     asset = client.get("/assets/index-test.js")
     assert asset.status_code == 200
     assert "ready" in asset.text
+
+
+def test_app_requires_a_built_react_ui(settings):
+    with pytest.raises(RuntimeError, match="STUDIO_WEB_ROOT is required"):
+        create_app(replace(settings, web_root=None))
+
+
+def test_app_rejects_web_root_without_index(settings, tmp_path):
+    empty_web_root = tmp_path / "empty-web"
+    empty_web_root.mkdir()
+    with pytest.raises(RuntimeError, match="missing index.html"):
+        create_app(replace(settings, web_root=empty_web_root))

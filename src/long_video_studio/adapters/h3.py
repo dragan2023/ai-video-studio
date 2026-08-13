@@ -9,7 +9,8 @@ from pathlib import Path
 
 import httpx
 
-from long_video_studio.domain import ShotSpec
+from long_video_studio.domain import ProjectBrief, ShotSpec, ShotTask, WorldBible
+from long_video_studio.h3_prompt import H3Reference, render_h3_prompt
 
 
 class H3Client:
@@ -51,14 +52,29 @@ class H3Client:
         width: int | None = None,
         height: int | None = None,
         async_job: bool = False,
+        brief: ProjectBrief | None = None,
+        world_bible: WorldBible | None = None,
+        previous_shot: ShotSpec | None = None,
+        speaker_ids: dict[str, str] | None = None,
     ) -> Path:
+        self._validate_duration(shot)
         extra_params = {
             "task": "fl2va",
             "duration": shot.duration_seconds,
             "frame_indices": [0],
             "audio_flow_shift": 3.0,
         }
-        data = self._common_data(shot, extra_params, width=width, height=height)
+        data = self._common_data(
+            shot,
+            extra_params,
+            width=width,
+            height=height,
+            task=ShotTask.FL2VA,
+            brief=brief,
+            world_bible=world_bible,
+            previous_shot=previous_shot,
+            speaker_ids=speaker_ids,
+        )
         post = self._post_async_job if async_job else self._post
         return await post(
             data,
@@ -82,14 +98,18 @@ class H3Client:
         width: int | None = None,
         height: int | None = None,
         async_job: bool = False,
+        brief: ProjectBrief | None = None,
+        world_bible: WorldBible | None = None,
+        previous_shot: ShotSpec | None = None,
+        speaker_ids: dict[str, str] | None = None,
     ) -> Path:
+        self._validate_duration(shot)
         extra_params = {
             "task": "ref2va",
             "duration": shot.duration_seconds,
             "ref_images_pixels_shape": [[-1, -1]],
             "audio_flow_shift": 3.0,
         }
-        data = self._common_data(shot, extra_params, width=width, height=height)
         is_audio = reference_media.suffix.lower() in {
             ".wav",
             ".mp3",
@@ -97,6 +117,41 @@ class H3Client:
             ".flac",
             ".aac",
         }
+        media_kind = "audio" if is_audio else "video"
+        media_label = "Audio 1" if is_audio else "Video 1"
+        data = self._common_data(
+            shot,
+            extra_params,
+            width=width,
+            height=height,
+            references=(
+                H3Reference(
+                    kind="picture",
+                    label="Picture 1",
+                    description=(
+                        f"Use {reference_image.name} as the still-image identity and appearance reference for the "
+                        "subjects requested by the storyboard."
+                    ),
+                    role="identity",
+                    relationship="fully_preserved",
+                ),
+                H3Reference(
+                    kind=media_kind,
+                    label=media_label,
+                    description=(
+                        f"Use {reference_media.name} as the {media_kind} reference and preserve its relevant "
+                        "continuity, motion, scene, style, and synchronized sound characteristics."
+                    ),
+                    role="voice_timbre" if is_audio else "continuation",
+                    relationship="reference" if is_audio else "fully_preserved",
+                ),
+            ),
+            task=ShotTask.REF2VA,
+            brief=brief,
+            world_bible=world_bible,
+            previous_shot=previous_shot,
+            speaker_ids=speaker_ids,
+        )
         if is_audio:
             media_type = self._media_type(reference_media)
             encoded = b64encode(reference_media.read_bytes()).decode("ascii")
@@ -111,19 +166,38 @@ class H3Client:
         else:
             # Video Ref2VA carries its own visual and audio conditioning.  The
             # current H3 API consumes it through the plural reference field.
-            files = {
-                "input_references": (
-                    reference_media.name,
-                    reference_media,
-                    self._media_type(reference_media),
-                )
-            }
+            files = [
+                (
+                    "input_references",
+                    (
+                        reference_image.name,
+                        reference_image,
+                        self._media_type(reference_image),
+                    ),
+                ),
+                (
+                    "input_references",
+                    (
+                        reference_media.name,
+                        reference_media,
+                        self._media_type(reference_media),
+                    ),
+                ),
+            ]
         post = self._post_async_job if async_job else self._post
         return await post(
             data,
             files=files,
             output_path=output_path,
         )
+
+    @staticmethod
+    def _validate_duration(shot: ShotSpec) -> None:
+        if shot.duration_seconds > 14:
+            raise ValueError(
+                "H3 safety ceiling is 14 seconds per shot; a nominal 15-second "
+                "reference video can probe above the model's hard 15-second limit"
+            )
 
     def _common_data(
         self,
@@ -132,11 +206,22 @@ class H3Client:
         *,
         width: int | None = None,
         height: int | None = None,
+        references: tuple[H3Reference, ...] = (),
+        task: ShotTask | None = None,
+        brief: ProjectBrief | None = None,
+        world_bible: WorldBible | None = None,
+        previous_shot: ShotSpec | None = None,
+        speaker_ids: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        prompt = shot.prompt
-        prompt += "\n\nDo not render burned-in subtitles, captions, karaoke text, UI overlays, watermarks, or logos."
-        if shot.negative_prompt:
-            prompt += f" Constraints: {shot.negative_prompt}."
+        prompt = render_h3_prompt(
+            shot,
+            references,
+            task=task,
+            brief=brief,
+            world_bible=world_bible,
+            previous_shot=previous_shot,
+            speaker_ids=speaker_ids,
+        )
         data = {
             "prompt": prompt,
             "fps": str(shot.fps),
@@ -155,17 +240,18 @@ class H3Client:
     async def _post(
         self,
         data: dict[str, str],
-        files: dict[str, tuple[str, Path, str]],
+        files: dict[str, tuple[str, Path, str]] | list[tuple[str, tuple[str, Path, str]]],
         output_path: Path,
     ) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         handles = []
-        multipart: dict[str, tuple[str, object, str]] = {}
+        multipart: list[tuple[str, tuple[str, object, str]]] = []
         try:
-            for field, (filename, path, media_type) in files.items():
+            entries = files.items() if isinstance(files, dict) else files
+            for field, (filename, path, media_type) in entries:
                 handle = path.open("rb")
                 handles.append(handle)
-                multipart[field] = (filename, handle, media_type)
+                multipart.append((field, (filename, handle, media_type)))
             async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
                 response = await client.post(self.endpoint, data=data, files=multipart)
             response.raise_for_status()
@@ -185,20 +271,21 @@ class H3Client:
     async def _post_async_job(
         self,
         data: dict[str, str],
-        files: dict[str, tuple[str, Path, str]],
+        files: dict[str, tuple[str, Path, str]] | list[tuple[str, tuple[str, Path, str]]],
         output_path: Path,
     ) -> Path:
         """Submit a durable video job, poll it, then download the result."""
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         handles = []
-        multipart: dict[str, tuple[str, object, str]] = {}
+        multipart: list[tuple[str, tuple[str, object, str]]] = []
         base_url = self.endpoint.removesuffix("/sync")
         try:
-            for field, (filename, path, media_type) in files.items():
+            entries = files.items() if isinstance(files, dict) else files
+            for field, (filename, path, media_type) in entries:
                 handle = path.open("rb")
                 handles.append(handle)
-                multipart[field] = (filename, handle, media_type)
+                multipart.append((field, (filename, handle, media_type)))
             async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
                 response = await client.post(base_url, data=data, files=multipart)
                 response.raise_for_status()

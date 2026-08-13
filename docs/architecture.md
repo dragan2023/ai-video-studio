@@ -33,6 +33,11 @@ generated media live under the configured data directory. Provider jobs are
 submitted through durable vLLM-Omni video endpoints and polled by the runner;
 the local job records creator-visible progress and output paths.
 
+The Python service only serves a pre-built React/Vite workspace configured by
+`STUDIO_WEB_ROOT`. There is no second legacy UI implementation; a missing or
+incomplete bundle fails startup so frontend and API behavior cannot silently
+drift apart.
+
 ## Provider boundaries
 
 - Planner: Responses-compatible structured generation with a deterministic
@@ -54,6 +59,11 @@ storyboard prompts remain editable and retries cannot accumulate duplicate
 constraints. When Ref2VA is unavailable, the previous boundary frame and
 FL2VA remain an internal compatibility fallback. Real scene cuts can request
 a new anchor.
+
+Every planned H3 shot is limited to 14 seconds. This intentionally leaves
+container-timestamp headroom below H3's hard 15-second reference-video limit:
+a nominal 15-second encode can be reported by ffprobe as slightly longer than
+15 seconds and would otherwise make the following Ref2VA request fail.
 
 ## Security boundary
 

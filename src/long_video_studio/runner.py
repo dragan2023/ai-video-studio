@@ -8,10 +8,10 @@ from long_video_studio.adapters.image_edit import (
     ImageEditProvider,
     ImageEditReference,
     ImageEditRequest,
-    build_first_frame_prompt,
     provider_from_settings,
 )
 from long_video_studio.adapters.media import MediaTools
+from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
 from long_video_studio.domain import (
     AssetKind,
@@ -23,8 +23,8 @@ from long_video_studio.domain import (
     ShotTask,
     effective_video_task,
     resolved_continuation_mode,
-    utc_now,
 )
+from long_video_studio.h3_context import stable_speaker_ids
 from long_video_studio.repository import StudioRepository
 
 
@@ -86,9 +86,11 @@ class RenderManager:
         rendered: list[Path] = []
         rendered_by_shot: dict[str, Path] = {}
         boundary_frames: dict[str, Path] = {}
+        project_speaker_ids = stable_speaker_ids(project.shots)
+        ordered_shots = sorted(project.shots, key=lambda value: value.index)
         width, height = self._video_canvas(project.brief.aspect_ratio)
         try:
-            for position, shot in enumerate(sorted(project.shots, key=lambda value: value.index)):
+            for position, shot in enumerate(ordered_shots):
                 job.current_shot_id = shot.id
                 job.progress = position / max(len(project.shots), 1)
                 job.message = f"rendering shot {position + 1}/{len(project.shots)}"
@@ -159,6 +161,9 @@ class RenderManager:
                         width=width,
                         height=height,
                         async_job=True,
+                        brief=project.brief,
+                        world_bible=project.world_bible,
+                        speaker_ids=project_speaker_ids,
                     )
                 elif is_ref2va_continuation:
                     if not self.settings.h3_ref2va_url:
@@ -184,6 +189,13 @@ class RenderManager:
                         width=width,
                         height=height,
                         async_job=True,
+                        brief=project.brief,
+                        world_bible=project.world_bible,
+                        previous_shot=next(
+                            (candidate for candidate in ordered_shots if candidate.id == shot.continuity_from_shot_id),
+                            None,
+                        ),
+                        speaker_ids=project_speaker_ids,
                     )
                 else:
                     if not self.settings.h3_ref2va_url:
@@ -201,6 +213,9 @@ class RenderManager:
                         width=width,
                         height=height,
                         async_job=True,
+                        brief=project.brief,
+                        world_bible=project.world_bible,
+                        speaker_ids=project_speaker_ids,
                     )
                 shot.selected_take_path = str(output_path)
                 shot.status = ShotStatus.COMPLETE
@@ -331,34 +346,22 @@ class RenderManager:
         provider = self.image_edit_provider
         if provider is None:
             return None
-        if shot.task != ShotTask.FL2VA:
-            return None
-        # An explicit start frame is a creator decision, not an edit
-        # reference. Only synthesize an anchor when the shot has no start.
-        if shot.start_frame_asset_id:
-            return None
         mode = self.settings.image_edit_anchor_mode
-        if mode not in {"first-shot", "scene-cuts", "every-shot"}:
+        if mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise RuntimeError(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {mode}")
-        is_scene_cut = position == 0 or not shot.continuity_from_shot_id
-        if mode == "first-shot" and position != 0:
+        if not anchor_selected(shot, position, mode):
             return None
-        if mode == "scene-cuts" and not is_scene_cut:
-            return None
+        if not shot.anchor_prompt:
+            raise RuntimeError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
 
         references = self._anchor_references(shot, boundary_frames)
         anchor_path = output_dir / f"shot-{position + 1:03d}-anchor.png"
-        prompt = build_first_frame_prompt(
-            tuple(references),
-            shot.prompt,
-            project.brief.aspect_ratio,
-        )
-        shot.anchor_prompt = prompt
-        project.updated_at = utc_now()
-        self.repository.save_project(project)
         await provider.edit(
             ImageEditRequest(
-                prompt=prompt,
+                # The planner owns the complete direct-to-Qwen prompt. Keep
+                # adapters transport-only so a second template cannot overflow
+                # the model's 1024-token input limit or alter creative intent.
+                prompt=shot.anchor_prompt,
                 references=tuple(references),
                 output_path=anchor_path,
                 width={"16:9": 1280, "9:16": 720, "1:1": 1024}[project.brief.aspect_ratio],

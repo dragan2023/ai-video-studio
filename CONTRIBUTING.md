@@ -26,10 +26,11 @@ make check
 Or run the individual checks:
 
 ```bash
-ruff format --check src tests scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
-ruff check src tests scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
+ruff format --check src tests scripts/build-continuation-comparison.py scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
+ruff check src tests scripts/build-continuation-comparison.py scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
 pytest -q
-node --check src/long_video_studio/static/app.js
+npm --prefix web run format
+npm --prefix web run build
 ```
 
 For provider or media changes, include the exact endpoint type, model revision,

@@ -292,6 +292,7 @@ function App() {
   const [styleInstructions, setStyleInstructions] = useState(
     stylePresets[0].instructions,
   );
+  const [registryStyles, setRegistryStyles] = useState(stylePresets);
   const [customStyles, setCustomStyles] = useState(loadCustomStyles);
   const [selected, setSelected] = useState(new Set());
   const [uploadRole, setUploadRole] = useState("reference");
@@ -319,6 +320,25 @@ function App() {
   const [dialogSaving, setDialogSaving] = useState(false);
   const fileInput = useRef(null);
   const projectRequest = useRef(0);
+  const styleRegistryRef = useRef(stylePresets);
+
+  const loadStylePresets = useCallback(async () => {
+    try {
+      const remote = await api("/api/style-presets");
+      if (!Array.isArray(remote) || !remote.length) return;
+      const next = remote.map((item) => ({
+        id: item.id,
+        label: item.label,
+        copy: item.copy,
+        instructions: item.ui_instructions || item.instructions || "",
+        color: item.color,
+      }));
+      styleRegistryRef.current = next;
+      setRegistryStyles(next);
+    } catch {
+      // Source-install fallback keeps the bundled short presets usable.
+    }
+  }, []);
 
   const loadAssets = useCallback(
     async () => setAssets((await api("/api/assets")) || []),
@@ -340,46 +360,49 @@ function App() {
   }, []);
 
   const availableStyles = useMemo(
-    () => [...stylePresets, ...customStyles],
-    [customStyles],
+    () => [...registryStyles, ...customStyles],
+    [registryStyles, customStyles],
   );
 
-  const loadProject = useCallback(async (id) => {
-    if (!id) return;
-    const requestId = ++projectRequest.current;
-    // Clear the previous project before fetching so its video/job cannot be
-    // mistaken for the project the creator just selected.
-    setProject(null);
-    setJob(null);
-    setSelected(new Set());
-    const [value, latest] = await Promise.all([
-      api(`/api/projects/${id}`),
-      api(`/api/projects/${id}/jobs/latest`),
-    ]);
-    if (requestId !== projectRequest.current) return;
-    setProject(value);
-    setPlanningError(
-      value.status === "failed" && !value.shots?.length
-        ? "上次构思未完成。项目草稿已保留，可以直接重新构思。"
-        : "",
-    );
-    setPrompt(value.brief.prompt);
-    setTitle(value.brief.title);
-    setDuration(value.brief.duration_seconds);
-    setAspect(value.brief.aspect_ratio);
-    setQuality(value.brief.quality);
-    setContinuationMode(value.brief.continuation_mode || "fast");
-    setStyle(value.brief.style_preset || "cinematic");
-    const loadedStyle = [...stylePresets, ...customStyles].find(
-      (item) => item.id === (value.brief.style_preset || "cinematic"),
-    );
-    setStyleName(value.brief.style || loadedStyle?.label || "电影写实");
-    setStyleInstructions(
-      value.brief.style_instructions || loadedStyle?.instructions || "",
-    );
-    setSelected(new Set(value.brief.reference_asset_ids || []));
-    setJob(latest);
-  }, []);
+  const loadProject = useCallback(
+    async (id) => {
+      if (!id) return;
+      const requestId = ++projectRequest.current;
+      // Clear the previous project before fetching so its video/job cannot be
+      // mistaken for the project the creator just selected.
+      setProject(null);
+      setJob(null);
+      setSelected(new Set());
+      const [value, latest] = await Promise.all([
+        api(`/api/projects/${id}`),
+        api(`/api/projects/${id}/jobs/latest`),
+      ]);
+      if (requestId !== projectRequest.current) return;
+      setProject(value);
+      setPlanningError(
+        value.status === "failed" && !value.shots?.length
+          ? "上次构思未完成。项目草稿已保留，可以直接重新构思。"
+          : "",
+      );
+      setPrompt(value.brief.prompt);
+      setTitle(value.brief.title);
+      setDuration(value.brief.duration_seconds);
+      setAspect(value.brief.aspect_ratio);
+      setQuality(value.brief.quality);
+      setContinuationMode(value.brief.continuation_mode || "fast");
+      setStyle(value.brief.style_preset || "cinematic");
+      const loadedStyle = [...styleRegistryRef.current, ...customStyles].find(
+        (item) => item.id === (value.brief.style_preset || "cinematic"),
+      );
+      setStyleName(value.brief.style || loadedStyle?.label || "电影写实");
+      setStyleInstructions(
+        value.brief.style_instructions || loadedStyle?.instructions || "",
+      );
+      setSelected(new Set(value.brief.reference_asset_ids || []));
+      setJob(latest);
+    },
+    [customStyles],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -388,6 +411,7 @@ function App() {
         const [, availableProjects] = await Promise.all([
           loadAssets(),
           loadProjects(),
+          loadStylePresets(),
           loadHealth(),
         ]);
         if (!cancelled && availableProjects.length)
@@ -400,7 +424,7 @@ function App() {
       cancelled = true;
       projectRequest.current += 1;
     };
-  }, [loadAssets, loadProjects, loadHealth, loadProject]);
+  }, [loadAssets, loadProjects, loadStylePresets, loadHealth, loadProject]);
 
   useEffect(() => {
     const projectId = project?.id;
@@ -717,12 +741,61 @@ function App() {
       ...shot,
       reference_asset_ids: [...(shot.reference_asset_ids || [])],
       duration_seconds: shot.duration_seconds,
+      anchor_prompt: shot.anchor_prompt || "",
+      audio_prompt: shot.audio_prompt || "",
+      music_prompt: shot.music_prompt || "",
+      dialogue: (shot.dialogue || []).map((line) => ({ ...line })),
+      opening_state: shot.opening_state || "",
+      ending_state: shot.ending_state || "",
+      continuity_handoff: shot.continuity_handoff || "",
+      reference_anchors: [...(shot.reference_anchors || [])],
+      hook: shot.hook || "",
+      visual_beats: (shot.visual_beats || []).map((beat) => ({ ...beat })),
       subtitle_text: shot.subtitle_text || "",
     });
   };
 
   const updateShotDraft = (key, value) =>
     setShotDraft((current) => ({ ...current, [key]: value }));
+
+  const addDialogueLine = () =>
+    setShotDraft((current) => ({
+      ...current,
+      dialogue: [
+        ...(current.dialogue || []),
+        {
+          speaker: "",
+          text: "",
+          language: "Chinese",
+          delivery: "自然",
+          mode: "on_screen",
+          start_seconds: null,
+          end_seconds: null,
+        },
+      ],
+    }));
+
+  const updateDialogueLine = (index, key, value) =>
+    setShotDraft((current) => ({
+      ...current,
+      dialogue: current.dialogue.map((line, lineIndex) =>
+        lineIndex === index ? { ...line, [key]: value } : line,
+      ),
+    }));
+
+  const removeDialogueLine = (index) =>
+    setShotDraft((current) => ({
+      ...current,
+      dialogue: current.dialogue.filter((_, lineIndex) => lineIndex !== index),
+    }));
+
+  const updateVisualBeat = (index, key, value) =>
+    setShotDraft((current) => ({
+      ...current,
+      visual_beats: current.visual_beats.map((beat, beatIndex) =>
+        beatIndex === index ? { ...beat, [key]: value } : beat,
+      ),
+    }));
 
   const updateShotTask = (value) =>
     setShotDraft((current) => {
@@ -760,7 +833,40 @@ function App() {
             duration_seconds: Number(shotDraft.duration_seconds),
             task: shotDraft.task,
             continuation_mode: shotDraft.continuation_mode || null,
+            anchor_prompt: shotDraft.anchor_prompt,
             prompt: shotDraft.prompt,
+            audio_prompt: shotDraft.audio_prompt,
+            music_prompt: shotDraft.music_prompt,
+            dialogue: (shotDraft.dialogue || []).map((line) => ({
+              speaker: line.speaker.trim(),
+              text: line.text.trim(),
+              language: (line.language || "Chinese").trim(),
+              delivery: (line.delivery || "自然").trim(),
+              mode: line.mode || "on_screen",
+              start_seconds:
+                line.start_seconds === "" || line.start_seconds == null
+                  ? null
+                  : Number(line.start_seconds),
+              end_seconds:
+                line.end_seconds === "" || line.end_seconds == null
+                  ? null
+                  : Number(line.end_seconds),
+            })),
+            opening_state: shotDraft.opening_state,
+            ending_state: shotDraft.ending_state,
+            continuity_handoff: shotDraft.continuity_handoff,
+            reference_anchors: shotDraft.reference_anchors
+              .map((value) => value.trim())
+              .filter(Boolean),
+            hook: shotDraft.hook,
+            visual_beats: (shotDraft.visual_beats || []).map((beat) => ({
+              start_seconds: Number(beat.start_seconds),
+              end_seconds: Number(beat.end_seconds),
+              visual_action: beat.visual_action.trim(),
+              state_change: beat.state_change.trim(),
+              camera: beat.camera.trim(),
+              sound: beat.sound.trim(),
+            })),
             negative_prompt: shotDraft.negative_prompt,
             subtitle_text: shotDraft.subtitle_text || null,
             camera: shotDraft.camera,
@@ -1081,7 +1187,7 @@ function App() {
                   value={duration}
                   onChange={(event) => setDuration(event.target.value)}
                 >
-                  <option value="15">15 秒</option>
+                  <option value="14">14 秒（安全上限）</option>
                   <option value="30">30 秒</option>
                   <option value="60">1 分钟</option>
                   <option value="120">2 分钟</option>
@@ -1733,28 +1839,36 @@ function App() {
                     />
                   </label>
                   <label className="dialog-field">
-                    <span>画面提示词</span>
+                    <span>首帧构图 Prompt · 仅零秒静态画面</span>
                     <textarea
                       rows="7"
+                      maxLength={1000}
+                      value={shotDraft.anchor_prompt}
+                      onChange={(event) =>
+                        updateShotDraft("anchor_prompt", event.target.value)
+                      }
+                      placeholder="人物、场景、服装、位置关系、表情、构图、光线；不要写动作过程、镜头运动、对白或音效。"
+                    />
+                    <small>
+                      {shotDraft.start_frame_asset_id
+                        ? "已指定首帧素材，本 Prompt 会保留但不会调用 Image Edit。"
+                        : `由 Planner 生成并直接发送给 Image Edit；需完整绑定参考图，最多 1000 字符（当前 ${shotDraft.anchor_prompt.length}/1000），并以 Qwen 模板后的文本 tokens ≤ 1000 为最终门禁。`}
+                    </small>
+                  </label>
+                  <label className="dialog-field">
+                    <span>视频画面与动作 Prompt · 非对白</span>
+                    <textarea
+                      rows="8"
                       value={shotDraft.prompt}
                       onChange={(event) =>
                         updateShotDraft("prompt", event.target.value)
                       }
+                      placeholder="描述主体、环境、动作发展、表演、构图和镜头运动；不要把台词写在这里。"
                     />
+                    <small>
+                      这部分会被明确标记为非语音指令，角色不会朗读。
+                    </small>
                   </label>
-                  {shotDraft.anchor_prompt ? (
-                    <label className="dialog-field">
-                      <span>实际执行的首帧 Prompt</span>
-                      <textarea
-                        rows="7"
-                        value={shotDraft.anchor_prompt}
-                        readOnly
-                      />
-                      <small>
-                        仅在该镜头通过 Image Edit 生成新首帧时显示。
-                      </small>
-                    </label>
-                  ) : null}
                   <label className="dialog-field">
                     <span>负面提示词</span>
                     <textarea
@@ -1783,7 +1897,7 @@ function App() {
                       <input
                         type="number"
                         min="4"
-                        max="15"
+                        max="14"
                         step="0.5"
                         value={shotDraft.duration_seconds}
                         onChange={(event) =>
@@ -1804,6 +1918,381 @@ function App() {
                       }
                     />
                   </label>
+                  <section className="shot-prompt-section h3-storyboard-editor">
+                    <div className="shot-prompt-section-head">
+                      <div>
+                        <strong>H3 分镜时间线</strong>
+                        <small>
+                          Agent 生成的可观测状态、连续性与逐拍动作会直接编译进
+                          H3 Prompt。
+                        </small>
+                      </div>
+                    </div>
+                    <label className="dialog-field">
+                      <span>开场状态 · 第一帧可见事实</span>
+                      <textarea
+                        required
+                        rows="3"
+                        value={shotDraft.opening_state}
+                        onChange={(event) =>
+                          updateShotDraft("opening_state", event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>收尾状态 · 最后一帧可见事实</span>
+                      <textarea
+                        required
+                        rows="3"
+                        value={shotDraft.ending_state}
+                        onChange={(event) =>
+                          updateShotDraft("ending_state", event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>跨镜连续性 Handoff</span>
+                      <textarea
+                        required
+                        rows="3"
+                        value={shotDraft.continuity_handoff}
+                        onChange={(event) =>
+                          updateShotDraft(
+                            "continuity_handoff",
+                            event.target.value,
+                          )
+                        }
+                        placeholder="身份、服装、道具、空间、运动方向、光线、机位与环境声。"
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>本镜 Hook · 单一注意力焦点</span>
+                      <textarea
+                        required
+                        rows="2"
+                        value={shotDraft.hook}
+                        onChange={(event) =>
+                          updateShotDraft("hook", event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>语义参考锚点 · 每行一个</span>
+                      <textarea
+                        required
+                        rows="3"
+                        value={(shotDraft.reference_anchors || []).join("\n")}
+                        onChange={(event) =>
+                          updateShotDraft(
+                            "reference_anchors",
+                            event.target.value.split("\n"),
+                          )
+                        }
+                        placeholder="Character identity: …\nScene geography: …\nProp identity: …"
+                      />
+                    </label>
+                    <div className="h3-beat-list">
+                      {(shotDraft.visual_beats || []).map((beat, index) => (
+                        <div
+                          className="dialogue-line-card h3-beat-card"
+                          key={`beat-${index}`}
+                        >
+                          <div className="dialogue-line-title">
+                            <span>
+                              BEAT {String(index + 1).padStart(2, "0")}
+                            </span>
+                            <small>
+                              {Number(beat.start_seconds).toFixed(1)}s–
+                              {Number(beat.end_seconds).toFixed(1)}s
+                            </small>
+                          </div>
+                          <div className="dialog-field-row">
+                            <label className="dialog-field">
+                              <span>开始秒数</span>
+                              <input
+                                required
+                                type="number"
+                                min="0"
+                                step="0.1"
+                                value={beat.start_seconds}
+                                onChange={(event) =>
+                                  updateVisualBeat(
+                                    index,
+                                    "start_seconds",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </label>
+                            <label className="dialog-field">
+                              <span>结束秒数</span>
+                              <input
+                                required
+                                type="number"
+                                min="0.1"
+                                max={shotDraft.duration_seconds}
+                                step="0.1"
+                                value={beat.end_seconds}
+                                onChange={(event) =>
+                                  updateVisualBeat(
+                                    index,
+                                    "end_seconds",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </label>
+                          </div>
+                          <label className="dialog-field">
+                            <span>唯一主动作</span>
+                            <textarea
+                              required
+                              rows="2"
+                              value={beat.visual_action}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "visual_action",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>状态变化</span>
+                            <textarea
+                              rows="2"
+                              value={beat.state_change}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "state_change",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>镜头运动 · 类型 / 幅度 / 速度</span>
+                            <input
+                              value={beat.camera}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "camera",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>与动作同步的声音</span>
+                            <input
+                              value={beat.sound}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "sound",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                  <section className="shot-prompt-section">
+                    <div className="shot-prompt-section-head">
+                      <div>
+                        <strong>声音设计</strong>
+                        <small>
+                          环境声、画内音效与观众听到的配乐分开描述。
+                        </small>
+                      </div>
+                    </div>
+                    <label className="dialog-field">
+                      <span>环境声与动作音效 · 角色可听</span>
+                      <textarea
+                        rows="4"
+                        value={shotDraft.audio_prompt}
+                        onChange={(event) =>
+                          updateShotDraft("audio_prompt", event.target.value)
+                        }
+                        placeholder="环境底噪、脚步、衣物、风声、物体碰撞等；不要写对白。"
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>非画内配乐 · 仅观众可听</span>
+                      <textarea
+                        rows="3"
+                        value={shotDraft.music_prompt}
+                        onChange={(event) =>
+                          updateShotDraft("music_prompt", event.target.value)
+                        }
+                        placeholder="留空表示无配乐。"
+                      />
+                    </label>
+                  </section>
+                  <section className="shot-prompt-section dialogue-editor">
+                    <div className="shot-prompt-section-head">
+                      <div>
+                        <strong>角色对白</strong>
+                        <small>
+                          只有这里的原文会被角色说出来；留空即强制无对白、无旁白。
+                        </small>
+                      </div>
+                      <button type="button" onClick={addDialogueLine}>
+                        <Plus size={13} /> 添加对白
+                      </button>
+                    </div>
+                    {(shotDraft.dialogue || []).length ? (
+                      shotDraft.dialogue.map((line, index) => (
+                        <div
+                          className="dialogue-line-card"
+                          key={`dialogue-${index}`}
+                        >
+                          <div className="dialogue-line-title">
+                            <span>
+                              对白 {String(index + 1).padStart(2, "0")}
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`删除对白 ${index + 1}`}
+                              onClick={() => removeDialogueLine(index)}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                          <div className="dialog-field-row">
+                            <label className="dialog-field">
+                              <span>说话人</span>
+                              <input
+                                required
+                                value={line.speaker}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "speaker",
+                                    event.target.value,
+                                  )
+                                }
+                                placeholder="角色名"
+                              />
+                            </label>
+                            <label className="dialog-field">
+                              <span>语言</span>
+                              <input
+                                required
+                                value={line.language}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "language",
+                                    event.target.value,
+                                  )
+                                }
+                                placeholder="Chinese"
+                              />
+                            </label>
+                          </div>
+                          <label className="dialog-field">
+                            <span>准确原文 · 不要写角色名或动作</span>
+                            <textarea
+                              required
+                              rows="3"
+                              value={line.text}
+                              onChange={(event) =>
+                                updateDialogueLine(
+                                  index,
+                                  "text",
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="只填写需要被说出的原句。"
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>说话方式</span>
+                            <input
+                              required
+                              value={line.delivery}
+                              onChange={(event) =>
+                                updateDialogueLine(
+                                  index,
+                                  "delivery",
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="克制、兴奋、低声警惕……"
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>声音来源</span>
+                            <select
+                              value={line.mode || "on_screen"}
+                              onChange={(event) =>
+                                updateDialogueLine(
+                                  index,
+                                  "mode",
+                                  event.target.value,
+                                )
+                              }
+                            >
+                              <option value="on_screen">
+                                画内角色说话 · 对口型
+                              </option>
+                              <option value="off_screen">
+                                画外角色说话 · 画内人物闭嘴
+                              </option>
+                              <option value="voice_over">
+                                旁白 / 内心声 · 画内人物闭嘴
+                              </option>
+                            </select>
+                          </label>
+                          <div className="dialog-field-row">
+                            <label className="dialog-field">
+                              <span>开始秒数（可选）</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.1"
+                                value={line.start_seconds ?? ""}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "start_seconds",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </label>
+                            <label className="dialog-field">
+                              <span>结束秒数（可选）</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max={shotDraft.duration_seconds}
+                                step="0.1"
+                                value={line.end_seconds ?? ""}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "end_seconds",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="dialogue-empty">
+                        本镜头无对白，H3 将被明确要求保持无语音。
+                      </div>
+                    )}
+                  </section>
                   <div className="dialog-field-row">
                     <label className="dialog-field">
                       <span>Steps</span>

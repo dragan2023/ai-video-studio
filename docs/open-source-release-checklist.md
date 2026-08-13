@@ -31,9 +31,9 @@
       copyright holder and year;
 - [x] choose the canonical GitHub owner and repository name;
 - [x] replace placeholder repository URLs when known;
-- [x] publish the React shell as the Docker default and retain the vanilla
-      source-install fallback;
-- [ ] add screenshots or a short demo video with permission to redistribute;
+- [x] publish the React shell as the only supported UI and fail fast when its
+      build is missing;
+- [x] add a redistributable workspace screenshot to the README;
 - [ ] document the exact public model/API examples that can be reproduced;
 - [x] run a direct dependency/license scan for Python and web packages;
 - [ ] run a transitive SBOM/license scan in the publication CI environment;

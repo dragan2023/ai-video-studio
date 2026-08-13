@@ -5,12 +5,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import httpx
+import pytest
 
 from long_video_studio.adapters.image_edit import (
     ImageEditReference,
     ImageEditRequest,
     OpenAICompatibleImageEditProvider,
-    build_first_frame_prompt,
     build_reference_manifest,
     known_multi_image_support,
     provider_from_settings,
@@ -38,36 +38,6 @@ def test_reference_manifest_preserves_roles_and_order(tmp_path: Path):
     assert "role=location" in manifest
     assert "role=character" in manifest
     assert "red coat, woman" in manifest
-
-
-def test_first_frame_prompt_binds_named_references_and_single_instant(tmp_path: Path):
-    refs = (
-        ImageEditReference(
-            tmp_path / "palace.png",
-            "太和殿",
-            "location",
-            ("宫殿",),
-            "宽阔的宫殿广场和金色屋顶",
-        ),
-        ImageEditReference(tmp_path / "bai-lu.png", "白鹿", "character", ("角色",)),
-        ImageEditReference(tmp_path / "meng-zi-yi.png", "孟子义", "character", ("角色",)),
-    )
-
-    prompt = build_first_frame_prompt(
-        refs,
-        "两位角色在宫殿前克制地对话，镜头从中远景开始。",
-        "16:9",
-    )
-
-    assert "太和殿" in prompt
-    assert "白鹿" in prompt
-    assert "孟子义" in prompt
-    assert "宽阔的宫殿广场和金色屋顶" in prompt
-    assert "场景/背景" in prompt
-    assert "角色身份" in prompt
-    assert "一个明确的时间瞬间" in prompt
-    assert "仅按序号称呼参考图" in prompt
-    assert "不能按名字的字面含义改画成动物" in prompt
 
 
 def test_openai_compatible_provider_sends_multimodal_manifest_and_writes_image(tmp_path: Path):
@@ -179,6 +149,47 @@ def test_vllm_omni_images_edits_protocol_sends_all_reference_files(tmp_path: Pat
     assert b"meng-zi-yi.png" in body
     assert result == output
     assert output.read_bytes() == EDITED
+
+
+def test_image_edit_rejects_prompt_over_character_preflight(tmp_path: Path):
+    image = tmp_path / "image.png"
+    image.write_bytes(PNG)
+    provider = OpenAICompatibleImageEditProvider(
+        "http://image-edit.test",
+        "Qwen-Image-Edit-2511",
+        protocol="images-edits",
+        transport=httpx.MockTransport(lambda _request: httpx.Response(500)),
+    )
+    request = ImageEditRequest(
+        prompt="图" * 1001,
+        references=(ImageEditReference(image, "scene", "location"),),
+        output_path=tmp_path / "output.png",
+    )
+
+    with pytest.raises(ValueError, match="1000-character"):
+        asyncio.run(provider.edit(request))
+
+
+def test_image_edit_uses_exact_qwen_token_budget(tmp_path: Path):
+    image = tmp_path / "image.png"
+    image.write_bytes(PNG)
+    provider = OpenAICompatibleImageEditProvider(
+        "http://image-edit.test",
+        "Qwen-Image-Edit-2511",
+        protocol="images-edits",
+        tokenizer_path=tmp_path,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(500)),
+    )
+    request = ImageEditRequest(
+        prompt="word" * 200,
+        references=(ImageEditReference(image, "scene", "location"),),
+        output_path=tmp_path / "output.png",
+    )
+
+    encoded = type("Encoded", (), {"ids": [1] * 1001})()
+    provider._tokenizer = type("FakeTokenizer", (), {"encode": lambda self, *_args, **_kwargs: encoded})()
+    with pytest.raises(ValueError, match="1001 Qwen text tokens"):
+        provider._validate_prompt_budget(request)
 
 
 def test_provider_enforces_reference_cap(tmp_path: Path):

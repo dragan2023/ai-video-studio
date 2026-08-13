@@ -1499,10 +1499,92 @@ select {
   border-color: rgba(255, 153, 15, 0.65);
   box-shadow: 0 0 0 3px rgba(255, 153, 15, 0.1);
 }
+.dialog-field small {
+  display: block;
+  margin-top: 6px;
+  color: #686b65;
+  font-size: 9px;
+  line-height: 1.55;
+}
 .dialog-field-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 9px;
+}
+.shot-prompt-section {
+  margin: 4px 0 16px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.16);
+}
+.shot-prompt-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 13px;
+}
+.shot-prompt-section-head strong {
+  display: block;
+  color: #e9e1d3;
+  font-size: 11px;
+}
+.shot-prompt-section-head small {
+  display: block;
+  max-width: 410px;
+  margin-top: 4px;
+  color: #747770;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.shot-prompt-section-head > button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 153, 15, 0.38);
+  border-radius: 7px;
+  color: #ffd38d;
+  background: rgba(255, 153, 15, 0.08);
+  font-size: 9px;
+}
+.dialogue-line-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 196, 103, 0.14);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.dialogue-line-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: #a9aa9f;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+}
+.dialogue-line-title button {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 99, 99, 0.25);
+  border-radius: 7px;
+  color: #d97979;
+  background: rgba(108, 18, 18, 0.12);
+}
+.dialogue-empty {
+  padding: 13px;
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #6f726c;
+  font-size: 9px;
+  line-height: 1.55;
+  text-align: center;
 }
 .shot-reference-picker {
   margin-top: 6px;

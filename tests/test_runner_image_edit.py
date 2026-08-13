@@ -61,6 +61,10 @@ def test_missing_first_frame_generates_anchor_from_ordered_scene_and_character_r
         title="Arrival",
         purpose="Introduce the hero",
         prompt="The hero steps into the rainy old town.",
+        anchor_prompt=(
+            "A single cinematic opening still in the rainy old town: Bai Lu stands in the foreground, "
+            "wearing the referenced red coat, with the Old Town architecture clearly visible behind her."
+        ),
         negative_prompt="text, logo, watermark",
         duration_seconds=4,
         task=ShotTask.FL2VA,
@@ -92,11 +96,7 @@ def test_missing_first_frame_generates_anchor_from_ordered_scene_and_character_r
         "Bai Lu",
     ]
     assert "red coat" in provider.request.references[1].tags
-    assert "Old Town" in provider.request.prompt
-    assert "Bai Lu" in provider.request.prompt
-    assert "scene/background" in provider.request.prompt
-    assert "character identity" in provider.request.prompt
-    assert "仅按序号称呼参考图" in provider.request.prompt
+    assert provider.request.prompt == shot.anchor_prompt
     assert (provider.request.width, provider.request.height) == (1280, 720)
     assert provider.request.negative_prompt == "text, logo, watermark"
     assert provider.request.extra_body == {
@@ -106,7 +106,38 @@ def test_missing_first_frame_generates_anchor_from_ordered_scene_and_character_r
     }
     persisted = repository.get_project(project.id)
     assert persisted.shots[0].anchor_frame_path == str(anchor)
-    assert persisted.shots[0].anchor_prompt == provider.request.prompt
+    assert persisted.shots[0].anchor_prompt == shot.anchor_prompt
+
+
+def test_missing_planner_anchor_fails_closed(settings):
+    configured = replace(settings, image_edit_anchor_mode="first-shot")
+    repository = StudioRepository(configured.database_path)
+    shot = ShotSpec(
+        index=0,
+        title="Missing anchor",
+        purpose="Prove validation",
+        prompt="The actor enters the room.",
+        duration_seconds=4,
+        task=ShotTask.FL2VA,
+    )
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="An entrance."),
+            world_bible=WorldBible(logline="Entrance", visual_style="cinematic"),
+            shots=[shot],
+        )
+    )
+    manager = RenderManager(configured, repository)
+    manager.image_edit_provider = FakeImageEditProvider()
+    output_dir = configured.output_dir / project.id
+    output_dir.mkdir(parents=True)
+
+    try:
+        asyncio.run(manager._maybe_make_anchor(project, shot, 0, {}, output_dir))
+    except RuntimeError as exc:
+        assert "planner-authored anchor_prompt" in str(exc)
+    else:
+        raise AssertionError("missing planner anchor must fail closed")
 
 
 def test_explicit_start_frame_bypasses_image_edit(settings):

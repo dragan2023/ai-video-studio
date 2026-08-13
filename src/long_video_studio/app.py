@@ -25,11 +25,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.render_manager = RenderManager(resolved, services.repository)
     app.include_router(create_api_router())
 
-    static_dir = (
-        Path(resolved.web_root).expanduser().resolve()
-        if resolved.web_root
-        else Path(__file__).resolve().parent / "static"
-    )
+    if not resolved.web_root:
+        raise RuntimeError(
+            "STUDIO_WEB_ROOT is required. Build the React UI with "
+            "`npm --prefix web run build` and point STUDIO_WEB_ROOT at web/dist."
+        )
+    static_dir = Path(resolved.web_root).expanduser().resolve()
+    index_path = static_dir / "index.html"
+    if not index_path.is_file():
+        raise RuntimeError(f"React UI build is missing index.html under STUDIO_WEB_ROOT: {static_dir}")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
     assets_dir = static_dir / "assets"
     if assets_dir.is_dir():
@@ -37,6 +41,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
+        return FileResponse(index_path)
 
     return app

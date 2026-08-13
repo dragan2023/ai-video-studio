@@ -5,6 +5,7 @@ services:
       - "7860:7860"
     environment:
       STUDIO_DATA_DIR: /var/lib/nautilus
+      STUDIO_WEB_ROOT: /app/web
       STUDIO_IMPORT_ROOTS: /media
       STUDIO_PLANNER_BASE_URL: ${STUDIO_PLANNER_BASE_URL:-}
       STUDIO_PLANNER_MODEL: ${STUDIO_PLANNER_MODEL:-}

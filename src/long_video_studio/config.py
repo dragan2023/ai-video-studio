@@ -83,6 +83,7 @@ class Settings:
     image_edit_steps: int = 40
     image_edit_true_cfg_scale: float = 4.0
     image_edit_guidance_scale: float = 1.0
+    image_edit_tokenizer_path: Path | None = None
     render_estimate_scale: float = 1.0
     web_root: str | None = None
 
@@ -130,6 +131,11 @@ class Settings:
             image_edit_steps=int(os.getenv("STUDIO_IMAGE_EDIT_STEPS", "40")),
             image_edit_true_cfg_scale=float(os.getenv("STUDIO_IMAGE_EDIT_TRUE_CFG_SCALE", "4.0")),
             image_edit_guidance_scale=float(os.getenv("STUDIO_IMAGE_EDIT_GUIDANCE_SCALE", "1.0")),
+            image_edit_tokenizer_path=(
+                Path(os.environ["STUDIO_IMAGE_EDIT_TOKENIZER_PATH"]).expanduser().resolve()
+                if os.getenv("STUDIO_IMAGE_EDIT_TOKENIZER_PATH")
+                else None
+            ),
             render_estimate_scale=max(
                 0.1,
                 float(os.getenv("STUDIO_RENDER_ESTIMATE_SCALE", "1.0")),

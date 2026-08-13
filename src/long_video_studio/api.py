@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from long_video_studio.adapters.h3 import H3Client
 from long_video_studio.domain import (
@@ -16,6 +16,7 @@ from long_video_studio.domain import (
     AssetUpdate,
     AssetView,
     ContinuationMode,
+    DialogueLine,
     ExecutionPlan,
     FilmProject,
     ProjectBrief,
@@ -23,6 +24,7 @@ from long_video_studio.domain import (
     ShotSpec,
     ShotStatus,
     ShotTask,
+    StoryboardBeat,
     WorldBible,
     effective_video_task,
     utc_now,
@@ -30,6 +32,7 @@ from long_video_studio.domain import (
 from long_video_studio.planner import PlannerError
 from long_video_studio.runner import RenderManager
 from long_video_studio.services import StudioServices
+from long_video_studio.style_registry import public_style_contracts
 
 
 class ImportPathRequest(BaseModel):
@@ -43,9 +46,19 @@ class ImportPathRequest(BaseModel):
 class ShotUpdate(BaseModel):
     title: str | None = None
     purpose: str | None = None
-    duration_seconds: float | None = Field(default=None, ge=4, le=15)
+    duration_seconds: float | None = Field(default=None, ge=4, le=14)
     task: ShotTask | None = None
     prompt: str | None = None
+    anchor_prompt: str | None = None
+    audio_prompt: str | None = None
+    music_prompt: str | None = None
+    dialogue: list[DialogueLine] | None = None
+    opening_state: str | None = None
+    ending_state: str | None = None
+    continuity_handoff: str | None = None
+    reference_anchors: list[str] | None = None
+    hook: str | None = None
+    visual_beats: list[StoryboardBeat] | None = None
     negative_prompt: str | None = None
     subtitle_text: str | None = None
     camera: str | None = None
@@ -145,6 +158,12 @@ def create_api_router() -> APIRouter:
     @router.get("/capabilities")
     def capabilities(request: Request):
         return _services(request).compiler.capabilities()
+
+    @router.get("/style-presets")
+    def style_presets() -> list[dict[str, object]]:
+        """Return the canonical directing contracts used by the planner."""
+
+        return public_style_contracts()
 
     @router.post("/assets/upload", response_model=list[AssetView])
     def upload_assets(
@@ -319,17 +338,52 @@ def create_api_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="project not found")
         for position, shot in enumerate(project.shots):
             if shot.id == shot_id:
-                project.shots[position] = ShotSpec.model_validate(
-                    {
-                        **shot.model_dump(),
-                        **payload.model_dump(exclude_unset=True),
-                        "status": ShotStatus.PLANNED,
-                        "selected_take_path": None,
-                        "anchor_frame_path": None,
-                        "anchor_prompt": None,
-                        "boundary_frame_path": None,
-                    }
-                )
+                try:
+                    updates = payload.model_dump(exclude_unset=True)
+                    new_duration = updates.get("duration_seconds")
+                    if new_duration is not None and new_duration != shot.duration_seconds:
+                        ratio = new_duration / shot.duration_seconds
+                        if "dialogue" not in updates:
+                            updates["dialogue"] = [
+                                line.model_copy(
+                                    update={
+                                        "start_seconds": round(line.start_seconds * ratio, 3),
+                                        "end_seconds": (
+                                            round(line.end_seconds * ratio, 3) if line.end_seconds is not None else None
+                                        ),
+                                    }
+                                )
+                                for line in shot.dialogue
+                            ]
+                        updates["visual_beats"] = [
+                            beat.model_copy(
+                                update={
+                                    "start_seconds": round(beat.start_seconds * ratio, 3),
+                                    "end_seconds": round(beat.end_seconds * ratio, 3),
+                                }
+                            )
+                            for beat in shot.visual_beats
+                        ]
+                    project.shots[position] = ShotSpec.model_validate(
+                        {
+                            **shot.model_dump(),
+                            **updates,
+                            "status": ShotStatus.PLANNED,
+                            "selected_take_path": None,
+                            "anchor_frame_path": None,
+                            "boundary_frame_path": None,
+                        }
+                    )
+                except ValidationError as exc:
+                    detail = [
+                        {
+                            "type": error["type"],
+                            "loc": error["loc"],
+                            "msg": error["msg"],
+                        }
+                        for error in exc.errors(include_url=False)
+                    ]
+                    raise HTTPException(status_code=422, detail=detail) from exc
                 project = FilmProject.model_validate(project.model_dump(mode="python"))
                 project.status = "planned"
                 project.updated_at = utc_now()

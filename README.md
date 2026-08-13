@@ -63,6 +63,8 @@ Requirements:
 python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'
+npm --prefix web ci
+npm --prefix web run build
 cp .env.example .env
 set -a && . ./.env && set +a
 nautilus-studio --host 127.0.0.1 --port 7860
@@ -85,18 +87,21 @@ the public defaults remain the official Node and Python slim images.
 
 ## Creator UI
 
-The creator workspace lives in `web/` and is built into the Docker image. The
-small shell under `src/.../static` remains a source-install fallback when a web
-bundle has not been built:
+The creator workspace lives in `web/` and is the only supported UI. Build it
+before starting a source checkout and point `STUDIO_WEB_ROOT` at `web/dist`.
+The server fails fast when the React bundle is missing instead of silently
+falling back to a stale interface:
 
 ```bash
-cd web
-npm ci
-npm run dev -- --host 0.0.0.0 --port 5173
+npm --prefix web ci
+npm --prefix web run build
+export STUDIO_WEB_ROOT="$PWD/web/dist"
+nautilus-studio --host 0.0.0.0 --port 7860
 ```
 
-The development server proxies `/api` to a local Studio on port `7860` without
-changing the backend API contract.
+For frontend-only development, `npm --prefix web run dev -- --host 0.0.0.0
+--port 5173` proxies `/api` to a local Studio on port `7860` without changing
+the backend API contract.
 
 The direction, project bible, shot cards, and material metadata are edited in
 focused dialogs. The storyboard stays compact while full prompts and ordered
@@ -149,6 +154,7 @@ character, and prop references. It is optional and disabled by default.
 export STUDIO_IMAGE_EDIT_PROVIDER=vllm-omni
 export STUDIO_IMAGE_EDIT_BASE_URL=http://127.0.0.1:8093
 export STUDIO_IMAGE_EDIT_MODEL=Qwen/Qwen-Image-Edit-2511
+export STUDIO_IMAGE_EDIT_TOKENIZER_PATH=/models/Qwen-Image-Edit-2511/processor
 export STUDIO_IMAGE_EDIT_MAX_REFERENCES=4
 export STUDIO_IMAGE_EDIT_ANCHOR_MODE=scene-cuts
 ```
@@ -179,10 +185,10 @@ make check
 Or run the checks individually:
 
 ```bash
-ruff format --check src tests scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
-ruff check src tests scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
+ruff format --check src tests scripts/build-continuation-comparison.py scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
+ruff check src tests scripts/build-continuation-comparison.py scripts/probe-image-edit.py scripts/probe-h3-continuation.py scripts/verify-qwen-image-edit-checkpoint.py
 pytest -q
-cd web && npm ci && npm run build && npm audit --audit-level=high
+cd web && npm ci && npm run format && npm run build && npm audit --audit-level=high
 ```
 
 The test suite uses mock provider transports. Hardware claims require a real
@@ -249,12 +255,12 @@ GPU topology works across CUDA and MUSA.
 ```text
 src/long_video_studio/
   adapters/       provider and media integrations
-  static/         current creator UI
   api.py          FastAPI routes
   compiler.py     storyboard-to-execution compiler
   domain.py       provider-neutral Film IR
   planner.py      deterministic and agent planners
   runner.py       render orchestration
+web/              React creator UI and Vite build
 docs/             architecture and provider contracts
 scripts/          serving and probe helpers
 tests/            unit and integration tests

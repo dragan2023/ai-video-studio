@@ -12,7 +12,9 @@ from long_video_studio.assets import AssetService
 from long_video_studio.compiler import FilmCompiler
 from long_video_studio.domain import (
     AssetRole,
+    AssetUpdate,
     ContinuationMode,
+    DialogueLine,
     FilmProject,
     ProjectBrief,
     ShotSpec,
@@ -21,6 +23,7 @@ from long_video_studio.domain import (
 )
 from long_video_studio.planner import PlannerOutput, PlannerService
 from long_video_studio.repository import StudioRepository
+from long_video_studio.style_registry import STYLE_REGISTRY, get_style_contract, style_prompt
 
 
 def test_planner_builds_continuity_aware_film_ir(settings):
@@ -45,10 +48,97 @@ def test_planner_builds_continuity_aware_film_ir(settings):
     )
     assert len(project.shots) == 5
     assert sum(shot.duration_seconds for shot in project.shots) == 60
-    assert all(4 <= shot.duration_seconds <= 15 for shot in project.shots)
+    assert all(4 <= shot.duration_seconds <= 14 for shot in project.shots)
     assert project.shots[0].start_frame_asset_id == hero.id
     assert project.shots[1].continuity_from_shot_id == project.shots[0].id
+    assert all(shot.opening_state for shot in project.shots)
+    assert all(shot.ending_state for shot in project.shots)
+    assert all(shot.continuity_handoff for shot in project.shots)
+    assert all(shot.reference_anchors for shot in project.shots)
+    assert all(shot.hook for shot in project.shots)
+    assert all(shot.visual_beats for shot in project.shots)
+    assert all(
+        shot.visual_beats[0].start_seconds == 0 and shot.visual_beats[-1].end_seconds == shot.duration_seconds
+        for shot in project.shots
+    )
     assert len(project.timeline) == len(project.shots)
+
+
+def test_style_registry_has_a_complete_contract_for_each_planner_preset():
+    expected = {
+        "cinematic",
+        "documentary",
+        "music_video",
+        "commercial",
+        "noir",
+        "animation",
+        "retro",
+        "surreal",
+        "energetic",
+        "custom",
+    }
+    assert set(STYLE_REGISTRY) == expected
+    for contract in STYLE_REGISTRY.values():
+        rendered = contract.render()
+        assert contract.label in rendered
+        assert "Palette:" in rendered
+        assert "Lighting:" in rendered
+        assert "Lens and camera language:" in rendered
+        assert "Motion rhythm:" in rendered
+        assert "Global negative constraints:" in rendered
+        assert contract.negative_constraints
+
+
+def test_style_registry_falls_back_safely_and_honors_creator_override():
+    assert get_style_contract("noir").id == "noir"
+    assert get_style_contract("frontend-only").id == "cinematic"
+    rendered = style_prompt("noir", "No red neon; keep the palace geography readable.")
+    assert "neo-noir" in rendered
+    assert "No red neon" in rendered
+
+
+def test_heuristic_planner_projects_style_contract_into_world_bible_and_shots(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    project = planner._plan_heuristically(
+        ProjectBrief(prompt="A palace confrontation.", duration_seconds=15, style_preset="noir"),
+        [],
+    )
+    contract = STYLE_REGISTRY["noir"]
+    assert contract.palette in project.world_bible.visual_style
+    assert contract.lighting in project.shots[0].continuity_in.lighting
+    assert contract.compact() in project.shots[0].prompt
+    assert any("project premise" in anchor for anchor in project.shots[0].reference_anchors)
+    assert any(contract.medium in anchor for anchor in project.shots[0].reference_anchors)
+
+
+def test_llm_planner_prompt_contains_structured_style_contract(settings):
+    planner = PlannerService(
+        replace(
+            settings,
+            planner_base_url="http://planner.test/v1",
+            planner_model="test-model",
+            planner_allow_fallback=False,
+        ),
+        StudioRepository(settings.database_path),
+    )
+    brief = ProjectBrief(prompt="A noir palace mystery.", style_preset="noir", duration_seconds=15)
+    expected = planner._plan_heuristically(brief, [])
+    payload = PlannerOutput(world_bible=expected.world_bible, shots=expected.shots).model_dump_json()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        assert "Style DNA: 黑色电影" in system
+        assert "Global negative constraints:" in system
+        assert "Apply this contract to the world bible and every shot" in system
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": payload}}]},
+        )
+
+    planner._transport = httpx.MockTransport(handler)
+    output = asyncio.run(planner._plan_with_llm(brief, []))
+    assert output.shots
 
 
 def test_compiler_hides_unavailable_model_in_warnings(settings):
@@ -107,6 +197,7 @@ def _anchor_mode_project() -> FilmProject:
         duration_seconds=4,
         task=ShotTask.FL2VA,
         prompt="Establish the scene with the lead character.",
+        anchor_prompt="Opening still: the lead character stands in the established scene.",
         reference_asset_ids=["scene"],
     )
     continuous = ShotSpec(
@@ -135,6 +226,7 @@ def _anchor_mode_project() -> FilmProject:
         duration_seconds=4,
         task=ShotTask.FL2VA,
         prompt="Start the new scene with a clean visual anchor.",
+        anchor_prompt="Opening still: establish the new scene and subject arrangement.",
         reference_asset_ids=["scene"],
     )
     return FilmProject(
@@ -177,6 +269,14 @@ def test_compiler_image_edit_anchor_modes_apply_only_to_fl2va(settings, mode, ex
     assert all(stage.capability_id == "qwen-image-edit" for stage in keyframes)
     assert all(stage.inputs["anchor_mode"] == mode for stage in keyframes)
     assert not any(stage.shot_id == project.shots[2].id for stage in keyframes)
+
+
+def test_compiler_rejects_missing_planner_anchor(settings):
+    project = _anchor_mode_project()
+    project.shots[0].anchor_prompt = ""
+
+    with pytest.raises(ValueError, match="planner-authored anchor_prompt"):
+        FilmCompiler(_configured_image_edit(settings, "first-shot")).compile(project)
 
 
 def test_compiler_anchor_dependencies_follow_continuity_boundary(settings):
@@ -322,6 +422,11 @@ def test_planner_leaves_first_frame_empty_for_image_edit_references(settings):
 
     assert scene.id in project.shots[0].reference_asset_ids
     assert project.shots[0].start_frame_asset_id is None
+    assert project.shots[0].anchor_prompt
+    assert "single" in project.shots[0].anchor_prompt.lower() or "still" in project.shots[0].anchor_prompt.lower()
+    assert "dialogue" in project.shots[0].anchor_prompt.lower()
+    assert project.shots[0].dialogue == []
+    assert "No dialogue" in project.shots[0].audio_prompt
 
 
 def test_planner_preserves_explicit_start_frame_with_image_edit_configured(settings):
@@ -352,6 +457,7 @@ def test_planner_preserves_explicit_start_frame_with_image_edit_configured(setti
     )
 
     assert project.shots[0].start_frame_asset_id == start.id
+    assert project.shots[0].anchor_prompt == ""
 
 
 def test_responses_sse_planner_path_returns_structured_agent_output(settings):
@@ -394,6 +500,20 @@ def test_responses_sse_planner_path_returns_structured_agent_output(settings):
         assert body["text"]["format"]["type"] == "json_schema"
         assert "documentary" in body["input"][0]["content"][0]["text"]
         assert "honest room tone" in body["input"][0]["content"][0]["text"]
+        shot_schema = body["text"]["format"]["schema"]["$defs"]["ShotSpec"]
+        assert {
+            "opening_state",
+            "ending_state",
+            "continuity_handoff",
+            "reference_anchors",
+            "hook",
+            "visual_beats",
+        } <= set(shot_schema["required"])
+        assert shot_schema["properties"]["reference_anchors"]["minItems"] == 1
+        assert shot_schema["properties"]["visual_beats"]["minItems"] == 1
+        assert shot_schema["properties"]["continuity_handoff"]["minLength"] == 1
+        beat_schema = body["text"]["format"]["schema"]["$defs"]["StoryboardBeat"]
+        assert set(beat_schema["required"]) == set(beat_schema["properties"])
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse)
 
     planner._transport = httpx.MockTransport(handler)
@@ -401,7 +521,94 @@ def test_responses_sse_planner_path_returns_structured_agent_output(settings):
 
     assert len(output.shots) == len(expected.shots)
     assert output.shots[0].prompt == expected.shots[0].prompt
+    assert output.shots[0].audio_prompt == expected.shots[0].audio_prompt
+    assert output.shots[0].dialogue == expected.shots[0].dialogue
     assert all(shot.fps == 24 and shot.flow_shift == 12.0 for shot in output.shots)
+
+
+def test_agent_planner_rejects_storyboards_without_h3_timeline_contract(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(prompt="A palace confrontation.", duration_seconds=15)
+    project = planner._plan_heuristically(brief, [])
+    incomplete = project.shots[0].model_copy(
+        update={
+            "opening_state": "",
+            "ending_state": "",
+            "continuity_handoff": "",
+            "reference_anchors": [],
+            "hook": "",
+            "visual_beats": [],
+        }
+    )
+    with pytest.raises(ValueError, match="omitted H3 storyboard fields"):
+        planner._normalize_agent_output(
+            PlannerOutput(world_bible=project.world_bible, shots=[incomplete]),
+            brief,
+            [],
+        )
+
+
+def test_agent_planner_rejects_gapped_h3_timeline(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(prompt="A palace confrontation.", duration_seconds=15)
+    project = planner._plan_heuristically(brief, [])
+    shot = project.shots[0]
+    beats = list(shot.visual_beats)
+    beats[1] = beats[1].model_copy(update={"start_seconds": beats[1].start_seconds + 1})
+    gapped = shot.model_copy(update={"visual_beats": beats})
+    with pytest.raises(ValueError, match="timeline has a gap"):
+        planner._normalize_agent_output(
+            PlannerOutput(world_bible=project.world_bible, shots=[gapped]),
+            brief,
+            [],
+        )
+
+
+def test_agent_planner_limits_overlong_anchor_prompt_at_sentence_boundary(settings):
+    prompt = "A" * 900 + ". " + "B" * 200
+    limited = PlannerService._limit_anchor_prompt(prompt)
+    assert limited == "A" * 900 + "."
+    assert len(limited) <= 1000
+
+
+def test_agent_planner_rejects_non_english_h3_model_prose(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(prompt="A palace confrontation.", duration_seconds=15)
+    project = planner._plan_heuristically(brief, [])
+    invalid = project.shots[0].model_copy(update={"audio_prompt": "真实连续的环境声与动作声。"})
+    with pytest.raises(ValueError, match="non-English H3 model field"):
+        planner._normalize_agent_output(
+            PlannerOutput(world_bible=project.world_bible, shots=[invalid]),
+            brief,
+            [],
+        )
+
+
+def test_planner_parses_proxy_double_envelope_and_closes_duration(settings):
+    repository = StudioRepository(settings.database_path)
+    planner = PlannerService(settings, repository)
+    base = planner._plan_heuristically(ProjectBrief(prompt="A palace story.", duration_seconds=30), [])
+    shots = [shot.model_dump(mode="json") for shot in base.shots]
+    nested = {"world_bible": base.world_bible.model_dump(mode="json"), "shots": shots}
+    payload = {"world_bible": base.world_bible.model_dump(mode="json"), "shots": [*shots, nested]}
+
+    parsed = planner._parse_planner_payload(payload)
+    assert len(parsed.shots) == len(shots)
+    normalized = planner._normalize_agent_output(parsed, base.brief, [])
+    assert sum(shot.duration_seconds for shot in normalized.shots) == 30
+    assert all(4 <= shot.duration_seconds <= 14 for shot in normalized.shots)
+
+
+def test_planner_derives_missing_shot_indices_from_array_order(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    base = planner._plan_heuristically(ProjectBrief(prompt="A palace story.", duration_seconds=30), [])
+    payload = PlannerOutput(world_bible=base.world_bible, shots=base.shots).model_dump(mode="json")
+    for shot in payload["shots"]:
+        shot.pop("index")
+
+    parsed = planner._parse_planner_payload(payload)
+
+    assert [shot.index for shot in parsed.shots] == list(range(len(parsed.shots)))
 
 
 @pytest.mark.parametrize(
@@ -420,3 +627,77 @@ def test_responses_sse_planner_path_returns_structured_agent_output(settings):
 )
 def test_planner_strips_duration_and_reference_video_boilerplate(prompt, expected):
     assert PlannerService._clean_generation_prompt(prompt) == expected
+
+
+def test_planner_rejects_llm_output_without_required_anchor(settings):
+    configured = replace(
+        settings,
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://image-edit.test",
+        image_edit_model="Qwen/Qwen-Image-Edit-2511",
+    )
+    repository = StudioRepository(configured.database_path)
+    planner = PlannerService(configured, repository)
+    brief = ProjectBrief(prompt="A creator enters a workshop.", duration_seconds=15)
+    output = planner._plan_heuristically(brief, [])
+    output.shots[0].anchor_prompt = ""
+
+    with pytest.raises(ValueError, match="omitted anchor_prompt"):
+        planner._normalize_agent_output(output, brief, [])
+
+
+def test_planner_rejects_anchor_missing_ordered_asset_binding(settings):
+    configured = replace(
+        settings,
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://image-edit.test",
+        image_edit_model="Qwen-Image-Edit-2511",
+    )
+    repository = StudioRepository(configured.database_path)
+    asset = AssetService(configured, repository).ingest_stream(
+        png_bytes("green"),
+        "palace.png",
+        "image/png",
+        roles=[AssetRole.LOCATION],
+    )
+    asset = AssetService(configured, repository).update(
+        asset.id,
+        AssetUpdate(display_name="太和殿"),
+    )
+    planner = PlannerService(configured, repository)
+    brief = ProjectBrief(
+        prompt="宫殿中的开场。",
+        duration_seconds=15,
+        reference_asset_ids=[asset.id],
+    )
+    output = planner._plan_heuristically(brief, [asset])
+    output.shots[0].anchor_prompt = "太和殿中的一幅电影感开场静帧。"
+
+    with pytest.raises(ValueError, match="参考图1"):
+        planner._normalize_agent_output(output, brief, [asset])
+
+
+def test_compiler_snapshots_structured_storyboard_fields(settings):
+    project = _anchor_mode_project()
+    project.shots[0].audio_prompt = "Rain and footsteps."
+    project.shots[0].music_prompt = "A restrained string motif."
+    project.shots[0].dialogue = [DialogueLine(speaker="Lead", text="I am here.", language="English", delivery="quiet")]
+    plan = FilmCompiler(_configured_image_edit(settings, "first-shot")).compile(project)
+    stage = next(item for item in plan.stages if item.kind == "video" and item.shot_id == project.shots[0].id)
+
+    assert stage.inputs["anchor_prompt"] == project.shots[0].anchor_prompt
+    assert stage.inputs["audio_prompt"] == "Rain and footsteps."
+    assert stage.inputs["music_prompt"] == "A restrained string motif."
+    assert stage.inputs["dialogue"][0]["text"] == "I am here."
+
+
+def test_compiler_refuses_legacy_fifteen_second_shot(settings):
+    project = _anchor_mode_project()
+    project.shots[0].duration_seconds = 15
+    with pytest.raises(ValueError, match="safety ceiling is 14 seconds"):
+        FilmCompiler(settings).compile(project)
+
+
+def test_planner_structured_schema_caps_h3_shots_at_fourteen_seconds():
+    schema = PlannerService._planner_json_schema()
+    assert schema["$defs"]["ShotSpec"]["properties"]["duration_seconds"]["maximum"] == 14

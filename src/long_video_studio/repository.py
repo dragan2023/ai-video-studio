@@ -142,12 +142,39 @@ class StudioRepository:
     def get_project(self, project_id: str) -> FilmProject | None:
         with self._connect() as connection:
             row = connection.execute("SELECT payload FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return FilmProject.model_validate_json(row["payload"]) if row else None
+        return self._load_project(row["payload"]) if row else None
 
     def list_projects(self) -> list[FilmProject]:
         with self._connect() as connection:
             rows = connection.execute("SELECT payload FROM projects ORDER BY updated_at DESC").fetchall()
-        return [FilmProject.model_validate_json(row["payload"]) for row in rows]
+        return [self._load_project(row["payload"]) for row in rows]
+
+    @staticmethod
+    def _load_project(payload: str) -> FilmProject:
+        """Load legacy projects while keeping the new 14s write ceiling.
+
+        Existing projects may contain a historical 15s shot. They remain
+        readable for review; any edit/replan/render path validates the new
+        safe limit before sending a reference video to H3.
+        """
+
+        data = json.loads(payload)
+        for shot in data.get("shots", []):
+            if isinstance(shot, dict) and float(shot.get("duration_seconds", 0)) > 14:
+                shot["legacy_duration_seconds"] = shot["duration_seconds"]
+                shot["duration_seconds"] = 14.0
+                for line in shot.get("dialogue", []):
+                    if isinstance(line, dict):
+                        if line.get("start_seconds") is not None:
+                            line["start_seconds"] = min(float(line["start_seconds"]), 13.5)
+                        if line.get("end_seconds") is not None:
+                            line["end_seconds"] = min(float(line["end_seconds"]), 14.0)
+                            if line.get("start_seconds") is not None and line["end_seconds"] <= line["start_seconds"]:
+                                line["end_seconds"] = min(14.0, line["start_seconds"] + 0.5)
+                beats = shot.get("visual_beats") or []
+                if beats:
+                    beats[-1]["end_seconds"] = 14.0
+        return FilmProject.model_validate(data)
 
     def save_job(self, job: RenderJob) -> RenderJob:
         job.updated_at = utc_now()

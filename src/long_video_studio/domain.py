@@ -171,14 +171,74 @@ class ShotStatus(str, Enum):
     FAILED = "failed"
 
 
+class DialogueLine(BaseModel):
+    """One explicit spoken line.
+
+    Visual direction never belongs here. Keeping speech in a typed collection
+    lets model adapters render H3 dialogue tags without guessing from quotes or
+    narrative prose.
+    """
+
+    speaker: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    language: str = "Chinese"
+    delivery: str = "natural"
+    mode: Literal["on_screen", "off_screen", "voice_over"] = "on_screen"
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+
+    @field_validator("speaker", "text", "language", "delivery", mode="before")
+    @classmethod
+    def strip_dialogue_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> DialogueLine:
+        if self.start_seconds is not None and self.end_seconds is not None and self.end_seconds <= self.start_seconds:
+            raise ValueError("dialogue end_seconds must be greater than start_seconds")
+        return self
+
+
+class StoryboardBeat(BaseModel):
+    """One observable timeline beat in a model-facing storyboard shot."""
+
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    visual_action: str = Field(min_length=1)
+    state_change: str = ""
+    camera: str = ""
+    sound: str = ""
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> StoryboardBeat:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("storyboard beat end_seconds must be greater than start_seconds")
+        return self
+
+
 class ShotSpec(BaseModel):
     id: str = Field(default_factory=lambda: new_id("shot"))
     index: int = Field(ge=0)
     title: str
     purpose: str
+    # Keep a safety margin below H3's nominal 15s reference-video limit. The
+    # encoded/container duration can round up by a few frames (e.g. 15.083s).
+    # Legacy projects are normalized by the repository before validation.
     duration_seconds: float = Field(ge=4, le=15)
     task: ShotTask = ShotTask.FL2VA
-    prompt: str
+    prompt: str = Field(
+        min_length=1,
+        description="Visual-only scene, subject, action, lighting, composition, and camera direction.",
+    )
+    audio_prompt: str = ""
+    music_prompt: str = ""
+    dialogue: list[DialogueLine] = Field(default_factory=list)
+    opening_state: str = ""
+    ending_state: str = ""
+    continuity_handoff: str = ""
+    reference_anchors: list[str] = Field(default_factory=list)
+    hook: str = ""
+    visual_beats: list[StoryboardBeat] = Field(default_factory=list)
     negative_prompt: str = ""
     subtitle_text: str | None = None
     camera: str = "medium shot, stable cinematic camera"
@@ -196,13 +256,39 @@ class ShotSpec(BaseModel):
     status: ShotStatus = ShotStatus.PLANNED
     selected_take_path: str | None = None
     anchor_frame_path: str | None = None
-    anchor_prompt: str | None = None
+    anchor_prompt: str = Field(
+        default="",
+        description=(
+            "Complete, direct-to-image-edit opening-frame prompt. It must already bind each ordered reference "
+            "image by ordinal, display name, role, and visual contribution; runtime adapters do not expand it. "
+            "The planner normalizes agent output to Studio's 1000-character preflight before persistence."
+        ),
+    )
     boundary_frame_path: str | None = None
 
     @model_validator(mode="after")
     def validate_reference_contract(self) -> ShotSpec:
         if self.start_frame_asset_id and self.start_frame_asset_id not in self.reference_asset_ids:
             self.reference_asset_ids.insert(0, self.start_frame_asset_id)
+        return self
+
+    @field_validator("prompt", "audio_prompt", "music_prompt", "anchor_prompt", mode="before")
+    @classmethod
+    def strip_prompt_fields(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_prompt_separation(self) -> ShotSpec:
+        for value in (self.prompt, self.audio_prompt, self.music_prompt, self.anchor_prompt):
+            lowered = value.casefold()
+            if "<d>" in lowered or "</d>" in lowered:
+                raise ValueError("dialogue tags are only allowed in dialogue.text")
+        for line in self.dialogue:
+            if line.end_seconds is not None and line.end_seconds > self.duration_seconds:
+                raise ValueError("dialogue timing must fit within the shot duration")
+        for beat in self.visual_beats:
+            if beat.end_seconds > self.duration_seconds:
+                raise ValueError("storyboard beat timing must fit within the shot duration")
         return self
 
 

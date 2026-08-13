@@ -12,6 +12,9 @@ def settings(tmp_path: Path) -> Settings:
     data_dir = tmp_path / "data"
     import_root = tmp_path / "imports"
     import_root.mkdir()
+    web_root = tmp_path / "web"
+    web_root.mkdir()
+    (web_root / "index.html").write_text("<!doctype html><title>Nautilus test UI</title>", encoding="utf-8")
     value = Settings(
         data_dir=data_dir,
         database_path=data_dir / "studio.db",
@@ -32,6 +35,7 @@ def settings(tmp_path: Path) -> Settings:
         transition_seconds=0.12,
         ffmpeg_binary="ffmpeg",
         ffprobe_binary="ffprobe",
+        web_root=str(web_root),
     )
     value.ensure_directories()
     return value

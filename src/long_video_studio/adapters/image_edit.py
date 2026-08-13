@@ -49,32 +49,6 @@ class ImageEditRequest:
     extra_body: dict[str, object] | None = None
 
 
-# This is intentionally a prompt *template*, rather than a provider-specific
-# system message.  Different image-edit backends expose different wire
-# formats, but all of them need the same semantic contract for a video anchor:
-# one instant in time, explicit reference-to-role bindings, and no attempt to
-# render a sequence of actions.  The runner supplies the shot direction and
-# the ordered references; the transport then adds its own manifest.
-FIRST_FRAME_PROMPT_TEMPLATE = """请生成这个镜头唯一的、可直接作为视频首帧使用的画面。
-
-参考图语义绑定（不要仅按序号称呼参考图，必须按名称和用途理解每张图）：
-{reference_bindings}
-
-镜头上下文：
-{shot_direction}
-
-构图要求：
-- 只表现一个明确的时间瞬间，不要把一段动作画成连续帧或分镜拼贴。
-- 将场景/地点参考作为空间和背景依据，将角色参考作为身份依据，将道具参考作为物体依据；不要把不同参考图拼成独立画面。
-- 角色名称是人物身份标识，不能按名字的字面含义改画成动物、物体或其他主体。
-- 若描述明确为真人女性，画面中必须是对应的女性人物，禁止动物化。
-- 保持每个角色的面部身份、五官比例、发型、体型、服装和彼此的空间关系；禁止脸部融合、增加未请求的人物或改变性别。
-- 让人物、道具和背景处于同一真实空间，光线、透视、景深和视线方向一致，画面要能自然承接后续视频动作。
-- 输出 {aspect_ratio} 构图，主体完整入镜，电影级写实质感；不要文字、字幕、logo、水印或界面元素。
-
-这是首帧，不是动作描述图：从镜头开始时的稳定姿态开始，后续动作由视频模型完成。"""
-
-
 class ImageEditProvider(Protocol):
     @property
     def capabilities(self) -> ImageEditCapabilities: ...
@@ -159,29 +133,6 @@ def _fallback_reference_description(role: str, label: str, tags: str) -> str:
     return f"{label} 的辅助视觉参考；只吸收图像中与镜头方向一致的可见特征。{tag_text}"
 
 
-def build_first_frame_prompt(
-    references: tuple[ImageEditReference, ...],
-    shot_direction: str,
-    aspect_ratio: str,
-) -> str:
-    """Render the provider-neutral first-frame composition template."""
-
-    bindings: list[str] = []
-    for reference in references:
-        tags = ", ".join(reference.tags) or "none"
-        description = (
-            reference.caption.strip()
-            if reference.caption and reference.caption.strip()
-            else _fallback_reference_description(reference.role, reference.label, tags)
-        )
-        bindings.append(f"- {reference.label}：{_role_hint(reference.role)}；{description}")
-    return FIRST_FRAME_PROMPT_TEMPLATE.format(
-        reference_bindings="\n".join(bindings),
-        shot_direction=shot_direction.strip(),
-        aspect_ratio=aspect_ratio,
-    )
-
-
 def compose_image_edit_prompt(references: tuple[ImageEditReference, ...], prompt: str) -> str:
     """Build the exact text sent to an OpenAI-compatible image endpoint."""
 
@@ -200,6 +151,7 @@ class OpenAICompatibleImageEditProvider:
         timeout_seconds: float = 600,
         max_references: int = 4,
         protocol: str = "chat-completions",
+        tokenizer_path: Path | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
@@ -210,6 +162,8 @@ class OpenAICompatibleImageEditProvider:
         if protocol not in {"chat-completions", "images-edits"}:
             raise ValueError(f"unsupported image edit protocol: {protocol}")
         self.protocol = protocol
+        self.tokenizer_path = tokenizer_path
+        self._tokenizer: object | None = None
         self.transport = transport
 
     @property
@@ -266,6 +220,7 @@ class OpenAICompatibleImageEditProvider:
 
     async def edit(self, request: ImageEditRequest) -> Path:
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            self._validate_prompt_budget(request)
             if self.protocol == "images-edits":
                 response = await self._post_images_edit(client, request)
             else:
@@ -281,6 +236,35 @@ class OpenAICompatibleImageEditProvider:
         temporary.write_bytes(output)
         temporary.replace(request.output_path)
         return request.output_path
+
+    def _validate_prompt_budget(self, request: ImageEditRequest) -> None:
+        """Apply the cheap local cap; Qwen enforces the exact token gate.
+
+        vLLM's generic ``/tokenize`` route does not use a pure diffusion
+        pipeline's internal Qwen-Image template. The configured local
+        ``tokenizer.json`` is the exact text tokenizer used by the 20260811
+        Qwen-Image-Edit pipeline; its direct prompt count equals the pipeline's
+        template-baseline-subtracted count. Never silently truncate intent.
+        """
+
+        if len(request.prompt) > 1000:
+            raise ValueError("image edit prompt exceeds the Studio 1000-character preflight")
+        if self.tokenizer_path is None:
+            return
+        if self._tokenizer is None:
+            try:
+                from tokenizers import Tokenizer
+            except ImportError as error:
+                raise RuntimeError(
+                    "STUDIO_IMAGE_EDIT_TOKENIZER_PATH requires the optional tokenizers package"
+                ) from error
+            tokenizer_json = (
+                self.tokenizer_path if self.tokenizer_path.is_file() else self.tokenizer_path / "tokenizer.json"
+            )
+            self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
+        token_count = len(self._tokenizer.encode(request.prompt, add_special_tokens=False).ids)
+        if token_count > 1000:
+            raise ValueError(f"image edit prompt is {token_count} Qwen text tokens; the Studio limit is 1000")
 
     async def _post_images_edit(
         self,
@@ -402,5 +386,6 @@ def provider_from_settings(settings: object) -> ImageEditProvider | None:
             timeout_seconds=getattr(settings, "image_edit_timeout_seconds", 600),
             max_references=max_references,
             protocol=("chat-completions" if provider == "openai-compatible" else "images-edits"),
+            tokenizer_path=getattr(settings, "image_edit_tokenizer_path", None),
         )
     raise ValueError(f"unsupported image edit provider: {provider}")

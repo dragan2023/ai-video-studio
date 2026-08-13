@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from long_video_studio.adapters.image_edit import known_multi_image_support
+from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
 from long_video_studio.domain import (
     ContinuationMode,
@@ -17,8 +18,6 @@ from long_video_studio.domain import (
 
 class FilmCompiler:
     """Compile creator-level Film IR into an infrastructure-facing execution plan."""
-
-    _IMAGE_EDIT_ANCHOR_MODES = frozenset({"first-shot", "scene-cuts", "every-shot"})
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -65,7 +64,7 @@ class FilmCompiler:
                 task="fl2va",
                 endpoint=self.settings.h3_fl2va_url,
                 available=bool(self.settings.h3_fl2va_url),
-                max_duration_seconds=15,
+                max_duration_seconds=14,
                 supports_audio=True,
                 recommended_gpus=8,
                 notes=["First-frame-led video and audio generation."],
@@ -76,7 +75,7 @@ class FilmCompiler:
                 task="ref2va",
                 endpoint=self.settings.h3_ref2va_url,
                 available=bool(self.settings.h3_ref2va_url),
-                max_duration_seconds=15,
+                max_duration_seconds=14,
                 supports_audio=True,
                 supports_multiple_references=True,
                 recommended_gpus=8,
@@ -99,6 +98,12 @@ class FilmCompiler:
         ]
 
     def compile(self, project: FilmProject) -> ExecutionPlan:
+        over_limit = [(shot.index + 1, shot.duration_seconds) for shot in project.shots if shot.duration_seconds > 14]
+        if over_limit:
+            raise ValueError(
+                "H3 safety ceiling is 14 seconds per shot; refusing to render: "
+                + ", ".join(f"shot {index}={duration:g}s" for index, duration in over_limit)
+            )
         capability_map = {capability.id: capability for capability in self.capabilities()}
         stages: list[ExecutionStage] = []
         warnings: list[str] = []
@@ -106,7 +111,7 @@ class FilmCompiler:
         total_estimate = 0.0
         image_edit = capability_map["qwen-image-edit"]
         anchor_mode = self.settings.image_edit_anchor_mode
-        if image_edit.available and anchor_mode not in self._IMAGE_EDIT_ANCHOR_MODES:
+        if image_edit.available and anchor_mode not in IMAGE_EDIT_ANCHOR_MODES:
             warnings.append(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {anchor_mode}")
 
         for position, shot in enumerate(sorted(project.shots, key=lambda value: value.index)):
@@ -124,7 +129,9 @@ class FilmCompiler:
             is_fl2va = runtime_task == ShotTask.FL2VA
             has_start_reference = bool(shot.start_frame_asset_id or shot.reference_asset_ids)
             missing_non_continuity_start = is_fl2va and not shot.continuity_from_shot_id and not has_start_reference
-            selected_by_mode = is_fl2va and image_edit.available and self._anchor_selected(shot, position, anchor_mode)
+            selected_by_mode = is_fl2va and image_edit.available and anchor_selected(shot, position, anchor_mode)
+            if selected_by_mode and not shot.anchor_prompt:
+                raise ValueError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
 
             # A configured Image Edit provider follows RenderManager's anchor
             # mode exactly.  When it is disabled, retain the plan-only
@@ -140,6 +147,7 @@ class FilmCompiler:
                     inputs={
                         "reference_asset_ids": shot.reference_asset_ids,
                         "instruction": shot.continuity_in.model_dump(mode="json"),
+                        "anchor_prompt": shot.anchor_prompt,
                         "anchor_mode": anchor_mode,
                     },
                     depends_on=list(dependencies),
@@ -204,7 +212,11 @@ class FilmCompiler:
                 capability_id=capability_id,
                 depends_on=dependencies,
                 inputs={
+                    "anchor_prompt": shot.anchor_prompt,
                     "prompt": shot.prompt,
+                    "audio_prompt": shot.audio_prompt,
+                    "music_prompt": shot.music_prompt,
+                    "dialogue": [line.model_dump(mode="json") for line in shot.dialogue],
                     "negative_prompt": shot.negative_prompt,
                     "duration_seconds": shot.duration_seconds,
                     "fps": shot.fps,
@@ -286,23 +298,6 @@ class FilmCompiler:
             warnings=list(dict.fromkeys(warnings)),
             estimated_seconds=round(total_estimate, 1),
         )
-
-    @classmethod
-    def _anchor_selected(cls, shot, position: int, mode: str) -> bool:
-        """Return whether Image Edit should create an anchor for this FL2VA shot."""
-
-        if shot.task != ShotTask.FL2VA:
-            return False
-        if shot.start_frame_asset_id:
-            return False
-        if mode == "first-shot":
-            # Deliberately use project position, matching RenderManager.  A
-            # later FL2VA shot is not promoted to the first anchor merely
-            # because an earlier shot used REF2VA.
-            return position == 0
-        if mode == "scene-cuts":
-            return not shot.continuity_from_shot_id
-        return mode == "every-shot"
 
     @staticmethod
     def _estimate_video_seconds(
