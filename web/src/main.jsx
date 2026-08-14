@@ -160,7 +160,7 @@ function estimateProjectSeconds(value, scale = 1) {
       shot.continuity_from_shot_id && !shot.start_frame_asset_id,
     );
     const continuationMode =
-      shot.continuation_mode || value.brief.continuation_mode || "fast";
+      shot.continuation_mode || value.brief.continuation_mode || "quality";
     const referenceSeconds = !isContinuation
       ? 431.1
       : continuationMode === "quality"
@@ -182,7 +182,7 @@ function runtimeShotTask(project, shot) {
   if (shot?.start_frame_asset_id) return "fl2va";
   if (shot?.continuity_from_shot_id) {
     const mode =
-      shot.continuation_mode || project?.brief?.continuation_mode || "fast";
+      shot.continuation_mode || project?.brief?.continuation_mode || "quality";
     return mode === "quality" ? "ref2va" : "fl2va";
   }
   return shot?.task || "fl2va";
@@ -298,8 +298,8 @@ function App() {
   const [title, setTitle] = useState("未命名影片");
   const [duration, setDuration] = useState(60);
   const [aspect, setAspect] = useState("16:9");
-  const [quality, setQuality] = useState("draft");
-  const [continuationMode, setContinuationMode] = useState("fast");
+  const [quality, setQuality] = useState("final");
+  const [continuationMode, setContinuationMode] = useState("quality");
   const [style, setStyle] = useState("cinematic");
   const [styleName, setStyleName] = useState(stylePresets[0].label);
   const [styleInstructions, setStyleInstructions] = useState(
@@ -401,8 +401,8 @@ function App() {
       setTitle(value.brief.title);
       setDuration(value.brief.duration_seconds);
       setAspect(value.brief.aspect_ratio);
-      setQuality(value.brief.quality);
-      setContinuationMode(value.brief.continuation_mode || "fast");
+      setQuality(value.brief.quality || "final");
+      setContinuationMode(value.brief.continuation_mode || "quality");
       setStyle(value.brief.style_preset || "cinematic");
       const loadedStyle = [...styleRegistryRef.current, ...customStyles].find(
         (item) => item.id === (value.brief.style_preset || "cinematic"),
@@ -566,8 +566,8 @@ function App() {
     setTitle("未命名影片");
     setDuration(60);
     setAspect("16:9");
-    setQuality("draft");
-    setContinuationMode("fast");
+    setQuality("final");
+    setContinuationMode("quality");
     setStyle("cinematic");
     setStyleName(stylePresets[0].label);
     setStyleInstructions(stylePresets[0].instructions);
@@ -714,8 +714,8 @@ function App() {
       setStyleInstructions(value.brief.style_instructions || styleInstructions);
       setDuration(value.brief.duration_seconds);
       setAspect(value.brief.aspect_ratio);
-      setQuality(value.brief.quality);
-      setContinuationMode(value.brief.continuation_mode || "fast");
+      setQuality(value.brief.quality || "final");
+      setContinuationMode(value.brief.continuation_mode || "quality");
       await loadProjects();
       setProjectDialog(false);
       setNotice("整体设定已保存，旧镜头输出已标记为待重新制作");
@@ -1695,7 +1695,7 @@ function App() {
                   <label className="dialog-field">
                     <span>镜头续写策略</span>
                     <select
-                      value={projectDraft.brief.continuation_mode || "fast"}
+                      value={projectDraft.brief.continuation_mode || "quality"}
                       onChange={(event) =>
                         updateProjectDraft(
                           "brief",
