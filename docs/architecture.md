@@ -90,6 +90,13 @@ points at downloaded MiniMax-H3 skill packs; Nautilus selects the matching
 style pack and sends only its shot/continuity/audio/QC excerpt, never all
 workflow instructions at once.
 
+Planner diagnostics are persisted as bounded events on the project and exposed
+through `/api/projects/{project_id}/planner-trace`. The Studio Debug Console
+combines these server events with browser-side click/request events, so a
+missing request, provider error, malformed JSON response, or continuity-critic
+failure can be distinguished without retrying blindly. Normal project/list
+responses omit the trace payload; the dedicated endpoint returns it on demand.
+
 ## Security boundary
 
 The built-in API is a single-user development service. Authentication,

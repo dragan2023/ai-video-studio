@@ -560,6 +560,101 @@ select:focus {
   font-size: 9px;
   line-height: 1.45;
 }
+
+.planner-debug {
+  margin-top: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(7, 10, 18, 0.7);
+  overflow: hidden;
+}
+.planner-debug-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.planner-debug .text-button {
+  border: 0;
+  background: none;
+  color: var(--accent, #b9a7ff);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+.planner-debug .text-button.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+.planner-debug-body {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  max-height: 520px;
+  overflow: auto;
+  padding: 12px 14px 14px;
+}
+.planner-debug-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+.planner-debug-event {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.planner-debug-event summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(150px, auto) 80px 90px 1fr;
+  list-style: none;
+  padding: 9px 10px;
+  font-size: 12px;
+}
+.planner-debug-event summary::-webkit-details-marker {
+  display: none;
+}
+.planner-debug-event summary span:nth-child(2) {
+  color: var(--accent, #b9a7ff);
+  text-transform: uppercase;
+}
+.planner-debug-event summary span:nth-child(3),
+.planner-debug-event summary strong {
+  color: var(--muted);
+  font-weight: 400;
+}
+.planner-debug-event.status-failed summary span:nth-child(2),
+.planner-debug-event.status-failed .debug-error {
+  color: #ff8e9e;
+}
+.planner-debug-content {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 8px 10px;
+}
+.planner-debug-content details {
+  margin-top: 6px;
+}
+.planner-debug-content details summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+.planner-debug pre {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  color: #d9e1f2;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 7px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .hint {
   display: flex;
   align-items: center;

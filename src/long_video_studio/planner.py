@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from typing import Any
 
 import httpx
@@ -19,6 +20,7 @@ from long_video_studio.domain import (
     ContinuityState,
     DialogueLine,
     FilmProject,
+    PlannerTraceEvent,
     ProjectBrief,
     ShotSpec,
     ShotTask,
@@ -110,10 +112,28 @@ class PlannerService:
         self.settings = settings
         self.repository = repository
         self._transport: httpx.AsyncBaseTransport | None = None
+        self._active_trace_project_id: str | None = None
+        self._trace_lock = asyncio.Lock()
         if settings.image_edit_anchor_mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise ValueError(f"unsupported image edit anchor mode: {settings.image_edit_anchor_mode}")
 
     async def plan(self, brief: ProjectBrief, project_id: str | None = None) -> FilmProject:
+        self._active_trace_project_id = project_id
+        await self._record_trace("planner", "started", message="planner request accepted")
+        try:
+            project = await self._plan_impl(brief, project_id=project_id)
+        except Exception as error:
+            await self._record_trace("planner", "failed", error=str(error), message="planner request failed")
+            raise
+        else:
+            await self._record_trace("planner", "completed", message="storyboard saved")
+            if project_id:
+                return self.repository.get_project(project_id) or project
+            return project
+        finally:
+            self._active_trace_project_id = None
+
+    async def _plan_impl(self, brief: ProjectBrief, project_id: str | None = None) -> FilmProject:
         assets = self._retrieve_assets(brief)
         if assets and not brief.reference_asset_ids:
             brief = brief.model_copy(update={"reference_asset_ids": [asset.id for asset in assets]})
@@ -125,6 +145,7 @@ class PlannerService:
                     brief=brief,
                     world_bible=output.world_bible,
                     shots=output.shots,
+                    planner_trace=self._trace_snapshot(project_id),
                 )
                 return self.repository.save_project(project)
             except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as error:
@@ -138,8 +159,59 @@ class PlannerService:
         except ValueError as error:
             raise PlannerError(f"H3 storyboard fallback failed: {error}") from error
         if project_id:
-            project = project.model_copy(update={"id": project_id})
+            project = project.model_copy(
+                update={"id": project_id, "planner_trace": self._trace_snapshot(project_id)}
+            )
         return self.repository.save_project(project)
+
+    def _trace_snapshot(self, project_id: str | None) -> list[PlannerTraceEvent]:
+        if not project_id:
+            return []
+        project = self.repository.get_project(project_id)
+        return list(project.planner_trace) if project else []
+
+    @staticmethod
+    def _trace_payload(value: Any, limit: int = 30000) -> str | None:
+        if value is None:
+            return None
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str, indent=2)
+        except (TypeError, ValueError):
+            text = str(value)
+        if len(text) <= limit:
+            return text
+        head = limit // 2
+        return text[:head] + "\n... [trace truncated] ...\n" + text[-head:]
+
+    async def _record_trace(
+        self,
+        stage: str,
+        status: str,
+        *,
+        message: str = "",
+        request_payload: Any = None,
+        response_payload: Any = None,
+        error: str | None = None,
+        duration_ms: float | None = None,
+    ) -> None:
+        project_id = self._active_trace_project_id
+        if not project_id:
+            return
+        event = PlannerTraceEvent(
+            stage=stage,
+            status=status,  # type: ignore[arg-type]
+            message=message,
+            request_payload=self._trace_payload(request_payload),
+            response_payload=self._trace_payload(response_payload),
+            error=error,
+            duration_ms=duration_ms,
+        )
+        async with self._trace_lock:
+            project = self.repository.get_project(project_id)
+            if not project:
+                return
+            project.planner_trace = [*project.planner_trace, event][-100:]
+            self.repository.save_project(project)
 
     @property
     def _llm_available(self) -> bool:
@@ -858,6 +930,54 @@ configured policy, anchor_prompt must be non-empty.
         )
 
     async def _request_json(
+        self,
+        client: httpx.AsyncClient,
+        system_prompt: str,
+        user_payload: dict[str, Any],
+        *,
+        schema: dict[str, Any],
+        schema_name: str,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        request_payload = {
+            "schema_name": schema_name,
+            "system_prompt": system_prompt,
+            "input": user_payload,
+            "schema": schema,
+        }
+        await self._record_trace(
+            schema_name,
+            "request",
+            message="sending structured planner request",
+            request_payload=request_payload,
+        )
+        try:
+            result = await self._request_json_wire(
+                client,
+                system_prompt,
+                user_payload,
+                schema=schema,
+                schema_name=schema_name,
+            )
+        except Exception as error:
+            await self._record_trace(
+                schema_name,
+                "failed",
+                message="provider request or JSON decode failed",
+                error=str(error),
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
+            raise
+        await self._record_trace(
+            schema_name,
+            "response",
+            message="structured planner response decoded",
+            response_payload=result,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+        return result
+
+    async def _request_json_wire(
         self,
         client: httpx.AsyncClient,
         system_prompt: str,

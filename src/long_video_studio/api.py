@@ -20,6 +20,7 @@ from long_video_studio.domain import (
     DialogueLine,
     ExecutionPlan,
     FilmProject,
+    PlannerTraceEvent,
     ProjectBrief,
     RenderJob,
     ShotSpec,
@@ -113,6 +114,12 @@ class ProjectUpdate(BaseModel):
 
 def _services(request: Request) -> StudioServices:
     return request.app.state.services
+
+
+def _project_view(project: FilmProject) -> FilmProject:
+    """Keep large planner diagnostics on the dedicated trace endpoint."""
+
+    return project.model_copy(update={"planner_trace": []})
 
 
 def _runner(request: Request) -> RenderManager:
@@ -278,34 +285,43 @@ def create_api_router() -> APIRouter:
         )
         services.repository.save_project(draft)
         try:
-            return await services.planner.plan(brief, project_id=draft.id)
+            return _project_view(await services.planner.plan(brief, project_id=draft.id))
         except KeyError as error:
-            draft.status = "failed"
-            draft.updated_at = utc_now()
-            services.repository.save_project(draft)
+            failed = services.repository.get_project(draft.id) or draft
+            failed.status = "failed"
+            failed.updated_at = utc_now()
+            services.repository.save_project(failed)
             raise HTTPException(
                 status_code=422,
-                detail={"message": str(error), "project_id": draft.id},
+                detail={"message": str(error), "project_id": failed.id},
             ) from error
         except PlannerError as error:
-            draft.status = "failed"
-            draft.updated_at = utc_now()
-            services.repository.save_project(draft)
+            failed = services.repository.get_project(draft.id) or draft
+            failed.status = "failed"
+            failed.updated_at = utc_now()
+            services.repository.save_project(failed)
             raise HTTPException(
                 status_code=502,
-                detail={"message": str(error), "project_id": draft.id},
+                detail={"message": str(error), "project_id": failed.id},
             ) from error
 
     @router.get("/projects", response_model=list[FilmProject])
     def list_projects(request: Request) -> list[FilmProject]:
-        return _services(request).repository.list_projects()
+        return [_project_view(project) for project in _services(request).repository.list_projects()]
 
     @router.get("/projects/{project_id}", response_model=FilmProject)
     def get_project(request: Request, project_id: str) -> FilmProject:
         project = _services(request).repository.get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
-        return project
+        return _project_view(project)
+
+    @router.get("/projects/{project_id}/planner-trace", response_model=list[PlannerTraceEvent])
+    def planner_trace(request: Request, project_id: str) -> list[PlannerTraceEvent]:
+        project = _services(request).repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        return project.planner_trace
 
     @router.patch("/projects/{project_id}", response_model=FilmProject)
     def update_project(request: Request, project_id: str, payload: ProjectUpdate) -> FilmProject:

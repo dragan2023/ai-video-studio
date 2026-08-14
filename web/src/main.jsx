@@ -287,6 +287,59 @@ function StatusPill({ health, job }) {
   );
 }
 
+function PlannerDebugConsole({ events, open, onToggle, onClear }) {
+  return (
+    <section className={`planner-debug ${open ? "is-open" : ""}`}>
+      <div className="planner-debug-bar">
+        <button type="button" className="text-button" onClick={onToggle}>
+          {open ? "收起 Debug Console" : "打开 Debug Console"} · {events.length} events
+        </button>
+        {events.length > 0 && (
+          <button type="button" className="text-button muted" onClick={onClear}>
+            清空
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="planner-debug-body">
+          <p className="planner-debug-hint">
+            这里显示浏览器点击、planner 各阶段请求/响应和异常。payload 已做长度限制，不包含认证 header。
+          </p>
+          {events.length === 0 ? (
+            <div className="empty-state">还没有 planner 事件。点击“开始构思”后这里会实时更新。</div>
+          ) : (
+            [...events].reverse().map((event) => (
+              <details className={`planner-debug-event status-${event.status}`} key={event.id}>
+                <summary>
+                  <span>{event.stage}</span>
+                  <span>{event.status}</span>
+                  <span>{event.created_at ? new Date(event.created_at).toLocaleTimeString() : ""}</span>
+                  <strong>{event.message || event.error || ""}</strong>
+                </summary>
+                <div className="planner-debug-content">
+                  {event.error && <pre className="debug-error">{event.error}</pre>}
+                  {event.request_payload && (
+                    <details>
+                      <summary>raw input</summary>
+                      <pre>{event.request_payload}</pre>
+                    </details>
+                  )}
+                  {event.response_payload && (
+                    <details>
+                      <summary>raw output</summary>
+                      <pre>{event.response_payload}</pre>
+                    </details>
+                  )}
+                </div>
+              </details>
+            ))
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [assets, setAssets] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -314,6 +367,10 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [planningError, setPlanningError] = useState("");
+  const [projectLoading, setProjectLoading] = useState(false);
+  const [plannerTrace, setPlannerTrace] = useState([]);
+  const [clientTrace, setClientTrace] = useState([]);
+  const [debugOpen, setDebugOpen] = useState(false);
   const [clockNow, setClockNow] = useState(Date.now());
   const [editingAsset, setEditingAsset] = useState(null);
   const [assetDraft, setAssetDraft] = useState({
@@ -333,6 +390,30 @@ function App() {
   const [dialogSaving, setDialogSaving] = useState(false);
   const fileInput = useRef(null);
   const projectRequest = useRef(0);
+
+  const addClientTrace = useCallback((status, message, payload = null) => {
+    setClientTrace((events) => [
+      ...events,
+      {
+        id: `client-${Date.now()}-${events.length}`,
+        created_at: new Date().toISOString(),
+        stage: "browser",
+        status: "client",
+        message: `${status}: ${message}`,
+        request_payload: payload ? JSON.stringify(payload, null, 2) : null,
+      },
+    ].slice(-40));
+  }, []);
+
+  const refreshPlannerTrace = useCallback(async (id) => {
+    if (!id) return;
+    try {
+      const value = await api(`/api/projects/${id}/planner-trace`);
+      setPlannerTrace(Array.isArray(value) ? value : []);
+    } catch {
+      setPlannerTrace([]);
+    }
+  }, []);
   const styleRegistryRef = useRef(stylePresets);
 
   const loadStylePresets = useCallback(async () => {
@@ -381,15 +462,19 @@ function App() {
     async (id) => {
       if (!id) return;
       const requestId = ++projectRequest.current;
+      setProjectLoading(true);
       // Clear the previous project before fetching so its video/job cannot be
       // mistaken for the project the creator just selected.
       setProject(null);
       setJob(null);
       setSelected(new Set());
-      const [value, latest] = await Promise.all([
+      const [value, latest, trace] = await Promise.all([
         api(`/api/projects/${id}`),
         api(`/api/projects/${id}/jobs/latest`),
-      ]);
+        api(`/api/projects/${id}/planner-trace`).catch(() => []),
+      ]).finally(() => {
+        if (requestId === projectRequest.current) setProjectLoading(false);
+      });
       if (requestId !== projectRequest.current) return;
       setProject(value);
       setPlanningError(
@@ -413,6 +498,8 @@ function App() {
       );
       setSelected(new Set(value.brief.reference_asset_ids || []));
       setJob(latest);
+      setPlannerTrace(Array.isArray(trace) ? trace : []);
+      setClientTrace([]);
     },
     [customStyles],
   );
@@ -467,6 +554,12 @@ function App() {
       clearInterval(timer);
     };
   }, [job?.id, job?.status, project?.id]);
+
+  useEffect(() => {
+    if (!busy || !project?.id) return undefined;
+    const timer = window.setInterval(() => refreshPlannerTrace(project.id), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy, project?.id, refreshPlannerTrace]);
 
   useEffect(() => {
     if (!job || !["running", "queued"].includes(job.status)) return undefined;
@@ -574,6 +667,8 @@ function App() {
     setSelected(new Set());
     setActiveTab("brief");
     setPlanningError("");
+    setPlannerTrace([]);
+    setClientTrace([]);
   };
 
   const navigateWorkspace = (sectionId) => {
@@ -911,15 +1006,31 @@ function App() {
   };
 
   const plan = async () => {
-    if (prompt.trim().length < 3) return setNotice("先写一句你想拍的故事");
+    addClientTrace("click", "开始构思 clicked", { promptLength: prompt.trim().length });
+    if (projectLoading) {
+      addClientTrace("skipped", "project is still loading");
+      setDebugOpen(true);
+      return setNotice("项目仍在加载，请稍候再开始构思");
+    }
+    if (prompt.trim().length < 3) {
+      addClientTrace("skipped", "prompt is shorter than 3 characters");
+      setDebugOpen(true);
+      return setNotice("先写一句你想拍的故事");
+    }
     const requestId = ++projectRequest.current;
     setPlanningError("");
     setBusy(true);
+    const brief = makeBrief();
+    addClientTrace("request", "POST /api/projects/plan", brief);
     try {
       const value = await api("/api/projects/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(makeBrief()),
+        body: JSON.stringify(brief),
+      });
+      addClientTrace("response", "planner returned a storyboard", {
+        projectId: value?.id,
+        shotCount: value?.shots?.length || 0,
       });
       if (requestId !== projectRequest.current) return;
       await loadProjects();
@@ -934,6 +1045,10 @@ function App() {
           ?.scrollIntoView({ behavior: "smooth", block: "start" }),
       );
     } catch (error) {
+      addClientTrace("failed", error.message || String(error), {
+        projectId: error.projectId || null,
+      });
+      setDebugOpen(true);
       if (requestId !== projectRequest.current) return;
       if (error.projectId) {
         await loadProjects();
@@ -943,6 +1058,7 @@ function App() {
       setNotice(error.message);
     } finally {
       setBusy(false);
+      if (project?.id) refreshPlannerTrace(project.id);
     }
   };
 
@@ -1005,6 +1121,9 @@ function App() {
     (shot) => shot.id === job?.current_shot_id,
   );
   const jobActive = job && ["running", "queued"].includes(job.status);
+  const debugEvents = [...plannerTrace, ...clientTrace].sort(
+    (left, right) => Date.parse(left.created_at || 0) - Date.parse(right.created_at || 0),
+  );
   return (
     <div className="nautilus-app">
       <aside className="side-rail">
@@ -1126,8 +1245,8 @@ function App() {
               <div className="hint">
                 <Sparkles size={14} /> Agent 会自动生成完整分镜
               </div>
-              <button className="glow-button" onClick={plan} disabled={busy}>
-                <span>{busy ? "正在构思…" : "开始构思"}</span>
+              <button className="glow-button" onClick={plan} disabled={busy || projectLoading}>
+                <span>{projectLoading ? "正在加载项目…" : busy ? "正在构思…" : "开始构思"}</span>
                 <ArrowUpRight size={16} />
               </button>
             </div>
@@ -1152,6 +1271,15 @@ function App() {
                 </button>
               </div>
             ) : null}
+            <PlannerDebugConsole
+              events={debugEvents}
+              open={debugOpen}
+              onToggle={() => setDebugOpen((value) => !value)}
+              onClear={() => {
+                setPlannerTrace([]);
+                setClientTrace([]);
+              }}
+            />
           </section>
 
           <section className="controls glass-panel">

@@ -372,6 +372,20 @@ class TimelineClip(BaseModel):
     duration_seconds: float
 
 
+class PlannerTraceEvent(BaseModel):
+    """Bounded planner diagnostic event shown in the Studio debug console."""
+
+    id: str = Field(default_factory=lambda: new_id("trace"))
+    created_at: datetime = Field(default_factory=utc_now)
+    stage: str
+    status: Literal["started", "request", "response", "completed", "failed", "client"]
+    message: str = ""
+    request_payload: str | None = None
+    response_payload: str | None = None
+    error: str | None = None
+    duration_ms: float | None = None
+
+
 class FilmProject(BaseModel):
     id: str = Field(default_factory=lambda: new_id("project"))
     brief: ProjectBrief
@@ -379,6 +393,7 @@ class FilmProject(BaseModel):
     shots: list[ShotSpec]
     timeline: list[TimelineClip] = Field(default_factory=list)
     status: Literal["planned", "compiled", "rendering", "complete", "failed"] = "planned"
+    planner_trace: list[PlannerTraceEvent] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
