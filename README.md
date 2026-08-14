@@ -165,6 +165,9 @@ timeout. The adapter still supports `/v1/videos/sync` for focused smoke tests.
 For vLLM-Omni servers, set `VLLM_OMNI_VIDEO_SYNC_TIMEOUT` high enough when using
 the synchronous endpoint.
 
+For the exact MUSA image, validated Ref2VA parameter matrix, failure modes, and
+three-service Docker commands, see [MiniMax-H3 on MUSA](docs/minimax-h3-musa-deployment.md).
+
 ### Image Edit
 
 Image editing constructs a scene-complete anchor from ordered location,
