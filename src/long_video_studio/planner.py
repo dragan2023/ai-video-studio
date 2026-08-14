@@ -965,7 +965,7 @@ configured policy, anchor_prompt must be non-empty.
             candidate = shots[index] if index < len(shots) else (shots[-1] if shots else candidate)
         if not isinstance(candidate, dict):
             raise ValueError(f"shot director {index + 1} returned no ShotSpec")
-        data = dict(candidate)
+        data = PlannerService._sanitize_shot_wire(candidate)
         # Parse creative fields first; runtime IDs, output paths, and status
         # cannot be invented or overridden by a shot director.
         creative = ShotCreativeDraft.model_validate(data)
@@ -1009,6 +1009,134 @@ configured policy, anchor_prompt must be non-empty.
         creative_data["continuity_in"] = continuity_in
         creative_data["continuity_out"] = continuity_out
         return ShotSpec.model_validate(creative_data)
+
+    @staticmethod
+    def _sanitize_shot_wire(payload: dict[str, Any]) -> dict[str, Any]:
+        """Tolerate providers echoing JSON-Schema fragments as field values.
+
+        Some OpenAI-compatible structured-output proxies occasionally emit
+        ``{"title": "Delivery", "type": "string"}`` in place of a scalar
+        field.  Do not weaken the domain models globally; clean only this wire
+        boundary and retain strict validation for the resulting creative IR.
+        """
+
+        data = dict(payload)
+        string_fields = (
+            "title",
+            "purpose",
+            "prompt",
+            "audio_prompt",
+            "music_prompt",
+            "opening_state",
+            "ending_state",
+            "continuity_handoff",
+            "hook",
+            "negative_prompt",
+            "subtitle_text",
+            "camera",
+            "anchor_prompt",
+        )
+        for field_name in string_fields:
+            data[field_name] = PlannerService._wire_scalar(data.get(field_name), default="")
+        data["reference_anchors"] = PlannerService._wire_string_list(data.get("reference_anchors"))
+        data["reference_asset_ids"] = PlannerService._wire_string_list(data.get("reference_asset_ids"))
+        data["dialogue"] = PlannerService._sanitize_dialogue_wire(data.get("dialogue"))
+        data["visual_beats"] = PlannerService._sanitize_beats_wire(data.get("visual_beats"))
+        for state_name in ("continuity_in", "continuity_out"):
+            state = data.get(state_name)
+            if isinstance(state, dict):
+                data[state_name] = PlannerService._sanitize_state_wire(state)
+        return data
+
+    @staticmethod
+    def _wire_scalar(value: Any, *, default: str | None = "") -> Any:
+        if isinstance(value, str) or value is None:
+            return value if value is not None else default
+        if isinstance(value, dict):
+            fallback = value.get("default")
+            return fallback if isinstance(fallback, str) else default
+        return str(value)
+
+    @staticmethod
+    def _wire_string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in (PlannerService._wire_scalar(item, default=None) for item in value) if item]
+
+    @staticmethod
+    def _sanitize_dialogue_wire(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            line = dict(item)
+            line["speaker"] = PlannerService._wire_scalar(line.get("speaker"), default="")
+            line["text"] = PlannerService._wire_scalar(line.get("text"), default="")
+            line["language"] = PlannerService._wire_scalar(line.get("language"), default="Chinese")
+            line["delivery"] = PlannerService._wire_scalar(line.get("delivery"), default="natural")
+            if not line["speaker"] or not line["text"]:
+                continue
+            if isinstance(line.get("mode"), dict):
+                line["mode"] = "on_screen"
+            for field_name in ("start_seconds", "end_seconds"):
+                if isinstance(line.get(field_name), dict):
+                    line[field_name] = None
+            result.append(line)
+        return result
+
+    @staticmethod
+    def _sanitize_beats_wire(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            beat = dict(item)
+            for field_name in (
+                "visual_action",
+                "state_change",
+                "camera",
+                "sound",
+                "performance",
+                "spatial_anchor",
+                "handoff",
+            ):
+                beat[field_name] = PlannerService._wire_scalar(beat.get(field_name), default="")
+            for field_name in ("start_seconds", "end_seconds"):
+                if isinstance(beat.get(field_name), dict):
+                    beat[field_name] = 0.0 if field_name == "start_seconds" else 1.0
+            if not beat.get("visual_action"):
+                continue
+            result.append(beat)
+        return result
+
+    @staticmethod
+    def _sanitize_state_wire(value: dict[str, Any]) -> dict[str, Any]:
+        state = dict(value)
+        for field_name in (
+            "location",
+            "lighting",
+            "camera",
+            "action",
+            "audio",
+            "performance",
+            "spatial_anchor",
+            "handoff",
+        ):
+            state[field_name] = PlannerService._wire_scalar(state.get(field_name), default="")
+        for field_name in (
+            "characters",
+            "wardrobe",
+            "props",
+            "fixed_landmarks",
+            "character_positions",
+            "exited_characters",
+        ):
+            state[field_name] = PlannerService._wire_string_list(state.get(field_name))
+        return state
 
     @staticmethod
     def _parse_director_payload(payload: dict[str, Any]) -> tuple[PlannerOutput, list[ShotBlueprint]]:

@@ -22,7 +22,7 @@ from long_video_studio.domain import (
     TransitionKind,
     WorldBible,
 )
-from long_video_studio.planner import DirectorPlan, PlannerOutput, PlannerService
+from long_video_studio.planner import DirectorPlan, PlannerOutput, PlannerService, ShotBlueprint
 from long_video_studio.repository import StudioRepository
 from long_video_studio.style_registry import STYLE_REGISTRY, get_style_contract, style_prompt
 
@@ -233,6 +233,45 @@ def test_normalizer_preserves_an_explicit_hard_cut(settings):
     )
     assert normalized.shots[1].transition_kind is TransitionKind.HARD_CUT
     assert normalized.shots[1].continuity_from_shot_id is None
+
+
+def test_shot_director_wire_schema_fragment_in_dialogue_is_sanitized(settings):
+    blueprint = ShotBlueprint(
+        index=0,
+        title="Opening",
+        purpose="A woman speaks",
+        duration_seconds=8,
+        opening_state="standing",
+        ending_state="settled",
+    )
+    shot = PlannerService._coerce_shot_payload(
+        {
+            "shot": {
+                "dialogue": [
+                    {
+                        "speaker": "woman",
+                        "text": "Wait.",
+                        "language": "English",
+                        "delivery": {"title": "Delivery", "type": "string"},
+                    }
+                ],
+                "prompt": "The woman turns toward the doorway.",
+                "visual_beats": [
+                    {
+                        "start_seconds": 0,
+                        "end_seconds": 8,
+                        "visual_action": "She turns",
+                        "state_change": "She settles",
+                        "camera": "The camera holds",
+                        "sound": "Footsteps",
+                    }
+                ],
+            }
+        },
+        0,
+        blueprint,
+    )
+    assert shot.dialogue[0].delivery == "natural"
 
 
 def test_compiler_hides_unavailable_model_in_warnings(settings):
