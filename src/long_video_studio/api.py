@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -22,6 +23,7 @@ from long_video_studio.domain import (
     FilmProject,
     PlannerTraceEvent,
     ProjectBrief,
+    ProjectRenderEstimate,
     RenderJob,
     ShotSpec,
     ShotStatus,
@@ -34,6 +36,7 @@ from long_video_studio.domain import (
     utc_now,
 )
 from long_video_studio.planner import PlannerError
+from long_video_studio.planning import PlanningManager
 from long_video_studio.runner import RenderManager
 from long_video_studio.services import StudioServices
 from long_video_studio.style_registry import public_style_contracts
@@ -126,6 +129,10 @@ def _runner(request: Request) -> RenderManager:
     return request.app.state.render_manager
 
 
+def _planning_manager(request: Request) -> PlanningManager:
+    return request.app.state.planning_manager
+
+
 def create_api_router() -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -167,6 +174,9 @@ def create_api_router() -> APIRouter:
             "image_edit_configured": services.compiler.capabilities()[0].available,
             "image_edit_max_references": services.settings.image_edit_max_references,
             "render_estimate_scale": services.settings.render_estimate_scale,
+            "render_profile": services.settings.render_profile,
+            "render_max_concurrency": services.settings.render_max_concurrency,
+            "planner_project_concurrency": services.settings.planner_project_concurrency,
         }
 
     @router.get("/capabilities")
@@ -282,6 +292,7 @@ def create_api_router() -> APIRouter:
                 visual_style=brief.style,
             ),
             shots=[],
+            status="planning",
         )
         services.repository.save_project(draft)
         try:
@@ -305,6 +316,10 @@ def create_api_router() -> APIRouter:
                 detail={"message": str(error), "project_id": failed.id},
             ) from error
 
+    @router.post("/projects/plan-async", response_model=FilmProject, status_code=202)
+    async def plan_project_async(request: Request, brief: ProjectBrief) -> FilmProject:
+        return _project_view(await _planning_manager(request).start(brief))
+
     @router.get("/projects", response_model=list[FilmProject])
     def list_projects(request: Request) -> list[FilmProject]:
         return [_project_view(project) for project in _services(request).repository.list_projects()]
@@ -315,6 +330,47 @@ def create_api_router() -> APIRouter:
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
         return _project_view(project)
+
+    @router.delete("/projects/{project_id}")
+    async def delete_project(request: Request, project_id: str) -> dict[str, object]:
+        services = _services(request)
+        project = services.repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        latest_job = services.repository.get_latest_job(project_id)
+        if project_id in _runner(request).active_project_ids() or (
+            latest_job and latest_job.status in {"queued", "running"}
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="项目正在渲染，完成或失败后才能删除。",
+            )
+
+        output_root = services.settings.output_dir.resolve()
+        output_path = services.settings.output_dir / project_id
+        resolved_output = output_path.resolve()
+        if resolved_output.parent != output_root or output_path.is_symlink():
+            raise HTTPException(status_code=409, detail="project output path is unsafe")
+
+        await _planning_manager(request).cancel(project_id)
+        output_deleted = False
+        if resolved_output.is_dir():
+            try:
+                shutil.rmtree(resolved_output)
+            except OSError as error:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"failed to delete project output: {error}",
+                ) from error
+            output_deleted = True
+        deleted = services.repository.delete_project(project_id)
+        if deleted is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return {
+            "deleted": True,
+            "project_id": project_id,
+            "output_deleted": output_deleted,
+        }
 
     @router.get("/projects/{project_id}/planner-trace", response_model=list[PlannerTraceEvent])
     def planner_trace(request: Request, project_id: str) -> list[PlannerTraceEvent]:
@@ -484,6 +540,18 @@ def create_api_router() -> APIRouter:
             return _runner(request).submit(project_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="project not found") from error
+
+    @router.get("/projects/{project_id}/render-estimate", response_model=ProjectRenderEstimate)
+    def project_render_estimate(request: Request, project_id: str) -> ProjectRenderEstimate:
+        services = _services(request)
+        project = services.repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        return services.estimator.estimate_project(project)
+
+    @router.get("/jobs/active", response_model=list[RenderJob])
+    def active_jobs(request: Request) -> list[RenderJob]:
+        return _services(request).repository.list_active_jobs()
 
     @router.get("/jobs/{job_id}", response_model=RenderJob)
     def get_job(request: Request, job_id: str) -> RenderJob:

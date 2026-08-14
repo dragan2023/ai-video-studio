@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from long_video_studio import __version__
 from long_video_studio.api import create_api_router
 from long_video_studio.config import Settings
+from long_video_studio.planning import PlanningManager
 from long_video_studio.runner import RenderManager
 from long_video_studio.services import StudioServices
 
@@ -16,13 +18,30 @@ from long_video_studio.services import StudioServices
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
     services = StudioServices.create(resolved)
+    planning_manager = PlanningManager(resolved, services.repository, services.planner)
+    render_manager = RenderManager(
+        resolved,
+        services.repository,
+        estimator=services.estimator,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            await planning_manager.shutdown()
+            await render_manager.shutdown()
+
     app = FastAPI(
         title="Nautilus Studio",
         description="Nautilus Studio — creator-first agentic AI film workshop",
         version=__version__,
+        lifespan=lifespan,
     )
     app.state.services = services
-    app.state.render_manager = RenderManager(resolved, services.repository)
+    app.state.planning_manager = planning_manager
+    app.state.render_manager = render_manager
     app.include_router(create_api_router())
 
     if not resolved.web_root:

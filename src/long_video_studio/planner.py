@@ -5,6 +5,7 @@ import json
 import math
 import re
 import time
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -42,6 +43,7 @@ BEATS = [
     ("Climax", "Deliver the strongest visual and emotional moment."),
     ("Resolution", "Resolve the action and leave a clean final image."),
 ]
+
 
 class PlannerOutput(BaseModel):
     world_bible: WorldBible
@@ -112,13 +114,16 @@ class PlannerService:
         self.settings = settings
         self.repository = repository
         self._transport: httpx.AsyncBaseTransport | None = None
-        self._active_trace_project_id: str | None = None
+        self._active_trace_project_id: ContextVar[str | None] = ContextVar(
+            "planner_trace_project_id",
+            default=None,
+        )
         self._trace_lock = asyncio.Lock()
         if settings.image_edit_anchor_mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise ValueError(f"unsupported image edit anchor mode: {settings.image_edit_anchor_mode}")
 
     async def plan(self, brief: ProjectBrief, project_id: str | None = None) -> FilmProject:
-        self._active_trace_project_id = project_id
+        trace_token = self._active_trace_project_id.set(project_id)
         await self._record_trace("planner", "started", message="planner request accepted")
         try:
             project = await self._plan_impl(brief, project_id=project_id)
@@ -131,7 +136,7 @@ class PlannerService:
                 return self.repository.get_project(project_id) or project
             return project
         finally:
-            self._active_trace_project_id = None
+            self._active_trace_project_id.reset(trace_token)
 
     async def _plan_impl(self, brief: ProjectBrief, project_id: str | None = None) -> FilmProject:
         assets = self._retrieve_assets(brief)
@@ -194,7 +199,7 @@ class PlannerService:
         error: str | None = None,
         duration_ms: float | None = None,
     ) -> None:
-        project_id = self._active_trace_project_id
+        project_id = self._active_trace_project_id.get()
         if not project_id:
             return
         event = PlannerTraceEvent(

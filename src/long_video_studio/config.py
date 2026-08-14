@@ -109,6 +109,10 @@ class Settings:
     image_edit_guidance_scale: float = 1.0
     image_edit_tokenizer_path: Path | None = None
     render_estimate_scale: float = 1.0
+    render_profile: str = "minimax-h3-s5000-tp4-te4-vpp4-flash"
+    render_fl2va_baseline_seconds: float = 396.2
+    render_ref2va_baseline_seconds: float = 1713.8
+    render_max_concurrency: int = 2
     web_root: str | None = None
     # The hierarchical planner is the default. ``single_pass`` remains an
     # explicit compatibility mode for offline providers and deterministic
@@ -116,6 +120,7 @@ class Settings:
     planner_pipeline_mode: str = "hierarchical"
     planner_timeout_seconds: float = 300.0
     planner_shot_concurrency: int = 3
+    planner_project_concurrency: int = 3
     planner_continuity_critic: bool = True
     planner_skills_dir: Path | None = None
 
@@ -176,10 +181,30 @@ class Settings:
                 0.1,
                 float(os.getenv("STUDIO_RENDER_ESTIMATE_SCALE", "1.0")),
             ),
+            render_profile=os.getenv(
+                "STUDIO_RENDER_PROFILE",
+                "minimax-h3-s5000-tp4-te4-vpp4-flash",
+            ).strip(),
+            render_fl2va_baseline_seconds=max(
+                1.0,
+                float(os.getenv("STUDIO_RENDER_FL2VA_BASELINE_SECONDS", "396.2")),
+            ),
+            render_ref2va_baseline_seconds=max(
+                1.0,
+                float(os.getenv("STUDIO_RENDER_REF2VA_BASELINE_SECONDS", "1713.8")),
+            ),
+            render_max_concurrency=max(
+                1,
+                int(os.getenv("STUDIO_RENDER_MAX_CONCURRENCY", "2")),
+            ),
             web_root=os.getenv("STUDIO_WEB_ROOT") or None,
             planner_pipeline_mode=os.getenv("STUDIO_PLANNER_PIPELINE", "hierarchical").strip().lower(),
             planner_timeout_seconds=float(os.getenv("STUDIO_PLANNER_TIMEOUT_SECONDS", "300")),
             planner_shot_concurrency=max(1, int(os.getenv("STUDIO_PLANNER_SHOT_CONCURRENCY", "3"))),
+            planner_project_concurrency=max(
+                1,
+                int(os.getenv("STUDIO_PLANNER_PROJECT_CONCURRENCY", "3")),
+            ),
             planner_continuity_critic=_enabled("STUDIO_PLANNER_CONTINUITY_CRITIC", default=True),
             planner_skills_dir=_discover_h3_skills_dir(),
         )

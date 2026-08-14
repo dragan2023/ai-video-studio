@@ -398,7 +398,7 @@ class FilmProject(BaseModel):
     world_bible: WorldBible
     shots: list[ShotSpec]
     timeline: list[TimelineClip] = Field(default_factory=list)
-    status: Literal["planned", "compiled", "rendering", "complete", "failed"] = "planned"
+    status: Literal["planning", "planned", "compiled", "rendering", "complete", "failed"] = "planned"
     planner_trace: list[PlannerTraceEvent] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -470,5 +470,47 @@ class RenderJob(BaseModel):
     output_path: str | None = None
     subtitle_path: str | None = None
     error: str | None = None
+    estimated_seconds: float | None = Field(default=None, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class RenderObservation(BaseModel):
+    """Append-only successful render timing used to calibrate future ETAs."""
+
+    id: str = Field(default_factory=lambda: new_id("observation"))
+    source_key: str
+    project_id: str
+    shot_id: str
+    render_profile: str
+    task: ShotTask
+    continuation_mode: str
+    aspect_ratio: str
+    duration_seconds: float = Field(gt=0)
+    inference_steps: int = Field(gt=0)
+    elapsed_seconds: float = Field(ge=0)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ShotRenderEstimate(BaseModel):
+    shot_id: str
+    task: ShotTask
+    continuation_mode: str
+    estimated_seconds: float = Field(ge=0)
+    remaining_seconds: float = Field(ge=0)
+    sample_count: int = Field(ge=0)
+    source: Literal["history", "configured"]
+    confidence: Literal["low", "medium", "high"]
+
+
+class ProjectRenderEstimate(BaseModel):
+    project_id: str
+    total_seconds: float = Field(ge=0)
+    remaining_seconds: float = Field(ge=0)
+    assembly_seconds: float = Field(ge=0)
+    sample_count: int = Field(ge=0)
+    source: Literal["history", "configured", "mixed"]
+    shots: list[ShotRenderEstimate] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=utc_now)

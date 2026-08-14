@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from long_video_studio.adapters.image_edit import known_multi_image_support
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
@@ -15,12 +17,16 @@ from long_video_studio.domain import (
     resolved_continuation_mode,
 )
 
+if TYPE_CHECKING:
+    from long_video_studio.estimator import RenderEstimator
+
 
 class FilmCompiler:
     """Compile creator-level Film IR into an infrastructure-facing execution plan."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, estimator: RenderEstimator | None = None):
         self.settings = settings
+        self.estimator = estimator
 
     def capabilities(self) -> list[ModelCapability]:
         image_edit_configured = bool(
@@ -292,12 +298,17 @@ class FilmCompiler:
                     ),
                 )
             )
+        calibrated_total = (
+            self.estimator.estimate_project(project, include_completed=True).total_seconds
+            if self.estimator is not None
+            else total_estimate
+        )
         return ExecutionPlan(
             project_id=project.id,
             stages=stages,
             deployments=deployments,
             warnings=list(dict.fromkeys(warnings)),
-            estimated_seconds=round(total_estimate, 1),
+            estimated_seconds=round(calibrated_total, 1),
         )
 
     @staticmethod
@@ -306,12 +317,13 @@ class FilmCompiler:
         steps: int,
         continuation_mode: ContinuationMode | None = None,
     ) -> float:
-        # Measured on 8x MTT S5000 at 1280x704 with model-level CPU offload.
+        # Current 4x S5000 TP4/TE4/VAE-PP4/Flash baselines, normalized to
+        # 15 seconds and 50 steps. Runtime Studio estimates use RenderEstimator
+        # and historical medians; this is the repository-free compiler fallback.
         reference_seconds = {
-            None: 431.1,
-            ContinuationMode.FAST: 635.0,
-            ContinuationMode.QUALITY: 931.1,
+            None: 594.3,
+            ContinuationMode.FAST: 594.3,
+            ContinuationMode.QUALITY: 2570.7,
         }[continuation_mode]
         denoise = reference_seconds * (steps / 50) * (duration_seconds / 15)
-        fixed = 8.0
-        return round(denoise + fixed, 1)
+        return round(denoise, 1)

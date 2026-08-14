@@ -269,6 +269,31 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.project-picker {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto;
+  column-gap: 7px;
+  align-items: center;
+}
+.project-picker > span {
+  grid-column: 1 / -1;
+}
+.project-delete {
+  display: inline-grid;
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(255, 92, 76, 0.22);
+  border-radius: 8px;
+  color: #aa7770;
+  background: rgba(255, 92, 76, 0.05);
+}
+.project-delete:hover:not(:disabled) {
+  border-color: rgba(255, 92, 76, 0.55);
+  color: #ff7767;
+  background: rgba(255, 92, 76, 0.11);
+}
 .project-picker select:focus {
   border: 0;
   box-shadow: none;
@@ -1046,6 +1071,34 @@ select {
   overflow-x: auto;
   padding: 2px 2px 7px;
   scrollbar-color: #5b3a1c transparent;
+}
+.planning-placeholder {
+  display: flex;
+  width: 100%;
+  min-height: 116px;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+  border: 1px dashed rgba(255, 153, 15, 0.28);
+  border-radius: 12px;
+  color: var(--amber);
+  background: rgba(255, 153, 15, 0.035);
+}
+.planning-placeholder strong,
+.planning-placeholder small,
+.estimate-source {
+  display: block;
+}
+.planning-placeholder strong {
+  color: #ddd8ce;
+  font-size: 12px;
+}
+.planning-placeholder small,
+.estimate-source {
+  margin-top: 5px;
+  color: #777a74;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
 }
 .shot-tile {
   flex: 0 0 190px;

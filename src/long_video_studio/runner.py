@@ -26,6 +26,7 @@ from long_video_studio.domain import (
     resolved_continuation_mode,
     utc_now,
 )
+from long_video_studio.estimator import RenderEstimator
 from long_video_studio.h3_context import stable_speaker_ids
 from long_video_studio.repository import StudioRepository
 
@@ -39,9 +40,16 @@ class RenderManager:
         "identity, scene geometry, camera direction, motion, and audio continuity."
     )
 
-    def __init__(self, settings: Settings, repository: StudioRepository):
+    def __init__(
+        self,
+        settings: Settings,
+        repository: StudioRepository,
+        *,
+        estimator: RenderEstimator | None = None,
+    ):
         self.settings = settings
         self.repository = repository
+        self.estimator = estimator or RenderEstimator(settings, repository)
         self.media = MediaTools(settings.ffmpeg_binary, settings.ffprobe_binary)
         self.image_edit_provider: ImageEditProvider | None = None
         self.image_edit_provider_error: str | None = None
@@ -50,6 +58,7 @@ class RenderManager:
         except ValueError as error:
             self.image_edit_provider_error = str(error)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._semaphore = asyncio.Semaphore(settings.render_max_concurrency)
 
     def submit(self, project_id: str) -> RenderJob:
         project = self.repository.get_project(project_id)
@@ -62,7 +71,8 @@ class RenderManager:
             active_job = self.repository.get_job(job_id)
             if active_job and active_job.project_id == project_id:
                 return active_job
-        job = self.repository.save_job(RenderJob(project_id=project_id))
+        estimate = self.estimator.estimate_project(project, include_completed=True)
+        job = self.repository.save_job(RenderJob(project_id=project_id, estimated_seconds=estimate.total_seconds))
         # FastAPI invokes the render route on its event-loop thread.  Resolve
         # that loop explicitly so a worker-thread refactor cannot lose it.
         loop = asyncio.get_running_loop()
@@ -72,6 +82,10 @@ class RenderManager:
         return job
 
     async def _run(self, job_id: str) -> None:
+        async with self._semaphore:
+            await self._run_with_slot(job_id)
+
+    async def _run_with_slot(self, job_id: str) -> None:
         job = self.repository.get_job(job_id)
         if not job:
             return
@@ -80,6 +94,7 @@ class RenderManager:
             return
         job.status = "running"
         job.message = "starting render"
+        job.started_at = utc_now()
         self.repository.save_job(job)
         project.status = "rendering"
         self.repository.save_project(project)
@@ -238,6 +253,7 @@ class RenderManager:
                 if active_started_monotonic is not None:
                     shot.render_duration_seconds = round(time.monotonic() - active_started_monotonic, 3)
                 self.repository.save_project(project)
+                self.estimator.observe(project, shot)
                 active_shot = None
                 active_started_monotonic = None
 
@@ -261,6 +277,7 @@ class RenderManager:
             job.message = "render complete"
             job.output_path = str(final_path)
             job.subtitle_path = str(subtitle_path) if subtitle_path else None
+            job.completed_at = utc_now()
             self.repository.save_job(job)
         except Exception as error:  # noqa: BLE001 - background job must persist failures
             project.status = "failed"
@@ -274,7 +291,43 @@ class RenderManager:
             job.status = "failed"
             job.error = str(error)
             job.message = "render failed"
+            job.completed_at = utc_now()
             self.repository.save_job(job)
+
+    def active_project_ids(self) -> set[str]:
+        active: set[str] = set()
+        for job_id, task in self._tasks.items():
+            if task.done():
+                continue
+            job = self.repository.get_job(job_id)
+            if job:
+                active.add(job.project_id)
+        return active
+
+    async def shutdown(self) -> None:
+        active = [(job_id, task) for job_id, task in self._tasks.items() if not task.done()]
+        for _, task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*(task for _, task in active), return_exceptions=True)
+        for job_id, _ in active:
+            job = self.repository.get_job(job_id)
+            if not job or job.status not in {"queued", "running"}:
+                continue
+            job.status = "failed"
+            job.error = "Studio stopped before the render completed"
+            job.message = "render interrupted"
+            job.completed_at = utc_now()
+            self.repository.save_job(job)
+            project = self.repository.get_project(job.project_id)
+            if project and project.status == "rendering":
+                project.status = "failed"
+                for shot in project.shots:
+                    if shot.status == ShotStatus.RENDERING:
+                        shot.status = ShotStatus.FAILED
+                        shot.error = "Studio stopped before the render completed"
+                project.updated_at = utc_now()
+                self.repository.save_project(project)
 
     @staticmethod
     def _write_sidecar_subtitles(project, output_dir: Path) -> Path | None:

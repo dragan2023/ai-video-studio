@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import replace
 
 import pytest
@@ -11,6 +13,7 @@ from long_video_studio.domain import (
     FilmProject,
     ProjectBrief,
     RenderJob,
+    RenderObservation,
     ShotSpec,
     ShotTask,
     WorldBible,
@@ -146,6 +149,102 @@ def test_asset_delete_is_blocked_while_project_references_it(settings):
 
     assert deleted.status_code == 409
     assert "仍被项目或分镜引用" in deleted.json()["detail"]
+
+
+def test_project_delete_removes_jobs_and_outputs_but_preserves_assets(settings):
+    app = create_app(settings)
+    client = TestClient(app)
+    upload = client.post(
+        "/api/assets/upload",
+        files=[("files", ("shared.png", png_bytes().read(), "image/png"))],
+    )
+    asset_id = upload.json()[0]["id"]
+    project = app.state.services.repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="A disposable project.", reference_asset_ids=[asset_id]),
+            world_bible=WorldBible(logline="Disposable", visual_style="Natural"),
+            shots=[],
+        )
+    )
+    job = app.state.services.repository.save_job(RenderJob(project_id=project.id, status="complete", progress=1))
+    observation = app.state.services.repository.save_render_observation(
+        RenderObservation(
+            source_key="preserved-after-project-delete",
+            project_id=project.id,
+            shot_id="shot-history",
+            render_profile=settings.render_profile,
+            task=ShotTask.FL2VA,
+            continuation_mode="initial",
+            aspect_ratio="16:9",
+            duration_seconds=10,
+            inference_steps=50,
+            elapsed_seconds=396.2,
+        )
+    )
+    output_dir = settings.output_dir / project.id
+    output_dir.mkdir(parents=True)
+    (output_dir / "final.mp4").write_bytes(b"video")
+
+    response = client.delete(f"/api/projects/{project.id}")
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == project.id
+    assert app.state.services.repository.get_project(project.id) is None
+    assert app.state.services.repository.get_job(job.id) is None
+    assert not output_dir.exists()
+    assert app.state.services.repository.get_asset(asset_id) is not None
+    assert observation.id in {
+        item.id for item in app.state.services.repository.list_render_observations(settings.render_profile)
+    }
+
+
+def test_project_delete_rejects_active_render_job(settings):
+    app = create_app(settings)
+    project = app.state.services.repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="An active project."),
+            world_bible=WorldBible(logline="Active", visual_style="Natural"),
+            shots=[],
+        )
+    )
+    app.state.services.repository.save_job(RenderJob(project_id=project.id, status="running"))
+
+    response = TestClient(app).delete(f"/api/projects/{project.id}")
+
+    assert response.status_code == 409
+    assert app.state.services.repository.get_project(project.id) is not None
+
+
+def test_async_planner_accepts_multiple_projects_before_either_finishes(settings, monkeypatch):
+    app = create_app(settings)
+
+    async def slow_plan(brief, project_id=None):
+        await asyncio.sleep(0.08)
+        project = app.state.services.repository.get_project(project_id)
+        assert project is not None
+        project.status = "planned"
+        app.state.services.repository.save_project(project)
+        return project
+
+    monkeypatch.setattr(app.state.planning_manager.planner, "plan", slow_plan)
+    with TestClient(app) as client:
+        started = time.monotonic()
+        first = client.post(
+            "/api/projects/plan-async",
+            json={"title": "Concurrent one", "prompt": "First background plan."},
+        )
+        second = client.post(
+            "/api/projects/plan-async",
+            json={"title": "Concurrent two", "prompt": "Second background plan."},
+        )
+        accepted_in = time.monotonic() - started
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["id"] != second.json()["id"]
+        assert accepted_in < 0.08
+        time.sleep(0.14)
+        assert client.get(f"/api/projects/{first.json()['id']}").json()["status"] == "planned"
+        assert client.get(f"/api/projects/{second.json()['id']}").json()["status"] == "planned"
 
 
 def test_failed_planning_keeps_a_recoverable_project_draft(settings, monkeypatch):

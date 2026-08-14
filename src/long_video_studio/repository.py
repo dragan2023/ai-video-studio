@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from long_video_studio.domain import AssetRecord, FilmProject, RenderJob, utc_now
+from long_video_studio.domain import AssetRecord, FilmProject, RenderJob, RenderObservation, utc_now
 
 
 class StudioRepository:
@@ -52,11 +52,24 @@ class StudioRepository:
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id);
+
+                CREATE TABLE IF NOT EXISTS render_observations (
+                    id TEXT PRIMARY KEY,
+                    source_key TEXT NOT NULL UNIQUE,
+                    project_id TEXT NOT NULL,
+                    shot_id TEXT NOT NULL,
+                    render_profile TEXT NOT NULL,
+                    task TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_render_observations_profile_task
+                    ON render_observations(render_profile, task, created_at);
                 """
             )
 
     @staticmethod
-    def _dump(value: AssetRecord | FilmProject | RenderJob) -> str:
+    def _dump(value: AssetRecord | FilmProject | RenderJob | RenderObservation) -> str:
         return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
 
     def save_asset(self, asset: AssetRecord) -> AssetRecord:
@@ -149,6 +162,21 @@ class StudioRepository:
             rows = connection.execute("SELECT payload FROM projects ORDER BY updated_at DESC").fetchall()
         return [self._load_project(row["payload"]) for row in rows]
 
+    def delete_project(self, project_id: str) -> FilmProject | None:
+        """Delete a project and its jobs atomically while preserving shared assets."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            project = self._load_project(row["payload"])
+            connection.execute("DELETE FROM jobs WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        return project
+
     @staticmethod
     def _load_project(payload: str) -> FilmProject:
         """Load legacy projects while keeping the new 14s write ceiling.
@@ -209,3 +237,53 @@ class StudioRepository:
                 (project_id,),
             ).fetchone()
         return RenderJob.model_validate_json(row["payload"]) if row else None
+
+    def list_active_jobs(self) -> list[RenderJob]:
+        """Return the latest queued/running job for each project."""
+
+        with self._connect() as connection:
+            rows = connection.execute("SELECT payload FROM jobs ORDER BY updated_at DESC").fetchall()
+        active: list[RenderJob] = []
+        seen_projects: set[str] = set()
+        for row in rows:
+            job = RenderJob.model_validate_json(row["payload"])
+            if job.project_id in seen_projects:
+                continue
+            seen_projects.add(job.project_id)
+            if job.status in {"queued", "running"}:
+                active.append(job)
+        return active
+
+    def save_render_observation(self, observation: RenderObservation) -> RenderObservation:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO render_observations(
+                    id, source_key, project_id, shot_id, render_profile,
+                    task, created_at, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key) DO NOTHING
+                """,
+                (
+                    observation.id,
+                    observation.source_key,
+                    observation.project_id,
+                    observation.shot_id,
+                    observation.render_profile,
+                    observation.task.value,
+                    observation.created_at.isoformat(),
+                    self._dump(observation),
+                ),
+            )
+        return observation
+
+    def list_render_observations(self, render_profile: str | None = None) -> list[RenderObservation]:
+        query = "SELECT payload FROM render_observations"
+        parameters: tuple[str, ...] = ()
+        if render_profile is not None:
+            query += " WHERE render_profile = ?"
+            parameters = (render_profile,)
+        query += " ORDER BY created_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [RenderObservation.model_validate_json(row["payload"]) for row in rows]

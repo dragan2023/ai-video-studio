@@ -171,32 +171,6 @@ function shotRenderTiming(shot, now) {
   return "尚未生成";
 }
 
-function estimateProjectSeconds(value, scale = 1) {
-  if (!value?.shots?.length) return 0;
-  let total = 0;
-  value.shots.forEach((shot, index) => {
-    const isContinuation = Boolean(
-      shot.continuity_from_shot_id && !shot.start_frame_asset_id,
-    );
-    const continuationMode =
-      shot.continuation_mode || value.brief.continuation_mode || "quality";
-    const referenceSeconds = !isContinuation
-      ? 431.1
-      : continuationMode === "quality"
-        ? 931.1
-        : 635.0;
-    total +=
-      referenceSeconds *
-        (shot.inference_steps / 50) *
-        (shot.duration_seconds / 15) +
-      8;
-    total += 2;
-    if (index > 0 && !shot.continuity_from_shot_id) total += 20;
-  });
-  total += Math.max(5, value.brief.duration_seconds * 0.15);
-  return Math.round(total * scale);
-}
-
 function runtimeShotTask(project, shot) {
   if (shot?.start_frame_asset_id) return "fl2va";
   if (shot?.continuity_from_shot_id) {
@@ -364,8 +338,10 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [project, setProject] = useState(null);
   const [health, setHealth] = useState(null);
-  const [renderEstimateScale, setRenderEstimateScale] = useState(1);
   const [job, setJob] = useState(null);
+  const [renderEstimate, setRenderEstimate] = useState(null);
+  const [activeJobs, setActiveJobs] = useState([]);
+  const [projectDeleting, setProjectDeleting] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("未命名影片");
   const [duration, setDuration] = useState(60);
@@ -483,11 +459,15 @@ function App() {
     setProjects(value);
     return value;
   }, []);
+  const loadActiveJobs = useCallback(async () => {
+    const value = (await api("/api/jobs/active")) || [];
+    setActiveJobs(value);
+    return value;
+  }, []);
   const loadHealth = useCallback(async () => {
     try {
       const value = await api("/api/health");
       setHealth(value.fl2va_healthy && value.ref2va_healthy);
-      setRenderEstimateScale(Number(value.render_estimate_scale || 1));
     } catch {
       setHealth(false);
     }
@@ -509,11 +489,13 @@ function App() {
       // mistaken for the project the creator just selected.
       setProject(null);
       setJob(null);
+      setRenderEstimate(null);
       setSelected(new Set());
-      const [value, latest, trace] = await Promise.all([
+      const [value, latest, trace, estimate] = await Promise.all([
         api(`/api/projects/${id}`),
         api(`/api/projects/${id}/jobs/latest`),
         api(`/api/projects/${id}/planner-trace`).catch(() => []),
+        api(`/api/projects/${id}/render-estimate`).catch(() => null),
       ]).finally(() => {
         if (requestId === projectRequest.current) setProjectLoading(false);
       });
@@ -540,6 +522,7 @@ function App() {
       );
       setSelected(new Set(value.brief.reference_asset_ids || []));
       setJob(latest);
+      setRenderEstimate(estimate);
       if (traceRequestEpoch === traceEpoch.current) {
         setPlannerTrace(Array.isArray(trace) ? trace : []);
       }
@@ -555,6 +538,7 @@ function App() {
         const [, availableProjects] = await Promise.all([
           loadAssets(),
           loadProjects(),
+          loadActiveJobs(),
           loadStylePresets(),
           loadHealth(),
         ]);
@@ -568,7 +552,7 @@ function App() {
       cancelled = true;
       projectRequest.current += 1;
     };
-  }, [loadAssets, loadProjects, loadStylePresets, loadHealth, loadProject]);
+  }, [loadAssets, loadProjects, loadActiveJobs, loadStylePresets, loadHealth, loadProject]);
 
   useEffect(() => {
     const projectId = project?.id;
@@ -579,13 +563,16 @@ function App() {
     let cancelled = false;
     const refresh = async () => {
       try {
-        const [next, nextProject] = await Promise.all([
+        const [next, nextProject, nextEstimate] = await Promise.all([
           api(`/api/jobs/${jobId}`),
           api(`/api/projects/${projectId}`),
+          api(`/api/projects/${projectId}/render-estimate`).catch(() => null),
         ]);
         if (cancelled) return;
         setJob(next);
         setProject(nextProject);
+        setRenderEstimate(nextEstimate);
+        void loadActiveJobs();
         if (next.status === "complete") setNotice("成片已完成，可以开始预览");
       } catch (error) {
         if (!cancelled) setNotice(error.message);
@@ -597,13 +584,58 @@ function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [job?.id, job?.status, project?.id]);
+  }, [job?.id, job?.status, project?.id, loadActiveJobs]);
 
   useEffect(() => {
-    if (!busy || !project?.id) return undefined;
-    const timer = window.setInterval(() => refreshPlannerTrace(project.id), 1000);
+    if (project?.status !== "planning" || !project?.id) return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const [next] = await Promise.all([
+          api(`/api/projects/${project.id}`),
+          refreshPlannerTrace(project.id),
+        ]);
+        if (cancelled) return;
+        setProject(next);
+        if (next.status !== "planning") {
+          await loadProjects();
+          if (next.status === "failed") {
+            setPlanningError("这次构思没有完成。项目草稿已保留，可以重新构思。");
+          } else {
+            setPlanningError("");
+            setNotice("故事板生成完成，可以逐镜头检查和编辑");
+          }
+        }
+      } catch (error) {
+        if (!cancelled) setNotice(error.message);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [project?.id, project?.status, refreshPlannerTrace, loadProjects]);
+
+  useEffect(() => {
+    const refresh = () => Promise.all([loadProjects(), loadActiveJobs()]).catch(() => null);
+    const timer = window.setInterval(refresh, 3500);
     return () => window.clearInterval(timer);
-  }, [busy, project?.id, refreshPlannerTrace]);
+  }, [loadProjects, loadActiveJobs]);
+
+  useEffect(() => {
+    if (!project?.id || project.status === "planning") return undefined;
+    let cancelled = false;
+    api(`/api/projects/${project.id}/render-estimate`)
+      .then((value) => {
+        if (!cancelled) setRenderEstimate(value);
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id, project?.status, project?.updated_at]);
 
   useEffect(() => {
     if (!job || !["running", "queued"].includes(job.status)) return undefined;
@@ -699,6 +731,7 @@ function App() {
     projectRequest.current += 1;
     setProject(null);
     setJob(null);
+    setRenderEstimate(null);
     setPrompt("");
     setTitle("未命名影片");
     setDuration(60);
@@ -715,6 +748,37 @@ function App() {
     traceHiddenBefore.current = 0;
     setPlannerTrace([]);
     setClientTrace([]);
+  };
+
+  const deleteProject = async () => {
+    if (!project?.id || projectDeleting) return;
+    const active = activeJobs.find((item) => item.project_id === project.id);
+    if (active && ["queued", "running"].includes(active.status)) {
+      setNotice("这个项目正在渲染，完成或失败后才能删除");
+      return;
+    }
+    if (!window.confirm(`删除「${project.brief?.title || "未命名影片"}」及其生成视频？素材库不会被删除。`)) {
+      return;
+    }
+    const deletedId = project.id;
+    setProjectDeleting(true);
+    try {
+      await api(`/api/projects/${deletedId}`, { method: "DELETE" });
+      projectRequest.current += 1;
+      const remaining = await loadProjects();
+      await loadActiveJobs();
+      newProject();
+      if (remaining.length) {
+        await loadProject(remaining[0].id);
+      } else {
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+      setNotice("项目和生成结果已删除；共享素材仍保留在素材库");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setProjectDeleting(false);
+    }
   };
 
   const navigateWorkspace = (sectionId) => {
@@ -1070,14 +1134,14 @@ function App() {
     setPlannerTrace([]);
     setBusy(true);
     const brief = makeBrief();
-    addClientTrace("request", "POST /api/projects/plan", brief);
+    addClientTrace("request", "POST /api/projects/plan-async", brief);
     try {
-      const value = await api("/api/projects/plan", {
+      const value = await api("/api/projects/plan-async", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(brief),
       });
-      addClientTrace("response", "planner returned a storyboard", {
+      addClientTrace("response", "planner task accepted", {
         projectId: value?.id,
         shotCount: value?.shots?.length || 0,
       });
@@ -1086,8 +1150,9 @@ function App() {
       if (requestId !== projectRequest.current) return;
       setProject(value);
       setJob(null);
+      setRenderEstimate(null);
       setActiveTab("storyboard");
-      setNotice("故事板已生成，可以逐镜检查");
+      setNotice("构思任务已启动；可以切换项目或新建另一部影片");
       window.requestAnimationFrame(() =>
         document
           .getElementById("storyboard")
@@ -1120,6 +1185,11 @@ function App() {
         method: "POST",
       });
       setJob(value);
+      const estimate = await api(`/api/projects/${projectId}/render-estimate`).catch(
+        () => null,
+      );
+      setRenderEstimate(estimate);
+      void loadActiveJobs();
       setActiveTab("render");
       setNotice("渲染已开始，期间可以继续编辑项目");
     } catch (error) {
@@ -1149,15 +1219,22 @@ function App() {
     }
   };
 
-  const estimatedSeconds = useMemo(
-    () => estimateProjectSeconds(project, renderEstimateScale),
-    [project, renderEstimateScale],
-  );
-  const elapsedSeconds = job?.created_at
-    ? Math.max(0, (clockNow - Date.parse(job.created_at)) / 1000)
+  const estimatedSeconds =
+    renderEstimate?.total_seconds || job?.estimated_seconds || 0;
+  const elapsedSeconds = job?.started_at
+    ? Math.max(
+        0,
+        (Math.min(
+          clockNow,
+          job.completed_at ? Date.parse(job.completed_at) : clockNow,
+        ) -
+          Date.parse(job.started_at)) /
+          1000,
+      )
     : 0;
+  const remainingSeconds = renderEstimate?.remaining_seconds ?? estimatedSeconds;
   const estimatedProgress = estimatedSeconds
-    ? Math.min(0.99, elapsedSeconds / estimatedSeconds)
+    ? Math.min(0.99, Math.max(0, (estimatedSeconds - remainingSeconds) / estimatedSeconds))
     : 0;
   const progress =
     job?.status === "complete"
@@ -1165,7 +1242,6 @@ function App() {
       : Math.round(
           Math.max((job?.progress || 0) * 100, estimatedProgress * 100),
         );
-  const remainingSeconds = Math.max(0, estimatedSeconds - elapsedSeconds);
   const currentShot = project?.shots?.find(
     (shot) => shot.id === job?.current_shot_id,
   );
@@ -1197,7 +1273,7 @@ function App() {
           >
             <Icon size={17} />
             <span>{label}</span>
-            {id === "render" && job?.status === "running" ? <i /> : null}
+            {id === "render" && activeJobs.length ? <i /> : null}
           </button>
         ))}
         <div className="rail-spacer" />
@@ -1231,12 +1307,30 @@ function App() {
               aria-label="选择项目"
             >
               <option value="">NEW FILM</option>
-              {projects.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.brief.title}
-                </option>
-              ))}
+              {projects.map((item) => {
+                const active = activeJobs.find((jobItem) => jobItem.project_id === item.id);
+                const activity =
+                  item.status === "planning"
+                    ? " · 构思中"
+                    : active
+                      ? ` · ${active.status === "queued" ? "排队" : `${Math.round((active.progress || 0) * 100)}%`}`
+                      : "";
+                return (
+                  <option key={item.id} value={item.id}>
+                    {item.brief.title}{activity}
+                  </option>
+                );
+              })}
             </select>
+            <button
+              className="project-delete"
+              onClick={deleteProject}
+              disabled={!project?.id || projectDeleting}
+              title="删除当前项目"
+              aria-label="删除当前项目"
+            >
+              <Trash2 size={15} />
+            </button>
           </div>
           <div className="header-actions">
             <StatusPill health={health} job={job} />
@@ -1294,8 +1388,20 @@ function App() {
               <div className="hint">
                 <Sparkles size={14} /> Agent 会自动生成完整分镜
               </div>
-              <button className="glow-button" onClick={plan} disabled={busy || projectLoading}>
-                <span>{projectLoading ? "正在加载项目…" : busy ? "正在构思…" : "开始构思"}</span>
+              <button
+                className="glow-button"
+                onClick={plan}
+                disabled={busy || projectLoading || project?.status === "planning"}
+              >
+                <span>
+                  {projectLoading
+                    ? "正在加载项目…"
+                    : project?.status === "planning"
+                      ? "后台构思中…"
+                      : busy
+                        ? "正在提交…"
+                        : "开始构思"}
+                </span>
                 <ArrowUpRight size={16} />
               </button>
             </div>
@@ -1314,7 +1420,7 @@ function App() {
                   className="outline-button compact"
                   type="button"
                   onClick={plan}
-                  disabled={busy}
+                  disabled={busy || project?.status === "planning"}
                 >
                   重新构思
                 </button>
@@ -1544,6 +1650,15 @@ function App() {
               </button>
             </div>
             <div className="story-strip">
+              {project.status === "planning" && !(project.shots || []).length ? (
+                <div className="planning-placeholder">
+                  <Sparkles size={20} />
+                  <div>
+                    <strong>导演组正在并行完善故事与分镜</strong>
+                    <small>这个任务会在后台继续；你可以切换项目或新建另一部影片。</small>
+                  </div>
+                </div>
+              ) : null}
               {(project.shots || []).map((shot, index) => (
                 <motion.article
                   key={shot.id}
@@ -1622,7 +1737,9 @@ function App() {
                     ? "已完成"
                     : job.status === "failed"
                       ? "失败"
-                      : "渲染中"}
+                      : job.status === "queued"
+                        ? "排队中"
+                        : "渲染中"}
                 </div>
               </div>
               <div className="render-body">
@@ -1655,6 +1772,13 @@ function App() {
                   <small>
                     {currentShot ? `当前：${currentShot.title}` : "等待下一步"}
                   </small>
+                  {renderEstimate ? (
+                    <small className="estimate-source">
+                      {renderEstimate.source === "configured"
+                        ? "暂无同配置历史，使用部署基线"
+                        : `基于 ${renderEstimate.sample_count} 个同配置历史镜头的中位数校准`}
+                    </small>
+                  ) : null}
                 </div>
                 {job.status === "complete" ? (
                   <div className="result-wrap">
@@ -1693,6 +1817,13 @@ function App() {
                 <p>
                   当前项目还没有制作任务。确认故事板后，点击开始制作即可看到实时进度、倒计时和每一镜的锚点更新。
                 </p>
+                {renderEstimate ? (
+                  <small>
+                    当前预计总时长 {formatDuration(renderEstimate.total_seconds)} · {renderEstimate.sample_count
+                      ? `${renderEstimate.sample_count} 个历史镜头校准`
+                      : "部署基线"}
+                  </small>
+                ) : null}
                 <button
                   className="glow-button"
                   onClick={render}

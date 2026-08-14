@@ -26,7 +26,8 @@ workflow:
 - previous-boundary-to-next-anchor continuity;
 - optional story-aware anchor frames built by an image-edit provider;
 - provider switching between self-hosted vLLM-Omni and hosted APIs;
-- resumable projects, progress tracking, inline preview, and sidecar subtitles.
+- resumable and deletable projects, concurrent background planning/rendering,
+  history-calibrated ETAs, inline preview, and sidecar subtitles.
 
 ## Architecture
 
@@ -143,6 +144,7 @@ packs with:
 ```bash
 export STUDIO_PLANNER_PIPELINE=hierarchical
 export STUDIO_PLANNER_SHOT_CONCURRENCY=3
+export STUDIO_PLANNER_PROJECT_CONCURRENCY=3
 export STUDIO_H3_SKILLS_DIR=/path/to/long-video-studio/skills
 ```
 
@@ -202,6 +204,13 @@ All configuration uses `STUDIO_` environment variables. Start from
 - `STUDIO_IMPORT_ROOTS`: colon-separated server paths allowed for asset import;
 - `STUDIO_COPY_IMPORTED_ASSETS`: copy imported files into studio storage;
 - `STUDIO_FFMPEG` and `STUDIO_FFPROBE`: media binaries or wrappers.
+
+Rendering is scheduled independently per project. Set
+`STUDIO_RENDER_MAX_CONCURRENCY` to the number of project pipelines the deployed
+video services can sustain. ETA observations are isolated by
+`STUDIO_RENDER_PROFILE`; use a new profile name after changing the model,
+precision, hardware, or parallel topology. Successful shot timings remain in
+the calibration table even if their project is later deleted.
 
 API keys are never required in project data and should only come from the
 environment or a deployment secret store.
@@ -289,6 +298,8 @@ src/long_video_studio/
   compiler.py     storyboard-to-execution compiler
   domain.py       provider-neutral Film IR
   planner.py      deterministic and agent planners
+  planning.py     concurrent background project planning
+  estimator.py    profile-aware render ETA calibration
   runner.py       render orchestration
 web/              React creator UI and Vite build
 docs/             architecture and provider contracts
