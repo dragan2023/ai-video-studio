@@ -197,6 +197,19 @@ function runtimeShotLabel(project, shot) {
   return String(task).toUpperCase();
 }
 
+function transitionLabel(shot) {
+  return (
+    {
+      continuous: "连续动作",
+      camera_move: "同轴镜头运动",
+      match_cut: "匹配剪辑",
+      occlusion_cut: "遮挡转场",
+      hard_cut: "硬切",
+      anchor: "首帧锚点",
+    }[shot?.transition_kind] || "连续动作"
+  );
+}
+
 function frameUrl(projectId, shot, kind) {
   const path =
     kind === "anchor" ? shot.anchor_frame_path : shot.boundary_frame_path;
@@ -748,6 +761,7 @@ function App() {
       opening_state: shot.opening_state || "",
       ending_state: shot.ending_state || "",
       continuity_handoff: shot.continuity_handoff || "",
+      transition_kind: shot.transition_kind || "continuous",
       reference_anchors: [...(shot.reference_anchors || [])],
       hook: shot.hook || "",
       visual_beats: (shot.visual_beats || []).map((beat) => ({ ...beat })),
@@ -855,6 +869,7 @@ function App() {
             opening_state: shotDraft.opening_state,
             ending_state: shotDraft.ending_state,
             continuity_handoff: shotDraft.continuity_handoff,
+            transition_kind: shotDraft.transition_kind || "continuous",
             reference_anchors: shotDraft.reference_anchors
               .map((value) => value.trim())
               .filter(Boolean),
@@ -866,6 +881,9 @@ function App() {
               state_change: beat.state_change.trim(),
               camera: beat.camera.trim(),
               sound: beat.sound.trim(),
+              performance: (beat.performance || "").trim(),
+              spatial_anchor: (beat.spatial_anchor || "").trim(),
+              handoff: (beat.handoff || "").trim(),
             })),
             negative_prompt: shotDraft.negative_prompt,
             subtitle_text: shotDraft.subtitle_text || null,
@@ -1389,7 +1407,7 @@ function App() {
                     <p>{shot.purpose}</p>
                     <small>
                       {runtimeShotLabel(project, shot)} · {shot.inference_steps}{" "}
-                      steps · {shot.camera}
+                      steps · {transitionLabel(shot)} · {shot.camera}
                     </small>
                   </div>
                 </motion.article>
@@ -1918,6 +1936,22 @@ function App() {
                       }
                     />
                   </label>
+                  <label className="dialog-field">
+                    <span>边界策略</span>
+                    <select
+                      value={shotDraft.transition_kind || "continuous"}
+                      onChange={(event) =>
+                        updateShotDraft("transition_kind", event.target.value)
+                      }
+                    >
+                      <option value="continuous">连续动作</option>
+                      <option value="camera_move">同轴镜头运动</option>
+                      <option value="match_cut">匹配剪辑</option>
+                      <option value="occlusion_cut">遮挡转场</option>
+                      <option value="hard_cut">硬切 / 新场景</option>
+                      <option value="anchor">新首帧锚点</option>
+                    </select>
+                  </label>
                   <section className="shot-prompt-section h3-storyboard-editor">
                     <div className="shot-prompt-section-head">
                       <div>
@@ -2096,6 +2130,37 @@ function App() {
                                   event.target.value,
                                 )
                               }
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>表演与表情</span>
+                            <textarea
+                              rows="2"
+                              value={beat.performance || ""}
+                              onChange={(event) =>
+                                updateVisualBeat(index, "performance", event.target.value)
+                              }
+                              placeholder="重心、眼神、面部微表情与动作阶段。"
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>屏幕空间锚点</span>
+                            <input
+                              value={beat.spatial_anchor || ""}
+                              onChange={(event) =>
+                                updateVisualBeat(index, "spatial_anchor", event.target.value)
+                              }
+                              placeholder="左/右位置、固定地标、前中后景。"
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>Beat handoff</span>
+                            <input
+                              value={beat.handoff || ""}
+                              onChange={(event) =>
+                                updateVisualBeat(index, "handoff", event.target.value)
+                              }
+                              placeholder="下一拍继承的姿态或道具状态。"
                             />
                           </label>
                         </div>

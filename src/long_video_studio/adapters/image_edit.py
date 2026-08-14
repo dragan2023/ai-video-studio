@@ -251,24 +251,21 @@ class OpenAICompatibleImageEditProvider:
             raise ValueError("image edit prompt exceeds the Studio 1000-character preflight")
         if self.tokenizer_path is None:
             return
+        tokenizer_json = (
+            self.tokenizer_path if self.tokenizer_path.is_file() else self.tokenizer_path / "tokenizer.json"
+        )
         if self._tokenizer is None:
+            if not tokenizer_json.is_file():
+                # The tokenizer path is an optional local optimization. A
+                # remote vLLM-Omni image endpoint may have the checkpoint
+                # mounted inside its container while the Studio host does not.
+                return
             try:
                 from tokenizers import Tokenizer
             except ImportError as error:
                 raise RuntimeError(
                     "STUDIO_IMAGE_EDIT_TOKENIZER_PATH requires the optional tokenizers package"
                 ) from error
-            tokenizer_json = (
-                self.tokenizer_path if self.tokenizer_path.is_file() else self.tokenizer_path / "tokenizer.json"
-            )
-            if not tokenizer_json.is_file():
-                # The tokenizer path is an optional local optimization. A
-                # remote vLLM-Omni image endpoint may have the checkpoint
-                # mounted inside its container while the Studio host does
-                # not. Keep the hard character cap, and let the provider
-                # enforce its exact token budget instead of failing with an
-                # opaque ENOENT before the request is sent.
-                return
             self._tokenizer = Tokenizer.from_file(str(tokenizer_json))
         token_count = len(self._tokenizer.encode(request.prompt, add_special_tokens=False).ids)
         if token_count > 1000:
@@ -300,7 +297,7 @@ class OpenAICompatibleImageEditProvider:
         if request.extra_body:
             generation.update(request.extra_body)
         for key, value in generation.items():
-            data[key] = json.dumps(value) if isinstance(value, (dict, list, bool)) else str(value)
+            data[key] = json.dumps(value) if isinstance(value, dict | list | bool) else str(value)
 
         files = [
             (

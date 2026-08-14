@@ -22,7 +22,7 @@ class MediaTools:
             fitted = ImageOps.fit(
                 image,
                 (width, height),
-                method=Image.Resampling.LANCZOS,
+                method=getattr(Image, "Resampling", Image).LANCZOS,
                 centering=(0.5, 0.5),
             )
             fitted.save(output, format="PNG")

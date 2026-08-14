@@ -16,6 +16,7 @@ from long_video_studio.domain import (
     AssetUpdate,
     AssetView,
     ContinuationMode,
+    ContinuityState,
     DialogueLine,
     ExecutionPlan,
     FilmProject,
@@ -25,6 +26,8 @@ from long_video_studio.domain import (
     ShotStatus,
     ShotTask,
     StoryboardBeat,
+    SubjectCard,
+    TransitionKind,
     WorldBible,
     effective_video_task,
     utc_now,
@@ -48,6 +51,7 @@ class ShotUpdate(BaseModel):
     purpose: str | None = None
     duration_seconds: float | None = Field(default=None, ge=4, le=14)
     task: ShotTask | None = None
+    transition_kind: TransitionKind | None = None
     prompt: str | None = None
     anchor_prompt: str | None = None
     audio_prompt: str | None = None
@@ -67,6 +71,8 @@ class ShotUpdate(BaseModel):
     audio_asset_id: str | None = None
     continuity_from_shot_id: str | None = None
     continuation_mode: ContinuationMode | None = None
+    continuity_in: ContinuityState | None = None
+    continuity_out: ContinuityState | None = None
     seed: int | None = None
     fps: int | None = Field(default=None, ge=1, le=120)
     inference_steps: int | None = Field(default=None, ge=1, le=100)
@@ -97,6 +103,7 @@ class WorldBibleUpdate(BaseModel):
     prop_notes: list[str] | None = None
     audio_notes: list[str] | None = None
     continuity_rules: list[str] | None = None
+    subjects: list[SubjectCard] | None = None
 
 
 class ProjectUpdate(BaseModel):

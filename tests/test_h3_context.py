@@ -6,6 +6,7 @@ from long_video_studio.domain import (
     ProjectBrief,
     ShotSpec,
     StoryboardBeat,
+    SubjectCard,
     WorldBible,
 )
 from long_video_studio.h3_context import (
@@ -264,3 +265,130 @@ def test_context_ir_voice_over_keeps_visible_lips_closed():
     prompt = compile_ref2va_context(shot, [("video", "Video 1", "prior clip")]).render()
     assert "The line is voice-over; every visible character keeps their lips closed." in prompt
     assert "<d>[English] The hall remembers.</d>" in prompt
+
+
+def test_context_ir_removes_contradictory_no_dialogue_audio_clause():
+    shot = _shot(
+        dialogue=[DialogueLine(speaker="woman", text="Wait.", language="English", start_seconds=2)]
+    ).model_copy(
+        update={
+            "audio_prompt": "Footsteps continue. No spoken dialogue, narration, or voice-over.",
+            "visual_beats": [
+                StoryboardBeat(
+                    start_seconds=0,
+                    end_seconds=8,
+                    visual_action="The woman turns toward the doorway",
+                    state_change="Her lips close after the line",
+                )
+            ],
+        }
+    )
+    prompt = compile_ref2va_context(shot, [("video", "Video 1", "prior clip")]).render()
+    assert "No spoken dialogue" not in prompt.split("overall_soundscape:\n", 1)[1]
+    assert "<d>[English] Wait.</d>" in prompt
+
+
+def test_context_ir_keeps_stable_subject_card_identity_binding():
+    shot = _shot().model_copy(
+        update={
+            "continuity_in": ContinuityState(characters=["白鹿"], action="standing"),
+        }
+    )
+    bible = WorldBible(
+        logline="A palace exchange",
+        visual_style="cinematic realism",
+        subjects=[
+            SubjectCard(
+                subject_id="bailu",
+                label="白鹿",
+                aliases=["Bai Lu", "演员白鹿"],
+                visual_identity="same face, hair, and body proportions",
+                wardrobe="red court robe",
+                speaker_id="S1",
+            )
+        ],
+    )
+    prompt = compile_ref2va_context(shot, [("video", "Video 1", "prior clip")], world_bible=bible).render()
+    assert "subject_id=bailu" in prompt
+    assert "aliases=Bai Lu, 演员白鹿" in prompt
+    assert "visual_identity=same face" in prompt
+
+
+def test_context_ir_preserves_long_planner_fields_and_beat_details():
+    """Normal planner detail must survive compilation instead of word slicing."""
+
+    def long_field(label: str) -> str:
+        return " ".join([f"{label}_detail_{index}" for index in range(70)])
+
+    shot = _shot().model_copy(
+        update={
+            "prompt": long_field("shot_prompt") + " SHOT_PROMPT_TAIL_SENTINEL",
+            "camera": long_field("camera") + " CAMERA_TAIL_SENTINEL",
+            "opening_state": long_field("opening") + " OPENING_TAIL_SENTINEL",
+            "ending_state": long_field("ending") + " ENDING_TAIL_SENTINEL",
+            "continuity_handoff": long_field("handoff") + " HANDOFF_TAIL_SENTINEL",
+            "hook": long_field("hook") + " HOOK_TAIL_SENTINEL",
+            "reference_anchors": [long_field("anchor") + " ANCHOR_TAIL_SENTINEL"],
+            "visual_beats": [
+                StoryboardBeat(
+                    start_seconds=0,
+                    end_seconds=8,
+                    visual_action=long_field("action") + " ACTION_TAIL_SENTINEL",
+                    state_change=long_field("state") + " STATE_TAIL_SENTINEL",
+                    camera=long_field("beat_camera") + " BEAT_CAMERA_TAIL_SENTINEL",
+                    sound=long_field("sound") + " SOUND_TAIL_SENTINEL",
+                )
+            ],
+        }
+    )
+    prompt = compile_ref2va_context(shot, [("video", "Video 1", "prior clip")]).render()
+
+    for marker in (
+        "SHOT_PROMPT_TAIL_SENTINEL",
+        "CAMERA_TAIL_SENTINEL",
+        "OPENING_TAIL_SENTINEL",
+        "ENDING_TAIL_SENTINEL",
+        "HANDOFF_TAIL_SENTINEL",
+        "HOOK_TAIL_SENTINEL",
+        "ANCHOR_TAIL_SENTINEL",
+        "ACTION_TAIL_SENTINEL",
+        "STATE_TAIL_SENTINEL",
+        "BEAT_CAMERA_TAIL_SENTINEL",
+        "SOUND_TAIL_SENTINEL",
+    ):
+        assert marker in prompt
+
+
+def test_context_ir_emits_first_frame_lock_and_no_replay_boundary():
+    previous = _shot(1).model_copy(
+        update={"ending_state": "BOUNDARY_END_STATE_WITH_LOCKED_POSE_AND_PROP"}
+    )
+    shot = _shot(2).model_copy(
+        update={"opening_state": "BOUNDARY_OPEN_STATE_BEFORE_NEW_ACTION"}
+    )
+    prompt = compile_ref2va_context(
+        shot,
+        [
+            {
+                "kind": "picture",
+                "label": "Picture 1",
+                "description": "the exact final frame of the previous shot",
+                "role": "first_frame",
+                "relationship": "fully_preserved",
+            },
+            {
+                "kind": "video",
+                "label": "Video 1",
+                "description": "the previous clip",
+                "role": "continuation",
+                "relationship": "fully_preserved",
+            },
+        ],
+        previous_shot=previous,
+    ).render()
+    detailed = prompt.split("detailed_description:\n", 1)[1].split(
+        "\n\noverall_soundscape:", 1
+    )[0]
+    assert "first generated frame must match <Picture 1> exactly" in detailed
+    assert "do not replay" in detailed
+    assert "BOUNDARY_END_STATE_WITH_LOCKED_POSE_AND_PROP" in detailed

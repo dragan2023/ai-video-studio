@@ -457,7 +457,7 @@ def test_ref2va_adapter_compiles_planner_h3_context_into_request(tmp_path: Path)
         )
     )
 
-    assert b"[video continuation + reference generation]" in request_body
+    assert b"[video continuation + keyframe completion]" in request_body
     assert b"From 0.000s to 2.000s" in request_body
     assert b"Paper slides softly across wood" in request_body
     assert b"final moment preserves this continuity" in request_body
@@ -512,10 +512,11 @@ def test_async_video_job_is_polled_and_downloaded(tmp_path: Path):
             H3Reference(
                 "picture",
                 "Picture 1",
-                "Use reference.png as the still-image identity and appearance reference for the subjects requested "
-                "by the storyboard.",
-                role="identity",
-                relationship="fully_preserved",
+                "Use reference.png as the exact first-frame/keyframe image for the target clip. Preserve its "
+                "composition, subject identities, screen positions, wardrobe, props, and lighting for the first "
+                "0.5 to 1.0 seconds before advancing into the new action.",
+                role="first_frame",
+                relationship="keyframe",
             ),
             H3Reference(
                 "video",
@@ -575,3 +576,10 @@ def test_async_failed_job_preserves_server_error_payload(tmp_path: Path):
         assert "MUSA out of memory" in str(error)
     else:  # pragma: no cover - the assertion is the test's failure branch
         raise AssertionError("failed async job did not raise")
+
+
+def test_h3_default_timeout_covers_ref2va_continuation():
+    from long_video_studio.adapters.h3 import H3Client
+
+    client = H3Client("http://example.test")
+    assert client.timeout_seconds == 7200

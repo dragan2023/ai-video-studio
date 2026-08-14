@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .domain import DialogueLine, ProjectBrief, ShotSpec, ShotTask, WorldBible
-from .h3_context import _state_text, compile_ref2va_context
+from .h3_context import _state_text, audit_context_ir, compile_ref2va_context, sanitize_audio_prompt
 from .style_registry import get_style_contract
 
 # Format contract derived from MiniMax-AI/MiniMax-H3's official
 # skills/h3-prompt-writing at fa6891ff7cdaaa03fa4497e89ac64ff169219acf.
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,22 +37,26 @@ def render_h3_prompt(
     """Render a structured storyboard shot using the official H3 section order."""
 
     if (task or shot.task) is ShotTask.REF2VA:
-        return compile_ref2va_context(
+        context = compile_ref2va_context(
             shot,
             references,
             brief=brief,
             world_bible=world_bible,
             previous_shot=previous_shot,
             speaker_ids=speaker_ids,
-        ).render()
+        )
+        for warning in audit_context_ir(context):
+            LOGGER.warning("H3 Ref2VA prompt audit for shot %s: %s", shot.index + 1, warning)
+        return context.render()
     if brief is not None or world_bible is not None:
         return _render_fl2va_context(
             shot,
             brief=brief,
             world_bible=world_bible,
+            previous_shot=previous_shot,
             speaker_ids=speaker_ids,
         )
-    return _render_fl2va(shot)
+    return _render_fl2va(shot, previous_shot=previous_shot)
 
 
 def _render_fl2va_context(
@@ -57,6 +64,7 @@ def _render_fl2va_context(
     *,
     brief: ProjectBrief | None,
     world_bible: WorldBible | None,
+    previous_shot: ShotSpec | None,
     speaker_ids: Mapping[str, str] | None = None,
 ) -> str:
     style = ""
@@ -67,7 +75,12 @@ def _render_fl2va_context(
             style += f" The creator's visual direction further requires {brief.style_instructions}."
     if world_bible is not None and world_bible.visual_style:
         style += f" The world consistently maintains {world_bible.visual_style}."
-    integrated = _integrated_description(shot, style=style, speaker_ids=speaker_ids)
+    integrated = _integrated_description(
+        shot,
+        style=style,
+        previous_shot=previous_shot,
+        speaker_ids=speaker_ids,
+    )
     return "\n\n".join(
         (
             "For the target video, at 0.00 seconds into the target video, "
@@ -75,7 +88,7 @@ def _render_fl2va_context(
             f"integrated_multimodal_description: {integrated}",
             "overall_soundscape: "
             + (
-                shot.audio_prompt
+                sanitize_audio_prompt(shot.audio_prompt, has_dialogue=bool(shot.dialogue))
                 or "Natural synchronized ambience and physical action sounds continue without a hard seam."
             ),
             f"non_diegetic_music: {shot.music_prompt or 'N/A'}",
@@ -83,16 +96,16 @@ def _render_fl2va_context(
     )
 
 
-def _render_fl2va(shot: ShotSpec) -> str:
+def _render_fl2va(shot: ShotSpec, *, previous_shot: ShotSpec | None = None) -> str:
     sections = [
         (
             "For the target video, at 0.00 seconds into the target video, "
             "<Picture 1> (from [Shot 1]) is fully referenced."
         ),
-        "integrated_multimodal_description: " + _integrated_description(shot),
+        "integrated_multimodal_description: " + _integrated_description(shot, previous_shot=previous_shot),
         "overall_soundscape: "
         + (
-            shot.audio_prompt
+            sanitize_audio_prompt(shot.audio_prompt, has_dialogue=bool(shot.dialogue))
             or "Natural synchronized ambience and action sounds only. No dialogue, narration, or voice-over."
         ),
         f"non_diegetic_music: {shot.music_prompt or 'N/A'}",
@@ -104,6 +117,7 @@ def _integrated_description(
     shot: ShotSpec,
     *,
     style: str = "",
+    previous_shot: ShotSpec | None = None,
     speaker_ids: Mapping[str, str] | None = None,
 ) -> str:
     pieces = [
@@ -114,7 +128,25 @@ def _integrated_description(
         ),
         f"The opening frame shows {shot.opening_state or _state_text(shot.continuity_in)}. ",
         f"{shot.prompt.strip()} The camera follows this direction: {shot.camera.strip()}. ",
+        "The boundary strategy is "
+        f"{shot.transition_kind.value if hasattr(shot.transition_kind, 'value') else shot.transition_kind}. ",
     ]
+    if shot.continuity_in.fixed_landmarks:
+        pieces.append("Fixed landmarks: " + "; ".join(shot.continuity_in.fixed_landmarks) + ". ")
+    if shot.continuity_in.character_positions:
+        pieces.append("Character positions and facing: " + "; ".join(shot.continuity_in.character_positions) + ". ")
+    if shot.continuity_in.exited_characters:
+        pieces.append(
+            "Keep these subjects off screen unless explicitly reintroduced: "
+            + "; ".join(shot.continuity_in.exited_characters)
+            + ". "
+        )
+    if previous_shot:
+        previous_end = previous_shot.ending_state or _state_text(previous_shot.continuity_out)
+        pieces.append(
+            "The previous clip ends in this exact state: "
+            f"{previous_end}. Begin after it, hold the inherited pose briefly, and do not replay the prior action. "
+        )
     if shot.hook:
         pieces.append(f"The primary attention beat is {shot.hook}. ")
     if shot.reference_anchors:
@@ -125,6 +157,12 @@ def _integrated_description(
             f"This changes the visible state so that {beat.state_change}. "
             f"During the action, {beat.camera}. The synchronized physical sound is {beat.sound}. "
         )
+        if beat.performance:
+            pieces.append(f"The visible performance is {beat.performance}. ")
+        if beat.spatial_anchor:
+            pieces.append(f"The screen-space anchor is {beat.spatial_anchor}. ")
+        if beat.handoff:
+            pieces.append(f"The beat hands off as follows: {beat.handoff}. ")
         pieces.extend(
             _dialogue_for_interval(
                 shot,

@@ -17,7 +17,7 @@ class H3Client:
     def __init__(
         self,
         endpoint: str,
-        timeout_seconds: float = 1800,
+        timeout_seconds: float = 7200,
         flow_shift: float = 12.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
@@ -137,11 +137,12 @@ class H3Client:
                     kind="picture",
                     label="Picture 1",
                     description=(
-                        f"Use {reference_image.name} as the still-image identity and appearance reference for the "
-                        "subjects requested by the storyboard."
+                        f"Use {reference_image.name} as the exact first-frame/keyframe image for the target clip. "
+                        "Preserve its composition, subject identities, screen positions, wardrobe, props, and "
+                        "lighting for the first 0.5 to 1.0 seconds before advancing into the new action."
                     ),
-                    role="identity",
-                    relationship="fully_preserved",
+                    role="first_frame",
+                    relationship="keyframe",
                 ),
                 H3Reference(
                     kind=media_kind,

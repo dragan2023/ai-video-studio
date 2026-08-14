@@ -141,11 +141,32 @@ class ContinuityState(BaseModel):
     characters: list[str] = Field(default_factory=list)
     wardrobe: list[str] = Field(default_factory=list)
     props: list[str] = Field(default_factory=list)
+    # These fields are optional so existing project records remain readable.
+    # They make the spatial/identity handoff
+    # explicit instead of forcing the compiler to infer it from prose.
+    fixed_landmarks: list[str] = Field(default_factory=list)
+    character_positions: list[str] = Field(default_factory=list)
+    exited_characters: list[str] = Field(default_factory=list)
+    performance: str = ""
+    spatial_anchor: str = ""
+    handoff: str = ""
     location: str = ""
     lighting: str = ""
     camera: str = ""
     action: str = ""
     audio: str = ""
+
+
+class SubjectCard(BaseModel):
+    """Stable identity binding shared by every shot director."""
+
+    subject_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    visual_identity: str = ""
+    wardrobe: str = ""
+    reference_asset_ids: list[str] = Field(default_factory=list)
+    speaker_id: str | None = None
 
 
 class WorldBible(BaseModel):
@@ -156,11 +177,23 @@ class WorldBible(BaseModel):
     prop_notes: list[str] = Field(default_factory=list)
     audio_notes: list[str] = Field(default_factory=list)
     continuity_rules: list[str] = Field(default_factory=list)
+    subjects: list[SubjectCard] = Field(default_factory=list)
 
 
 class ShotTask(str, Enum):
     FL2VA = "fl2va"
     REF2VA = "ref2va"
+
+
+class TransitionKind(str, Enum):
+    """How a shot boundary should be authored and rendered."""
+
+    CONTINUOUS = "continuous"
+    CAMERA_MOVE = "camera_move"
+    MATCH_CUT = "match_cut"
+    OCCLUSION_CUT = "occlusion_cut"
+    HARD_CUT = "hard_cut"
+    ANCHOR = "anchor"
 
 
 class ShotStatus(str, Enum):
@@ -208,6 +241,11 @@ class StoryboardBeat(BaseModel):
     state_change: str = ""
     camera: str = ""
     sound: str = ""
+    # H3's shot-table skill calls these out separately from the headline
+    # action. Defaults keep the fields optional for existing storyboards.
+    performance: str = ""
+    spatial_anchor: str = ""
+    handoff: str = ""
 
     @model_validator(mode="after")
     def validate_timing(self) -> StoryboardBeat:
@@ -226,6 +264,7 @@ class ShotSpec(BaseModel):
     # Legacy projects are normalized by the repository before validation.
     duration_seconds: float = Field(ge=4, le=15)
     task: ShotTask = ShotTask.FL2VA
+    transition_kind: TransitionKind = TransitionKind.CONTINUOUS
     prompt: str = Field(
         min_length=1,
         description="Visual-only scene, subject, action, lighting, composition, and camera direction.",

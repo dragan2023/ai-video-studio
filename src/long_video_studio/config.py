@@ -15,6 +15,30 @@ def _split_paths(value: str) -> tuple[Path, ...]:
     return tuple(Path(item.strip()).expanduser().resolve() for item in value.split(":") if item.strip())
 
 
+def _discover_h3_skills_dir() -> Path | None:
+    configured = os.getenv("STUDIO_H3_SKILLS_DIR")
+    if configured:
+        path = Path(configured).expanduser().resolve()
+        return path if path.is_dir() else None
+    # The open-source checkout is commonly launched from the adjacent runtime
+    # data directory where the user downloaded the skill packs.  Auto-discover
+    # only an existing local directory; hosted deployments remain unchanged.
+    roots = [Path.cwd(), *Path(__file__).resolve().parents]
+    candidates = [
+        candidate
+        for root in roots
+        for candidate in (
+            root / "skills",
+            root / "long-video-studio" / "skills",
+            root / "vllm-workspace" / "long-video-studio" / "skills",
+        )
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    return None
+
+
 def _enabled(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -86,6 +110,14 @@ class Settings:
     image_edit_tokenizer_path: Path | None = None
     render_estimate_scale: float = 1.0
     web_root: str | None = None
+    # The hierarchical planner is the default. ``single_pass`` remains an
+    # explicit compatibility mode for offline providers and deterministic
+    # tests; it is never selected implicitly on failure.
+    planner_pipeline_mode: str = "hierarchical"
+    planner_timeout_seconds: float = 300.0
+    planner_shot_concurrency: int = 3
+    planner_continuity_critic: bool = True
+    planner_skills_dir: Path | None = None
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> Settings:
@@ -117,7 +149,11 @@ class Settings:
             h3_fl2va_url=os.getenv("STUDIO_H3_FL2VA_URL") or None,
             h3_ref2va_url=os.getenv("STUDIO_H3_REF2VA_URL") or None,
             h3_flow_shift=float(os.getenv("STUDIO_H3_FLOW_SHIFT", "12.0")),
-            h3_timeout_seconds=float(os.getenv("STUDIO_H3_TIMEOUT_SECONDS", "1800")),
+            # Ref2VA continuation requests include a reference-video encode and
+            # can legitimately exceed 30 minutes on a functional MUSA setup.
+            # Keep this configurable; deployments that need a tighter guard
+            # can still set STUDIO_H3_TIMEOUT_SECONDS explicitly.
+            h3_timeout_seconds=float(os.getenv("STUDIO_H3_TIMEOUT_SECONDS", "7200")),
             transition_seconds=float(os.getenv("STUDIO_TRANSITION_SECONDS", "0.12")),
             ffmpeg_binary=os.getenv("STUDIO_FFMPEG", "ffmpeg"),
             ffprobe_binary=os.getenv("STUDIO_FFPROBE", "ffprobe"),
@@ -141,6 +177,11 @@ class Settings:
                 float(os.getenv("STUDIO_RENDER_ESTIMATE_SCALE", "1.0")),
             ),
             web_root=os.getenv("STUDIO_WEB_ROOT") or None,
+            planner_pipeline_mode=os.getenv("STUDIO_PLANNER_PIPELINE", "hierarchical").strip().lower(),
+            planner_timeout_seconds=float(os.getenv("STUDIO_PLANNER_TIMEOUT_SECONDS", "300")),
+            planner_shot_concurrency=max(1, int(os.getenv("STUDIO_PLANNER_SHOT_CONCURRENCY", "3"))),
+            planner_continuity_critic=_enabled("STUDIO_PLANNER_CONTINUITY_CRITIC", default=True),
+            planner_skills_dir=_discover_h3_skills_dir(),
         )
 
     def ensure_directories(self) -> None:

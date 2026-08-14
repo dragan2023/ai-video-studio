@@ -73,6 +73,30 @@ class ContextIR:
     to_prompt = render
 
 
+def audit_context_ir(context: ContextIR, *, minimum_words: int = 300, maximum_words: int = 750) -> tuple[str, ...]:
+    """Return actionable quality warnings without mutating a creator prompt.
+
+    H3's guide gives 350-500 words as a useful generation range, not a hard
+    tokenizer limit.  The audit deliberately leaves a little headroom for
+    dialogue-heavy or reference-heavy shots and reports rather than chopping
+    content at arbitrary field boundaries.
+    """
+
+    warnings: list[str] = []
+    words = len(context.detailed_description.split())
+    if words < minimum_words:
+        warnings.append(f"detailed_description is short ({words} words; target is about 350-500)")
+    if words > maximum_words:
+        warnings.append(f"detailed_description is verbose ({words} words; remove repeated boilerplate)")
+    rendered = context.render()
+    positions = [rendered.find(f"{name}:") for name in SECTION_ORDER]
+    if positions != sorted(positions):
+        warnings.append("H3 section order is invalid")
+    if "<d>" in context.subject_definitions or "<d>" in context.detailed_description:
+        warnings.append("dialogue tags leaked into a non-dialogue H3 section")
+    return tuple(warnings)
+
+
 def compile_ref2va_context(
     shot: ShotSpec,
     references: Sequence[object] = (),
@@ -95,7 +119,7 @@ def compile_ref2va_context(
     if not refs:
         raise ValueError("Ref2VA context compilation requires at least one reference")
 
-    speaker_map = _normalise_speaker_ids(shot.dialogue, speaker_ids)
+    speaker_map = _normalise_speaker_ids(shot.dialogue, speaker_ids, world_bible=world_bible)
     subject_entries, subject_lookup = _subject_definitions(
         shot,
         refs,
@@ -238,11 +262,47 @@ def _limit_words(value: str, limit: int) -> str:
     return " ".join(parts[:limit]).rstrip(".,;: ")
 
 
+def _prompt_text(value: str, *, limit: int = 12000) -> str:
+    """Normalise model-authored prose without discarding useful directives.
+
+    The previous compiler used small word caps (35 words for the main prompt
+    and 10 words per beat field).  That made a detailed storyboard look rich in
+    the database while silently sending a skeletal prompt to H3.  Keep a very
+    generous character guard only for pathological provider output; normal
+    shot prose is passed through intact.
+    """
+
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= limit:
+        return text
+    marker = " [detail safely capped; beginning and ending retained]"
+    if limit <= len(marker):
+        return text[:limit]
+    available = limit - len(marker)
+    # Continuation/no-replay directives are often appended to a planner field.
+    # Retain both sides when the pathological-response guard is needed so that
+    # the ending directive is not silently lost.
+    head = (available + 1) // 2
+    tail = available - head
+    return text[:head].rstrip() + marker + text[-tail:].lstrip()
+
+
 def _normalise_speaker_ids(
     lines: Sequence[DialogueLine],
     supplied: Mapping[str, str] | None,
+    *,
+    world_bible: WorldBible | None = None,
 ) -> dict[str, str]:
     result: dict[str, str] = dict(supplied or {})
+    cards = world_bible.subjects if world_bible else ()
+    for line in lines:
+        for card in cards:
+            if card.speaker_id and line.speaker.casefold() in {
+                card.label.casefold(),
+                card.subject_id.casefold(),
+                *(alias.casefold() for alias in card.aliases),
+            }:
+                result.setdefault(line.speaker, card.speaker_id)
     for line in lines:
         if line.speaker not in result:
             result[line.speaker] = f"S{len(result) + 1}"
@@ -263,11 +323,32 @@ def _subject_definitions(
     # World-bible cards are canonical. Per-shot continuity only fills an
     # otherwise missing category, preventing the same person from being
     # redefined as a short name, wardrobe string, and prop on every clip.
-    character_values = _active_canonical_values(
-        tuple(world_bible.character_notes) if world_bible else (),
-        tuple(shot.continuity_in.characters),
-        limit=3,
-    )
+    if world_bible and world_bible.subjects:
+        card_values = []
+        for card in world_bible.subjects:
+            details = [
+                f"subject_id={card.subject_id}",
+                f"label={card.label}",
+                f"aliases={', '.join(card.aliases) or 'none'}",
+                f"visual_identity={card.visual_identity or 'preserve the canonical identity'}",
+                f"wardrobe={card.wardrobe or 'preserve the established wardrobe'}",
+            ]
+            if card.reference_asset_ids:
+                details.append(f"reference_asset_ids={', '.join(card.reference_asset_ids)}")
+            if card.speaker_id:
+                details.append(f"speaker_id={card.speaker_id}")
+            card_values.append("; ".join(details))
+        character_values = tuple(card_values[:3]) or _active_canonical_values(
+            tuple(world_bible.character_notes),
+            tuple(shot.continuity_in.characters),
+            limit=3,
+        )
+    else:
+        character_values = _active_canonical_values(
+            tuple(world_bible.character_notes) if world_bible else (),
+            tuple(shot.continuity_in.characters),
+            limit=3,
+        )
     location_values = _active_canonical_values(
         tuple(world_bible.location_notes) if world_bible else (),
         (shot.continuity_in.location,) if shot.continuity_in.location else (),
@@ -301,9 +382,10 @@ def _subject_definitions(
                         lookup[speaker] = f"Subject {subject_number}"
                         break
             grounding = f", grounded in {visual_sources}" if visual_sources else ""
+            description = _prompt_text(text, limit=2400) if category == "character" else _limit_words(text, 36)
             entries.append(
                 f"<Subject {subject_number}>{speaker_suffix} is the {category} described as "
-                f"{_limit_words(text, 36)}{grounding}."
+                f"{description}{grounding}."
             )
             subject_number += 1
 
@@ -390,7 +472,8 @@ def _style_lock(brief: ProjectBrief | None, world_bible: WorldBible | None) -> s
     seen: set[str] = set()
     for value in values:
         text = " ".join(str(value).split()).strip(" ;")
-        if text and text.casefold() not in seen:
+        lowered = text.casefold()
+        if text and lowered not in seen and not any(lowered in existing or existing in lowered for existing in seen):
             seen.add(text.casefold())
             deduped.append(text)
     return "; ".join(deduped) or "consistent cinematic visual language, physically plausible motion"
@@ -436,9 +519,12 @@ def _summary(
 
 def _summary_beat(value: str) -> str:
     words = " ".join(value.split()).strip()
-    if not re.search(r"[A-Za-z]{2,}", words):
+    if not words:
         return "the next observable action advances the story without replaying the reference beat"
-    return _limit_words(words, 30)
+    # Preserve non-ASCII planner prose instead of replacing it with a generic
+    # sentence.  A later prompt-editor pass may translate it for H3, but this
+    # compiler must not discard user-authored hook detail.
+    return _prompt_text(words, limit=4000)
 
 
 def _retention_analysis(
@@ -448,20 +534,38 @@ def _retention_analysis(
     *,
     previous_shot: ShotSpec | None,
 ) -> list[str]:
-    del previous_shot
     lines: list[str] = []
+    target_marker = "[Shot 1]"
     for entry in subject_entries:
         match = re.match(r"(<Subject \d+>)", entry)
         if match:
             label = match.group(1)
             lines.append(
-                f"{label} (appears in [Shot 1]): fully_preserved - identity and defined attributes remain stable."
+                f"{label} (appears in {target_marker}): fully_preserved - identity, wardrobe, and defined "
+                "attributes remain stable."
             )
+    if previous_shot:
+        prior = _prompt_text(previous_shot.ending_state or _state_text(previous_shot.continuity_out))
+        lines.append(
+            "The supplied temporal reference ends at the prior shot's settled state; preserve its visible subjects, "
+            f"screen geography, and audio phase, then advance only after that state is held: {prior}."
+        )
+    if shot.continuity_in.exited_characters:
+        lines.append(
+            "Exited-character lock: "
+            + "; ".join(_prompt_text(value, limit=800) for value in shot.continuity_in.exited_characters)
+            + ". Do not reintroduce an exited subject unless the shot explicitly says so."
+        )
     for reference in refs:
         if reference.kind == "video":
             relation = (
                 "the final state, motion direction, geography, and synchronized sound are retained "
                 "without replaying earlier beats"
+            )
+        elif reference.kind == "picture" and reference.role in {"first_frame", "keyframe"}:
+            relation = (
+                "the first generated frame matches this boundary keyframe exactly; preserve subject identities, "
+                "composition, screen geography, pose, and lighting before advancing"
             )
         elif reference.kind == "audio":
             relation = "its relevant timbre, rhythm, and sound texture guide the target without inventing a new source"
@@ -497,8 +601,9 @@ def _detailed_description(
 ) -> str:
     labels = ", ".join(f"<{reference.label}>" for reference in refs)
     intro = (
-        f"The target clip follows this visual style: {_limit_words(style_lock, 25)}. "
-        f"The reference material {labels} remains active where named below."
+        f"The target clip follows this immutable visual style lock: {_prompt_text(style_lock)}. "
+        f"The reference material {labels} remains active where named below. Do not invent a new palette, lens, "
+        "lighting direction, film grain, or character design between beats."
     )
     prior = ""
     if previous_shot:
@@ -506,23 +611,90 @@ def _detailed_description(
         prior = (
             " The opening state is the first new moment after the reference video's final visible and audible "
             "state; do not replay it. Previous shot ending state: "
-            f"{_limit_words(previous_ending or 'the final visible and audible moment of the reference video', 14)}."
+            f"{_prompt_text(previous_ending or 'the final visible and audible moment of the reference video')}."
         )
+    first_frame_refs = [
+        reference
+        for reference in refs
+        if reference.kind == "picture" and reference.role in {"first_frame", "keyframe"}
+    ]
+    if first_frame_refs:
+        first_frame_labels = ", ".join(f"<{reference.label}>" for reference in first_frame_refs)
+        prior += (
+            f" The first generated frame must match {first_frame_labels} exactly as the boundary keyframe; "
+            "hold the same subject identities, composition, screen geography, pose, and lighting before any "
+            "new action begins."
+        )
+    visual_prompt = _clean_visual_prompt(shot.prompt, camera=shot.camera)
     visual = (
-        f"[Shot 1] {_limit_words(shot.prompt.strip(), 35)}. "
-        f"The camera {_limit_words(shot.camera.strip(), 10)}."
+        f"[Shot 1] {visual_prompt}. "
+        f"The camera {_prompt_text(shot.camera)}."
         f"{prior} The visual direction is non-spoken and must not be vocalized or rendered as text."
     )
+    transition_kind = (
+        shot.transition_kind.value
+        if hasattr(shot.transition_kind, "value")
+        else shot.transition_kind
+    )
+    visual += f" Boundary strategy: {transition_kind}."
+    if any(reference.kind == "video" for reference in refs):
+        visual += (
+            " The first 0.5 to 1.0 seconds must match the supplied video's final readable state and keyframe; "
+            "advance only after that hold, and never replay the preceding action or duplicate its rhythm."
+        )
     if shot.hook:
-        visual += f" The primary hook is {_limit_words(shot.hook, 12)}."
-    if shot.reference_anchors:
-        visual += " Preserve these active anchors: " + _limit_words("; ".join(shot.reference_anchors), 18) + "."
-    subject_labels = [match.group(1) for entry in subject_entries if (match := re.match(r"<(Subject \d+)>", entry))]
+        visual += f" The primary hook is {_prompt_text(shot.hook)}."
+    anchors = [
+        anchor
+        for anchor in shot.reference_anchors
+        if anchor and not re.match(r"(?i)^(?:global\s+)?style\s+(?:lock|continuity)", anchor.strip())
+    ]
+    if anchors:
+        visual += " Preserve these active anchors exactly: " + _prompt_text("; ".join(anchors)) + "."
+    subject_labels = _active_subject_labels(subject_entries, shot.continuity_in.characters)
     if subject_labels:
         visible = ", ".join(f"<{label}>" for label in subject_labels)
         visual = f"The active visible subjects are {visible}. " + visual
+    if shot.continuity_in.fixed_landmarks:
+        visual += " Fixed landmarks and screen-relative positions: " + _prompt_text(
+            "; ".join(shot.continuity_in.fixed_landmarks)
+        ) + "."
+    if shot.continuity_in.character_positions:
+        visual += " Character positions, facing, and initial poses: " + _prompt_text(
+            "; ".join(shot.continuity_in.character_positions)
+        ) + "."
+    if shot.continuity_in.exited_characters:
+        visual += " These subjects remain off screen unless explicitly reintroduced: " + _prompt_text(
+            "; ".join(shot.continuity_in.exited_characters)
+        ) + "."
     timeline = _timeline(shot, speaker_ids=speaker_ids, subject_lookup=subject_lookup)
     return " ".join(value for value in (intro, visual, timeline) if value)
+
+
+def _clean_visual_prompt(value: str, *, camera: str) -> str:
+    """Remove compiler-owned boilerplate while retaining model-authored action."""
+
+    text = _prompt_text(value)
+    text = re.sub(r"(?i)\b(?:story\s+premise|global\s+style\s+lock|aspect\s+ratio):[^.。]*[.。]", "", text)
+    text = re.sub(r"(?i)\bthis\s+is\s+visual\s+direction\s+only\.?", "", text)
+    camera_text = " ".join(camera.split()).strip()
+    if camera_text:
+        text = re.sub(rf"(?i)\bcamera:\s*{re.escape(camera_text)}\.?", "", text)
+    return re.sub(r"\s{2,}", " ", text).strip(" .。;") or "Advance the planned visual action"
+
+
+def _active_subject_labels(entries: Sequence[str], active_values: Sequence[str]) -> list[str]:
+    labels: list[str] = []
+    active = tuple(" ".join(value.casefold().split()) for value in active_values if value.strip())
+    for entry in entries:
+        match = re.match(r"<(Subject \d+)>", entry)
+        if not match:
+            continue
+        if not active or any(_descriptions_overlap(value, entry) for value in active):
+            labels.append(match.group(1))
+    # If the model used a semantic alias we cannot match, retaining the full
+    # canonical set is safer than silently making every subject disappear.
+    return labels or [match.group(1) for entry in entries if (match := re.match(r"<(Subject \d+)>", entry))]
 
 
 def _timeline(
@@ -535,17 +707,23 @@ def _timeline(
     opening = shot.opening_state or shot.continuity_in.action
     ending = shot.ending_state or shot.continuity_out.action
     if opening:
-        pieces.append(f"At the opening, {_limit_words(opening, 18)}.")
+        pieces.append(f"At the opening, {_prompt_text(opening)}.")
     for beat in shot.visual_beats:
         beat_text = (
-            f"From {beat.start_seconds:.3f}s to {beat.end_seconds:.3f}s, {_limit_words(beat.visual_action, 14)}."
+            f"From {beat.start_seconds:.3f}s to {beat.end_seconds:.3f}s, {_prompt_text(beat.visual_action)}."
         )
         if beat.state_change:
-            beat_text += f" The visible state changes so that {_limit_words(beat.state_change, 10)}."
+            beat_text += f" The visible state changes so that {_prompt_text(beat.state_change)}."
         if beat.camera:
-            beat_text += f" The camera {_limit_words(beat.camera, 10)}."
+            beat_text += f" The camera {_prompt_text(beat.camera)}."
+        if beat.performance:
+            beat_text += f" Performance and expression: {_prompt_text(beat.performance)}."
+        if beat.spatial_anchor:
+            beat_text += f" Screen-space anchor: {_prompt_text(beat.spatial_anchor)}."
         if beat.sound:
-            beat_text += f" Synchronized sound: {_limit_words(beat.sound, 10)}."
+            beat_text += f" Synchronized sound: {_prompt_text(beat.sound)}."
+        if beat.handoff:
+            beat_text += f" Beat handoff: {_prompt_text(beat.handoff)}."
         for line in shot.dialogue:
             line_start = line.start_seconds if line.start_seconds is not None else 0.0
             if beat.start_seconds <= line_start < beat.end_seconds or (
@@ -558,11 +736,13 @@ def _timeline(
     elif not shot.dialogue:
         pieces.append("No spoken dialogue, narration, or voice-over occurs in this clip.")
     if ending:
-        pieces.append(f"By the end, {_limit_words(ending, 18)}.")
+        pieces.append(f"By the end, {_prompt_text(ending)}.")
     if shot.continuity_handoff:
         pieces.append(
             "The final moment preserves this continuity for the next clip: "
-            f"{_limit_words(shot.continuity_handoff, 18)}."
+            f"{_prompt_text(shot.continuity_handoff)}. Hold the final readable pose for approximately "
+            "0.5 to 1.0 seconds "
+            "before any new action; do not replay the preceding action."
         )
     return " ".join(pieces)
 
@@ -634,7 +814,22 @@ def _dialogue_timing(line: DialogueLine) -> str:
 
 
 def _state_text(state: object) -> str:
-    fields = ("characters", "wardrobe", "props", "location", "lighting", "camera", "action", "audio")
+    fields = (
+        "characters",
+        "wardrobe",
+        "props",
+        "fixed_landmarks",
+        "character_positions",
+        "exited_characters",
+        "performance",
+        "spatial_anchor",
+        "handoff",
+        "location",
+        "lighting",
+        "camera",
+        "action",
+        "audio",
+    )
     values: list[str] = []
     for field in fields:
         value = getattr(state, field, None)
@@ -646,7 +841,7 @@ def _state_text(state: object) -> str:
 
 
 def _soundscape(shot: ShotSpec, refs: Sequence[ContextReference]) -> str:
-    value = shot.audio_prompt.strip()
+    value = sanitize_audio_prompt(shot.audio_prompt, has_dialogue=bool(shot.dialogue))
     if not value:
         value = "Natural synchronized ambience and physical action sounds continue without a hard seam."
     audio_refs = [reference for reference in refs if reference.kind == "audio"]
@@ -655,3 +850,19 @@ def _soundscape(shot: ShotSpec, refs: Sequence[ContextReference]) -> str:
             f"<{reference.label}> supplies the referenced audio characteristics." for reference in audio_refs
         )
     return value
+
+
+def sanitize_audio_prompt(value: str, *, has_dialogue: bool) -> str:
+    """Remove contradictory no-speech clauses from an editable audio field."""
+
+    text = value.strip()
+    if not has_dialogue:
+        return text
+    text = re.sub(
+        r"(?:no|without)\s+(?:spoken\s+)?(?:dialogue|narration|voice[- ]over)\.?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s{2,}", " ", text).strip(" .;,")
+    return text or "Natural ambience and synchronized physical Foley continue beneath the dialogue track."

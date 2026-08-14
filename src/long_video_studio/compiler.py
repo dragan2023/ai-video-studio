@@ -219,6 +219,7 @@ class FilmCompiler:
                     "dialogue": [line.model_dump(mode="json") for line in shot.dialogue],
                     "negative_prompt": shot.negative_prompt,
                     "duration_seconds": shot.duration_seconds,
+                    "transition_kind": shot.transition_kind.value,
                     "fps": shot.fps,
                     "inference_steps": shot.inference_steps,
                     "seed": shot.seed,

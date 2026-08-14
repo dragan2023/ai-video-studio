@@ -19,9 +19,10 @@ from long_video_studio.domain import (
     ProjectBrief,
     ShotSpec,
     ShotTask,
+    TransitionKind,
     WorldBible,
 )
-from long_video_studio.planner import PlannerOutput, PlannerService
+from long_video_studio.planner import DirectorPlan, PlannerOutput, PlannerService
 from long_video_studio.repository import StudioRepository
 from long_video_studio.style_registry import STYLE_REGISTRY, get_style_contract, style_prompt
 
@@ -139,6 +140,99 @@ def test_llm_planner_prompt_contains_structured_style_contract(settings):
     planner._transport = httpx.MockTransport(handler)
     output = asyncio.run(planner._plan_with_llm(brief, []))
     assert output.shots
+
+
+def test_hierarchical_planner_calls_director_shot_directors_and_critic(settings):
+    """The LLM is split by responsibility while the public Film IR stays stable."""
+
+    repository = StudioRepository(settings.database_path)
+    planner = PlannerService(
+        replace(
+            settings,
+            planner_base_url="http://planner.test/v1",
+            planner_model="test-model",
+            planner_allow_fallback=False,
+            planner_pipeline_mode="hierarchical",
+            planner_shot_concurrency=2,
+            planner_continuity_critic=True,
+        ),
+        repository,
+    )
+    brief = ProjectBrief(prompt="A woman and a cat cross a rainy courtyard.", duration_seconds=30)
+    spine = planner._plan_heuristically(brief, [])
+    blueprints = [planner._blueprint_from_shot(shot) for shot in spine.shots]
+    director_payload = DirectorPlan(
+        world_bible=spine.world_bible,
+        shot_blueprints=blueprints,
+    ).model_dump(mode="json")
+    shot_payloads = [shot.model_dump(mode="json") for shot in spine.shots]
+    final_payload = PlannerOutput(
+        world_bible=spine.world_bible,
+        shots=spine.shots,
+    ).model_dump(mode="json")
+    critic_payload = json.loads(json.dumps(final_payload))
+    critic_payload["shots"][1]["transition_kind"] = "hard_cut"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "messages" in body:
+            stage_payload = json.loads(body["messages"][1]["content"])
+            stage = str(stage_payload["stage"])
+        else:  # pragma: no cover - this test exercises the chat wire
+            stage_payload = json.loads(body["input"][0]["content"][0]["text"])
+            stage = str(stage_payload["stage"])
+        calls.append((stage, stage_payload))
+        if stage == "creative_director":
+            result = director_payload
+        elif stage == "shot_director":
+            index = int(stage_payload["shot_index"])
+            result = {"shot": shot_payloads[index]}
+        else:
+            result = critic_payload
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    planner._transport = httpx.MockTransport(handler)
+    output = asyncio.run(planner._plan_with_llm(brief, []))
+
+    assert [stage for stage, _ in calls] == [
+        "creative_director",
+        "shot_director",
+        "shot_director",
+        "shot_director",
+        "continuity_critic",
+    ]
+    first_shot_payload = calls[1][1]
+    assert first_shot_payload["previous_blueprint"] is None
+    assert first_shot_payload["next_blueprint"] is not None
+    second_shot_payload = calls[2][1]
+    assert second_shot_payload["previous_blueprint"] is not None
+    assert second_shot_payload["next_blueprint"] is not None
+    assert len(output.shots) == 3
+    assert output.shots[0].transition_kind is TransitionKind.ANCHOR
+    assert output.shots[1].transition_kind is TransitionKind.CONTINUOUS
+    assert sum(shot.duration_seconds for shot in output.shots) == 30
+    assert [shot.index for shot in output.shots] == [0, 1, 2]
+
+
+def test_normalizer_preserves_an_explicit_hard_cut(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(prompt="A story with a deliberate scene cut.", duration_seconds=16)
+    project = planner._plan_heuristically(brief, [])
+    project.shots[1] = project.shots[1].model_copy(
+        update={
+            "transition_kind": TransitionKind.HARD_CUT,
+            "continuity_from_shot_id": None,
+            "task": ShotTask.FL2VA,
+        }
+    )
+    normalized = planner._normalize_agent_output(
+        PlannerOutput(world_bible=project.world_bible, shots=project.shots),
+        brief,
+        [],
+    )
+    assert normalized.shots[1].transition_kind is TransitionKind.HARD_CUT
+    assert normalized.shots[1].continuity_from_shot_id is None
 
 
 def test_compiler_hides_unavailable_model_in_warnings(settings):

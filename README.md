@@ -130,6 +130,22 @@ export STUDIO_PLANNER_API_KEY=...
 
 If no endpoint is configured, Nautilus uses its deterministic planner.
 
+By default, planning uses three focused calls: a creative director builds the
+World Bible and shot spine, independent shot directors write detailed H3
+timelines, and a continuity critic repairs adjacent-boundary drift. Configure
+the number of concurrent shot calls and the optional local MiniMax-H3 style
+packs with:
+
+```bash
+export STUDIO_PLANNER_PIPELINE=hierarchical
+export STUDIO_PLANNER_SHOT_CONCURRENCY=3
+export STUDIO_H3_SKILLS_DIR=/path/to/long-video-studio/skills
+```
+
+The selected skill pack is applied by style; all packs are not concatenated
+into one prompt. `single_pass` remains available for a provider that cannot
+handle multiple requests.
+
 ### MiniMax-H3 video
 
 FL2VA and Ref2VA are separate model partitions and may be served independently:

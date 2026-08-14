@@ -1,27 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import re
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
+from long_video_studio.director_skills import selected_skill_excerpt
 from long_video_studio.domain import (
     AssetKind,
     AssetRecord,
     AssetRole,
     ContinuityState,
+    DialogueLine,
     FilmProject,
     ProjectBrief,
     ShotSpec,
     ShotTask,
     StoryboardBeat,
+    SubjectCard,
+    TransitionKind,
     WorldBible,
 )
+from long_video_studio.h3_context import sanitize_audio_prompt
 from long_video_studio.repository import StudioRepository
 from long_video_studio.style_registry import get_style_contract, style_prompt
 
@@ -35,10 +41,64 @@ BEATS = [
     ("Resolution", "Resolve the action and leave a clean final image."),
 ]
 
-
 class PlannerOutput(BaseModel):
     world_bible: WorldBible
     shots: list[ShotSpec]
+
+
+class ShotBlueprint(BaseModel):
+    """Compact causal spine passed from the creative director to shot directors."""
+
+    index: int = 0
+    title: str = ""
+    purpose: str = ""
+    duration_seconds: float = 8.0
+    active_subjects: list[str] = Field(default_factory=list)
+    scene_and_landmarks: str = ""
+    opening_state: str = ""
+    ending_state: str = ""
+    incoming_handoff: str = ""
+    outgoing_handoff: str = ""
+    audio_phase: str = ""
+    transition_kind: TransitionKind = TransitionKind.CONTINUOUS
+    hook: str = ""
+
+
+class DirectorPlan(BaseModel):
+    """Internal stage-A result; it is deliberately not persisted as public API."""
+
+    world_bible: WorldBible
+    shot_blueprints: list[ShotBlueprint]
+
+
+class ShotCreativeDraft(BaseModel):
+    """Provider-facing shot fields, excluding runtime IDs and output state."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    index: int = 0
+    title: str = ""
+    purpose: str = ""
+    duration_seconds: float = 8.0
+    task: ShotTask = ShotTask.FL2VA
+    transition_kind: TransitionKind = TransitionKind.CONTINUOUS
+    prompt: str = ""
+    audio_prompt: str = ""
+    music_prompt: str = ""
+    dialogue: list[DialogueLine] = Field(default_factory=list)
+    opening_state: str = ""
+    ending_state: str = ""
+    continuity_handoff: str = ""
+    reference_anchors: list[str] = Field(default_factory=list)
+    hook: str = ""
+    visual_beats: list[StoryboardBeat] = Field(default_factory=list)
+    negative_prompt: str = ""
+    subtitle_text: str | None = None
+    camera: str = "medium shot, stable cinematic camera"
+    reference_asset_ids: list[str] = Field(default_factory=list)
+    anchor_prompt: str = ""
+    continuity_in: ContinuityState = Field(default_factory=ContinuityState)
+    continuity_out: ContinuityState = Field(default_factory=ContinuityState)
 
 
 class PlannerError(RuntimeError):
@@ -162,6 +222,15 @@ class PlannerService:
                 "For a deliberate cut, regenerate an anchor frame from canonical references.",
                 "Avoid jump cuts, teleportation, duplicated subjects, and unexplained camera resets.",
             ],
+            subjects=[
+                SubjectCard(
+                    subject_id=f"subject_{index + 1}",
+                    label=note,
+                    aliases=[note],
+                    visual_identity=note,
+                )
+                for index, note in enumerate(character_notes[:3])
+            ],
         )
 
         shots: list[ShotSpec] = []
@@ -194,12 +263,21 @@ class PlannerService:
                 camera=camera,
                 action="Continue from the previous stable pose." if previous else "Begin from the anchor frame.",
                 audio="Continue the established ambience without a hard seam.",
+                fixed_landmarks=[
+                    "Keep the primary location landmark fixed in the same screen-relative position.",
+                ],
+                character_positions=[
+                    "Keep each active subject's left/right screen position, facing, and initial pose readable.",
+                ],
+                performance="Preserve the active subjects' facial expression and body weight through the handoff.",
+                spatial_anchor="Maintain the established camera axis and foreground/midground/background ordering.",
             )
             continuity_out = continuity_in.model_copy(
                 update={
                     "action": f"End on a readable stable pose that naturally leads into shot {index + 2}."
                     if index + 1 < shot_count
-                    else "End on a clean resolved final image."
+                    else "End on a clean resolved final image.",
+                    "handoff": "Hold the final pose briefly before the next shot advances the action.",
                 }
             )
             prompt = self._shot_prompt(
@@ -216,6 +294,13 @@ class PlannerService:
                 purpose=action,
                 duration_seconds=round(duration, 2),
                 task=task,
+                transition_kind=(
+                    TransitionKind.ANCHOR
+                    if index == 0
+                    else TransitionKind.HARD_CUT
+                    if is_cut
+                    else TransitionKind.CONTINUOUS
+                ),
                 prompt=prompt,
                 audio_prompt=(
                     "Continuous location-specific room tone, restrained footsteps, fabric movement, and "
@@ -243,6 +328,9 @@ class PlannerService:
                         state_change="The primary subject commits to the next physical action.",
                         camera=camera,
                         sound="Continuous room tone and the first synchronized physical movement sound.",
+                        performance="The subject's expression and weight shift remain readable.",
+                        spatial_anchor="The subject remains anchored to the established screen side and landmark.",
+                        handoff="Complete the setup without changing the camera axis.",
                     ),
                     StoryboardBeat(
                         start_seconds=round(duration / 3, 2),
@@ -251,6 +339,9 @@ class PlannerService:
                         state_change="The action progresses through an observable intermediate state.",
                         camera=camera,
                         sound="Synchronized Foley follows the visible motion without a hard audio seam.",
+                        performance="The primary action progresses through one observable pose change.",
+                        spatial_anchor="Keep contact with the named prop or landmark physically consistent.",
+                        handoff="Prepare the final stable pose without replaying the setup.",
                     ),
                     StoryboardBeat(
                         start_seconds=round(duration * 2 / 3, 2),
@@ -259,6 +350,9 @@ class PlannerService:
                         state_change=continuity_out.action,
                         camera="The camera decelerates smoothly and holds the final readable composition.",
                         sound="The action sound decays naturally into continuous ambience.",
+                        performance="The final expression settles and the body comes to rest.",
+                        spatial_anchor="Preserve the final screen-relative positions for the next boundary.",
+                        handoff="Hold this readable state for the next clip.",
                     ),
                 ],
                 negative_prompt=(
@@ -289,6 +383,19 @@ class PlannerService:
         return FilmProject(brief=brief, world_bible=world_bible, shots=shots)
 
     async def _plan_with_llm(self, brief: ProjectBrief, assets: list[AssetRecord]) -> PlannerOutput:
+        """Run the configured planner pipeline and return normalized Film IR.
+
+        The public planner contract stays one ``PlannerOutput``.  Internally we
+        now separate global story decisions, per-shot execution detail, and
+        cross-shot continuity review so one response no longer has to solve all
+        levels of the film at once.
+        """
+
+        if self.settings.planner_pipeline_mode == "single_pass":
+            return await self._plan_with_llm_single_pass(brief, assets)
+        return await self._plan_with_llm_hierarchical(brief, assets)
+
+    async def _plan_with_llm_single_pass(self, brief: ProjectBrief, assets: list[AssetRecord]) -> PlannerOutput:
         assert self.settings.planner_base_url
         assert self.settings.planner_model
         asset_context = [
@@ -496,6 +603,508 @@ configured policy, anchor_prompt must be non-empty.
             raise ValueError("planner returned a shot longer than the safe 14-second H3 ceiling")
         return self._normalize_agent_output(output, brief, assets)
 
+    async def _plan_with_llm_hierarchical(
+        self,
+        brief: ProjectBrief,
+        assets: list[AssetRecord],
+    ) -> PlannerOutput:
+        """Generate a film through director, shot-director, and critic stages."""
+
+        assert self.settings.planner_base_url
+        assert self.settings.planner_model
+        asset_context = self._asset_context(assets)
+        style_contract = style_prompt(brief.style_preset, brief.style_instructions)
+        h3_rules = self._h3_skill_contract(brief.style_preset)
+        async with httpx.AsyncClient(
+            timeout=self.settings.planner_timeout_seconds,
+            transport=self._transport,
+        ) as client:
+            director_raw = await self._request_json(
+                client,
+                self._director_system_prompt(brief, style_contract),
+                {
+                    "stage": "creative_director",
+                    "brief": brief.model_dump(mode="json"),
+                    "assets": asset_context,
+                    "h3_skill_contract": h3_rules,
+                },
+                schema=self._director_json_schema(),
+                schema_name="nautilus_creative_director",
+            )
+            director_output, blueprints = self._parse_director_payload(director_raw)
+            if not blueprints:
+                raise ValueError("creative director returned no shot spine")
+            if any(blueprint.duration_seconds > 14 for blueprint in blueprints):
+                raise ValueError("creative director returned a shot longer than the safe 14-second ceiling")
+            semaphore = asyncio.Semaphore(max(1, self.settings.planner_shot_concurrency))
+
+            async def direct_one(index: int, blueprint: ShotBlueprint) -> ShotSpec:
+                async with semaphore:
+                    raw = await self._request_json(
+                        client,
+                        self._shot_director_system_prompt(
+                            brief,
+                            style_contract,
+                            h3_rules,
+                            blueprint,
+                            is_first=index == 0,
+                        ),
+                        {
+                            "stage": "shot_director",
+                            "brief": brief.model_dump(mode="json"),
+                            "world_bible": director_output.world_bible.model_dump(mode="json"),
+                            "assets": asset_context,
+                            "shot_index": index,
+                            "shot_blueprint": blueprint.model_dump(mode="json"),
+                            "previous_blueprint": (
+                                blueprints[index - 1].model_dump(mode="json") if index else None
+                            ),
+                            "next_blueprint": (
+                                blueprints[index + 1].model_dump(mode="json")
+                                if index + 1 < len(blueprints)
+                                else None
+                            ),
+                        },
+                        schema=self._shot_json_schema(),
+                        schema_name=f"nautilus_shot_director_{index + 1}",
+                    )
+                    return self._coerce_shot_payload(raw, index, blueprint)
+
+            shots = list(
+                await asyncio.gather(
+                    *(direct_one(index, blueprint) for index, blueprint in enumerate(blueprints))
+                )
+            )
+            draft = PlannerOutput(world_bible=director_output.world_bible, shots=shots)
+
+            final = draft
+            if self.settings.planner_continuity_critic:
+                critic_raw = await self._request_json(
+                    client,
+                    self._continuity_critic_system_prompt(brief, style_contract, h3_rules),
+                    {
+                        "stage": "continuity_critic",
+                        "brief": brief.model_dump(mode="json"),
+                        "world_bible": draft.world_bible.model_dump(mode="json"),
+                        "shots": [shot.model_dump(mode="json") for shot in draft.shots],
+                        "checks": [
+                            "identity, wardrobe, and reference bindings remain stable",
+                            "fixed landmarks, eyelines, camera axis, lighting, and motion direction inherit",
+                            "an exited character is not silently reintroduced",
+                            "the opening begins after the prior ending and never replays it",
+                            "dialogue, ambience, Foley, and music remain separate",
+                            "each shot stays between 4 and 14 seconds and keeps complete beat coverage",
+                        ],
+                    },
+                    schema=self._planner_json_schema(),
+                    schema_name="nautilus_continuity_critic",
+                )
+                final = self._parse_planner_payload(self._unwrap_stage_payload(critic_raw))
+
+            final = self._lock_director_schedule(final, blueprints)
+
+        if not final.shots:
+            raise ValueError("hierarchical planner returned no shots after continuity review")
+        return self._normalize_agent_output(final, brief, assets)
+
+    @staticmethod
+    def _lock_director_schedule(output: PlannerOutput, blueprints: list[ShotBlueprint]) -> PlannerOutput:
+        """Keep the critic from silently changing shot order or boundary mode."""
+
+        by_index = {shot.index: shot for shot in output.shots}
+        locked: list[ShotSpec] = []
+        for index, blueprint in enumerate(blueprints):
+            shot = by_index.get(index)
+            if shot is None:
+                raise ValueError(f"continuity critic dropped shot {index + 1}")
+            beats = shot.visual_beats
+            if beats and shot.duration_seconds > 0 and abs(shot.duration_seconds - blueprint.duration_seconds) > 0.01:
+                scale = blueprint.duration_seconds / shot.duration_seconds
+                beats = [
+                    beat.model_copy(
+                        update={
+                            "start_seconds": beat.start_seconds * scale,
+                            "end_seconds": beat.end_seconds * scale,
+                        }
+                    )
+                    for beat in beats
+                ]
+            locked.append(
+                shot.model_copy(
+                    update={
+                        "index": index,
+                        "duration_seconds": blueprint.duration_seconds,
+                        "transition_kind": blueprint.transition_kind,
+                        "visual_beats": beats,
+                    }
+                )
+            )
+        return PlannerOutput(world_bible=output.world_bible, shots=locked)
+
+    @staticmethod
+    def _asset_context(assets: list[AssetRecord]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": asset.id,
+                "name": asset.original_name,
+                "display_name": asset.display_name or asset.original_name,
+                "kind": asset.kind.value,
+                "caption": asset.caption,
+                "tags": asset.tags,
+                "roles": [role.value for role in asset.roles],
+            }
+            for asset in assets
+        ]
+
+    def _h3_skill_contract(self, style_preset: str) -> str:
+        """Compact, provider-neutral extract of the checked-in H3 skills."""
+
+        # The full downloaded skill packs stay local and are not blindly
+        # concatenated into every request.  This invariant summary is the
+        # stable contract; the selected style pack is applied by the shot role.
+        style_hint = {
+            "3d": "Use fixed character/scene/prop cards and a per-second shot table.",
+            "animation": "Use readable silhouettes, explicit contact/weight, and stable spatial anchors.",
+            "music_video": "Use beat-aware cuts, one master audio timeline, and matched motion at cuts.",
+            "commercial": "Give one visual owner per beat and use anticipation, impact, brake, and settle.",
+            "brand": "Give one visual owner per beat and use anticipation, impact, brake, and settle.",
+        }.get(style_preset.casefold(), "Use grounded cinematic continuity and physically plausible motion.")
+        contract = (
+            "MiniMax H3 prompt discipline: write model-facing direction in English; keep stable labels for "
+            "subjects and references; separate visual action, camera, Foley/ambience, music, and dialogue; "
+            "cover the whole timeline with 1-2 second beats; each beat has one primary action plus setup, "
+            "anticipation, commitment, impact, brake, and settle where relevant; preserve identity, wardrobe, "
+            "landmarks, screen positions, eyelines, lighting, props, and action phase across boundaries; "
+            "hold the inherited ending state briefly before advancing and never replay the previous action. "
+            + style_hint
+        )
+        excerpt = selected_skill_excerpt(self.settings.planner_skills_dir, style_preset)
+        if excerpt:
+            contract += (
+                "\n\nSelected local director-pack excerpts (apply only the relevant production rules; "
+                "do not copy workflow UI instructions):\n"
+                + excerpt
+            )
+        return contract
+
+    @staticmethod
+    def _director_system_prompt(brief: ProjectBrief, style_contract: str) -> str:
+        return (
+            "You are the Creative Director for a creator-facing long-video studio. This is stage 1 of 3. "
+            "Turn the user's premise into a causal visual spine and a canonical World Bible. Establish stable "
+            "character identities, stable subject IDs/aliases, wardrobe, props, locations, fixed landmarks, lighting, "
+            "camera axis, "
+            "audio bed, and the exact ending state that each next shot must inherit. Plan 4-14 second shots; "
+            "never plan 15 seconds. Do not write final model prompts yet: make each shot's title, purpose, active "
+            "subjects, opening/ending state, incoming/outgoing handoff, audio phase, transition kind, and one hook "
+            "unambiguous. Bind each SubjectCard to the relevant reference_asset_ids and speaker_id when known; "
+            "use semantic labels in prose rather than opaque IDs. Return the DirectorPlan JSON schema (World Bible "
+            "plus shot_blueprints), not final H3 "
+            "prompts; use compact placeholder fields only as a causal spine. Include a marker "
+            "`pipeline_stage=creative_director` when the wire permits extra fields.\n\n"
+            f"Global style contract (immutable for every shot):\n{style_contract}\n\n"
+            "The user's requested language applies to creator-facing titles; all model-facing fields must be English."
+        )
+
+    @staticmethod
+    def _shot_director_system_prompt(
+        brief: ProjectBrief,
+        style_contract: str,
+        h3_rules: str,
+        blueprint: ShotBlueprint,
+        *,
+        is_first: bool,
+    ) -> str:
+        mode = (
+            "This is the opening shot: begin exactly from the supplied/generated first-frame composition and "
+            "make the first 0.5-1.0 seconds readable."
+            if is_first
+            else "This is a continuation shot: begin after the prior clip's settled final moment, hold that state "
+            "for 0.5-1.0 seconds, then advance one new action; never replay or summarize the prior action."
+        )
+        return (
+            "You are a specialist H3 Shot Director. This is stage 2 of 3. Produce one complete ShotSpec, not a "
+            "story summary. Expand the supplied blueprint into a production-ready visual prompt of roughly "
+            "120-220 informative English words plus 4-8 timeline beats covering the entire duration; the compiled "
+            "H3 detailed_description should land near 350-500 words without repeated boilerplate. Every beat "
+            "must state one primary action, visible pose/expression change, screen-space position or landmark, "
+            "camera movement with direction/amplitude/speed, and synchronized non-speech sound; use explicit "
+            "setup -> anticipation -> commitment -> impact -> brake -> settle phases when appropriate. Keep all "
+            "active characters visible or explicitly mark an exit and its reason. Bind references by semantic role, "
+            "never opaque IDs. Keep visual prompt free of dialogue, sound notes, and metadata; put speech only in "
+            "dialogue entries and ambience/Foley only in audio_prompt. Do not begin with a duration label or a "
+            "generic continuation phrase. Keep the immutable style contract unchanged.\n\n"
+            f"{mode}\n\nGlobal style contract:\n{style_contract}\n\n"
+            f"H3/style rules to apply:\n{h3_rules}\n\n"
+            f"Blueprint to execute:\n{blueprint.model_dump_json(indent=2)}\n\n"
+            "Return exactly one JSON object matching the ShotSpec schema."
+        )
+
+    @staticmethod
+    def _continuity_critic_system_prompt(brief: ProjectBrief, style_contract: str, h3_rules: str) -> str:
+        return (
+            "You are the Continuity Director and final H3 storyboard editor. This is stage 3 of 3. Review every "
+            "shot as an adjacent pair, then return the complete PlannerOutput JSON. Preserve each shot's strongest "
+            "creative detail while repairing only continuity: stable identity/aliases, wardrobe, fixed landmarks, "
+            "screen positions, eyelines, props/contact, lighting direction, camera axis, motion direction, action "
+            "phase, audio bed, and dialogue speaker binding. A subject that exits must stay off screen until a "
+            "planned re-entry. A continuation opening must match the previous ending, hold briefly, and move into a "
+            "new action without replaying the preceding beat. Keep each shot 4-14 seconds, preserve complete visual "
+            "beat coverage, and keep visual/audio/dialogue fields separate. Do not shorten rich prompts merely to "
+            "make them uniform. All model-facing prose remains English.\n\n"
+            f"Immutable global style contract:\n{style_contract}\n\n"
+            f"H3/style rules to retain:\n{h3_rules}\n\n"
+            "Return exactly one complete PlannerOutput JSON object and no commentary."
+        )
+
+    async def _request_json(
+        self,
+        client: httpx.AsyncClient,
+        system_prompt: str,
+        user_payload: dict[str, Any],
+        *,
+        schema: dict[str, Any],
+        schema_name: str,
+    ) -> dict[str, Any]:
+        """Call either configured OpenAI-compatible wire API and decode JSON."""
+
+        headers = {"Content-Type": "application/json"}
+        if self.settings.planner_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.planner_api_key}"
+        wire_api = self.settings.planner_wire_api.strip().lower()
+        if wire_api == "responses":
+            url = self.settings.planner_base_url.rstrip("/") + "/responses"
+            body: dict[str, Any] = {
+                "model": self.settings.planner_model,
+                "instructions": system_prompt,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": json.dumps(user_payload, ensure_ascii=False)}],
+                    }
+                ],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": schema_name,
+                        "strict": False,
+                        "schema": schema,
+                    }
+                },
+            }
+            content = await self._request_responses(client, url, headers, body)
+            if content is None:
+                body.pop("text", None)
+                content = await self._request_responses(client, url, headers, body)
+            if content is None:
+                raise ValueError(f"Responses API rejected {schema_name} structured and plain JSON requests")
+        else:
+            url = self.settings.planner_base_url.rstrip("/") + "/chat/completions"
+            response = await client.post(
+                url,
+                headers=headers,
+                json={
+                    "model": self.settings.planner_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                    ],
+                    "temperature": 0.35,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(self._json_text(content))
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{schema_name} returned a non-object JSON payload")
+        return parsed
+
+    @staticmethod
+    def _unwrap_stage_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        for key in ("planner_output", "director_plan", "result", "output"):
+            value = payload.get(key)
+            if isinstance(value, dict) and ("world_bible" in value or "shots" in value):
+                return value
+        return payload
+
+    @staticmethod
+    def _blueprint_from_shot(shot: ShotSpec) -> ShotBlueprint:
+        transition = shot.transition_kind
+        if shot.index == 0 and transition is TransitionKind.CONTINUOUS:
+            transition = TransitionKind.ANCHOR
+        return ShotBlueprint(
+            index=shot.index,
+            title=shot.title,
+            purpose=shot.purpose,
+            duration_seconds=shot.duration_seconds,
+            active_subjects=list(shot.continuity_in.characters),
+            scene_and_landmarks="; ".join(
+                [
+                    value
+                    for value in [shot.continuity_in.location, *shot.continuity_in.fixed_landmarks]
+                    if value
+                ]
+            ),
+            opening_state=shot.opening_state or shot.continuity_in.action,
+            ending_state=shot.ending_state or shot.continuity_out.action,
+            incoming_handoff=shot.continuity_handoff,
+            outgoing_handoff=shot.continuity_handoff,
+            audio_phase=shot.continuity_in.audio or shot.audio_prompt,
+            transition_kind=transition,
+            hook=shot.hook,
+        )
+
+    @staticmethod
+    def _coerce_shot_payload(payload: dict[str, Any], index: int, blueprint: ShotBlueprint) -> ShotSpec:
+        candidate: object = payload.get("shot")
+        if not isinstance(candidate, dict):
+            candidate = payload
+        if isinstance(candidate, dict) and isinstance(candidate.get("shots"), list):
+            shots = candidate["shots"]
+            candidate = shots[index] if index < len(shots) else (shots[-1] if shots else candidate)
+        if not isinstance(candidate, dict):
+            raise ValueError(f"shot director {index + 1} returned no ShotSpec")
+        data = dict(candidate)
+        # Parse creative fields first; runtime IDs, output paths, and status
+        # cannot be invented or overridden by a shot director.
+        creative = ShotCreativeDraft.model_validate(data)
+        creative_data = creative.model_dump(mode="python")
+        creative_data["index"] = index
+        creative_data["title"] = creative.title or blueprint.title or f"Shot {index + 1}"
+        creative_data["purpose"] = creative.purpose or blueprint.purpose or "Advance the story"
+        creative_data["duration_seconds"] = blueprint.duration_seconds
+        creative_data["transition_kind"] = blueprint.transition_kind
+        creative_data["opening_state"] = creative.opening_state or blueprint.opening_state
+        creative_data["ending_state"] = creative.ending_state or blueprint.ending_state
+        creative_data["continuity_handoff"] = creative.continuity_handoff or blueprint.outgoing_handoff
+        creative_data["hook"] = creative.hook or blueprint.hook or blueprint.purpose
+        creative_data["reference_anchors"] = creative.reference_anchors or [
+            blueprint.scene_and_landmarks or "Preserve the canonical scene geography."
+        ]
+        creative_data["visual_beats"] = creative.visual_beats or [
+            StoryboardBeat(
+                start_seconds=0,
+                end_seconds=blueprint.duration_seconds,
+                visual_action=creative_data["prompt"],
+                state_change=creative_data["ending_state"],
+                camera=creative_data["camera"],
+                sound=creative.audio_prompt or "Synchronized physical Foley and continuous ambience.",
+                spatial_anchor=blueprint.scene_and_landmarks,
+                handoff=blueprint.outgoing_handoff,
+            )
+        ]
+        creative_data["prompt"] = creative.prompt or blueprint.purpose or "Advance the planned visual action."
+        creative_data["camera"] = creative.camera or "stable cinematic camera preserving the established axis"
+        continuity_in = creative.continuity_in.model_copy(deep=True)
+        continuity_out = creative.continuity_out.model_copy(deep=True)
+        if blueprint.active_subjects:
+            continuity_in.characters = continuity_in.characters or list(blueprint.active_subjects)
+            continuity_out.characters = continuity_out.characters or list(blueprint.active_subjects)
+        if blueprint.scene_and_landmarks:
+            continuity_in.fixed_landmarks = continuity_in.fixed_landmarks or [blueprint.scene_and_landmarks]
+            continuity_out.fixed_landmarks = continuity_out.fixed_landmarks or [blueprint.scene_and_landmarks]
+        continuity_in.handoff = continuity_in.handoff or blueprint.incoming_handoff
+        continuity_out.handoff = continuity_out.handoff or blueprint.outgoing_handoff
+        creative_data["continuity_in"] = continuity_in
+        creative_data["continuity_out"] = continuity_out
+        return ShotSpec.model_validate(creative_data)
+
+    @staticmethod
+    def _parse_director_payload(payload: dict[str, Any]) -> tuple[PlannerOutput, list[ShotBlueprint]]:
+        """Decode the blueprint envelope, with a narrow provider bridge."""
+
+        payload = PlannerService._unwrap_stage_payload(payload)
+        blueprints = payload.get("shot_blueprints")
+        world = payload.get("world_bible")
+        if isinstance(blueprints, list) and isinstance(world, dict):
+            plan = DirectorPlan.model_validate(payload)
+            return (
+                PlannerOutput(world_bible=plan.world_bible, shots=[]),
+                [blueprint.model_copy(update={"index": index}) for index, blueprint in enumerate(plan.shot_blueprints)],
+            )
+        # Some OpenAI-compatible deployments may still return a complete
+        # PlannerOutput despite the stage prompt. Treat that exact
+        # shape as a compatibility input, then let shot directors enrich it.
+        output = PlannerService._parse_planner_payload(payload)
+        return output, [PlannerService._blueprint_from_shot(shot) for shot in output.shots]
+
+    @staticmethod
+    def _director_json_schema() -> dict[str, Any]:
+        schema = DirectorPlan.model_json_schema()
+        # Preserve the canonical ShotSpec alias for proxies that validate or
+        # introspect the old schema, while the real root is shot_blueprints.
+        planner_schema = PlannerService._planner_json_schema()
+        definitions = schema.setdefault("$defs", {})
+        for name in ("ShotSpec", "StoryboardBeat", "ContinuityState", "DialogueLine"):
+            if name in planner_schema.get("$defs", {}):
+                definitions[name] = planner_schema["$defs"][name]
+        shot_schema = planner_schema.get("$defs", {}).get("ShotSpec")
+        if isinstance(shot_schema, dict):
+            definitions["ShotSpec"] = shot_schema
+        return schema
+
+    @staticmethod
+    def _shot_json_schema() -> dict[str, Any]:
+        schema = ShotCreativeDraft.model_json_schema()
+        definitions = schema.get("$defs", {})
+        shot_schema = schema
+        properties = shot_schema.get("properties", {})
+        required = set(shot_schema.get("required", []))
+        required.update(
+            {
+                "index",
+                "title",
+                "purpose",
+                "duration_seconds",
+                "transition_kind",
+                "prompt",
+                "audio_prompt",
+                "music_prompt",
+                "dialogue",
+                "opening_state",
+                "ending_state",
+                "continuity_handoff",
+                "reference_anchors",
+                "hook",
+                "visual_beats",
+                "negative_prompt",
+                "camera",
+                "continuity_in",
+                "continuity_out",
+            }
+            & set(properties)
+        )
+        shot_schema["required"] = sorted(required)
+        for field_name in (
+            "title",
+            "purpose",
+            "prompt",
+            "opening_state",
+            "ending_state",
+            "continuity_handoff",
+            "hook",
+            "camera",
+        ):
+            field_schema = properties.get(field_name)
+            if isinstance(field_schema, dict):
+                field_schema["minLength"] = 1
+        for field_name in ("reference_anchors", "visual_beats"):
+            field_schema = properties.get(field_name)
+            if isinstance(field_schema, dict):
+                field_schema["minItems"] = 1
+        beat_schema = definitions.get("StoryboardBeat")
+        if isinstance(beat_schema, dict):
+            beat_schema["required"] = sorted(beat_schema.get("properties", {}))
+        duration_schema = properties.get("duration_seconds")
+        if isinstance(duration_schema, dict):
+            duration_schema["maximum"] = 14
+        # A few OpenAI-compatible proxies (and older Studio test doubles)
+        # inspect the canonical nested name even when the requested root is a
+        # single ShotSpec. Keep that alias harmlessly available.
+        definitions.setdefault("ShotSpec", {key: value for key, value in schema.items() if key != "$defs"})
+        return schema
+
     @staticmethod
     def _planner_json_schema() -> dict[str, Any]:
         """Make H3 creative fields required at the model-generation boundary."""
@@ -512,6 +1121,7 @@ configured policy, anchor_prompt must be non-empty.
                     "title",
                     "purpose",
                     "duration_seconds",
+                    "transition_kind",
                     "prompt",
                     "audio_prompt",
                     "music_prompt",
@@ -692,9 +1302,14 @@ configured policy, anchor_prompt must be non-empty.
         for index, original in enumerate(output.shots):
             shot = original.model_copy(deep=True)
             shot.index = index
+            if index == 0 and shot.transition_kind is TransitionKind.CONTINUOUS:
+                shot.transition_kind = TransitionKind.ANCHOR
+            if shot.start_frame_asset_id:
+                shot.transition_kind = TransitionKind.ANCHOR
             shot.prompt = self._clean_generation_prompt(shot.prompt)
             shot.audio_prompt = self._clean_generation_prompt(shot.audio_prompt)
             shot.music_prompt = self._clean_generation_prompt(shot.music_prompt)
+            shot.audio_prompt = sanitize_audio_prompt(shot.audio_prompt, has_dialogue=bool(shot.dialogue))
             shot.anchor_prompt = self._limit_anchor_prompt(self._clean_generation_prompt(shot.anchor_prompt))
             shot.reference_asset_ids = [asset_id for asset_id in shot.reference_asset_ids if asset_id in valid_assets]
             if (
@@ -709,11 +1324,31 @@ configured policy, anchor_prompt must be non-empty.
             self._validate_h3_language_contract(shot, output.world_bible)
             if shot.task == ShotTask.REF2VA and not (image_ids and media_ids):
                 shot.task = ShotTask.FL2VA
-            if shot.task == ShotTask.FL2VA:
-                if index == 0 and not image_edit_configured and not shot.start_frame_asset_id and image_ids:
-                    shot.start_frame_asset_id = image_ids[0]
-                if index > 0 and not shot.start_frame_asset_id and previous:
-                    shot.continuity_from_shot_id = previous.id
+            if (
+                shot.task == ShotTask.FL2VA
+                and index == 0
+                and not image_edit_configured
+                and not shot.start_frame_asset_id
+                and image_ids
+            ):
+                shot.start_frame_asset_id = image_ids[0]
+            if (
+                index > 0
+                and not shot.start_frame_asset_id
+                and previous
+                and not self._is_explicit_scene_cut(shot)
+                and not shot.continuity_from_shot_id
+            ):
+                # Only infer a continuation when the creative stage did not
+                # declare a deliberate cut.  Previously every later FL2VA
+                # shot was overwritten into Ref2VA, which made scene-cuts
+                # anchors unreachable and caused avoidable identity jumps.
+                shot.continuity_from_shot_id = previous.id
+            if self._is_explicit_scene_cut(shot) and not shot.start_frame_asset_id:
+                # A deliberate cut must remain independent.  The optional
+                # Image Edit stage can provide its anchor; without it the
+                # compiler will surface the missing capability explicitly.
+                shot.continuity_from_shot_id = None
             needs_anchor = image_edit_configured and anchor_selected(
                 shot,
                 index,
@@ -851,6 +1486,39 @@ configured policy, anchor_prompt must be non-empty.
             previous_end = beat.end_seconds
 
     @staticmethod
+    def _is_explicit_scene_cut(shot: ShotSpec) -> bool:
+        """Recognise an intentional anchor boundary without relying on IDs."""
+
+        if shot.transition_kind in {
+            TransitionKind.HARD_CUT,
+            TransitionKind.ANCHOR,
+            TransitionKind.MATCH_CUT,
+            TransitionKind.OCCLUSION_CUT,
+        }:
+            return True
+
+        text = " ".join(
+            value
+            for value in (
+                shot.continuity_in.handoff,
+                shot.continuity_handoff,
+                shot.opening_state,
+                shot.purpose,
+            )
+            if value
+        ).casefold()
+        markers = (
+            "intentional cut",
+            "hard cut",
+            "scene cut",
+            "new scene",
+            "match cut",
+            "occlusion cut",
+            "transition_kind=anchor",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
     def _validate_h3_language_contract(shot: ShotSpec, world_bible: WorldBible) -> None:
         """Fail closed when prose outside dialogue is not H3's English IR.
 
@@ -879,6 +1547,12 @@ configured policy, anchor_prompt must be non-empty.
             *shot.continuity_in.characters,
             *shot.continuity_in.wardrobe,
             *shot.continuity_in.props,
+            *shot.continuity_in.fixed_landmarks,
+            *shot.continuity_in.character_positions,
+            *shot.continuity_in.exited_characters,
+            shot.continuity_in.performance,
+            shot.continuity_in.spatial_anchor,
+            shot.continuity_in.handoff,
             shot.continuity_in.location,
             shot.continuity_in.lighting,
             shot.continuity_in.camera,
@@ -887,6 +1561,12 @@ configured policy, anchor_prompt must be non-empty.
             *shot.continuity_out.characters,
             *shot.continuity_out.wardrobe,
             *shot.continuity_out.props,
+            *shot.continuity_out.fixed_landmarks,
+            *shot.continuity_out.character_positions,
+            *shot.continuity_out.exited_characters,
+            shot.continuity_out.performance,
+            shot.continuity_out.spatial_anchor,
+            shot.continuity_out.handoff,
             shot.continuity_out.location,
             shot.continuity_out.lighting,
             shot.continuity_out.camera,
@@ -894,9 +1574,36 @@ configured policy, anchor_prompt must be non-empty.
             shot.continuity_out.audio,
         ]
         for beat in shot.visual_beats:
-            values.extend([beat.visual_action, beat.state_change, beat.camera, beat.sound])
+            values.extend(
+                [
+                    beat.visual_action,
+                    beat.state_change,
+                    beat.camera,
+                    beat.sound,
+                    beat.performance,
+                    beat.spatial_anchor,
+                    beat.handoff,
+                ]
+            )
+        identity_values = {
+            value.strip()
+            for value in (
+                *shot.continuity_in.characters,
+                *shot.continuity_in.wardrobe,
+                *shot.continuity_in.props,
+                *shot.continuity_out.characters,
+                *shot.continuity_out.wardrobe,
+                *shot.continuity_out.props,
+            )
+            if value.strip()
+        }
         for value in values:
-            if value and re.search(r"[\u3400-\u9fff]", value) and not re.search(r"[A-Za-z]{2,}", value):
+            if (
+                value
+                and (len(value.strip()) > 16 or value.strip() not in identity_values)
+                and re.search(r"[\u3400-\u9fff]", value)
+                and not re.search(r"[A-Za-z]{2,}", value)
+            ):
                 raise ValueError(f"AI planner returned non-English H3 model field for shot {shot.index + 1}")
 
     @staticmethod

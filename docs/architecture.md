@@ -8,7 +8,7 @@ materials, shots, and finished videos rather than node graphs.
 brief + material library
           |
           v
- planner / storyboard agent
+ creative director -> shot directors -> continuity critic
           |
           v
  project bible + editable shots
@@ -64,6 +64,31 @@ Every planned H3 shot is limited to 14 seconds. This intentionally leaves
 container-timestamp headroom below H3's hard 15-second reference-video limit:
 a nominal 15-second encode can be reported by ffprobe as slightly longer than
 15 seconds and would otherwise make the following Ref2VA request fail.
+
+## Hierarchical storyboard planning
+
+With an OpenAI-compatible planner configured, the default pipeline makes
+separate calls with separate responsibilities:
+
+1. The creative director creates the World Bible and a compact shot spine
+   (active subjects, landmarks, opening/ending states, audio phase, and an
+   explicit transition kind).
+2. One shot director expands each spine row into an editable `ShotSpec` with
+   a dense English H3 timeline. The first shot and continuation shots receive
+   different system instructions; continuation shots hold the inherited
+   boundary state before introducing a new action.
+3. A continuity critic reviews adjacent pairs and returns the corrected shot
+   set. It checks identity, wardrobe, eyelines, landmarks, props, lighting,
+   motion direction, action replay, and dialogue/audio separation.
+
+The compiler preserves structured detail instead of slicing the main prompt to
+a small word count. H3's 350--500 words is a useful generation range, not a
+reason to pad prose; `audit_context_ir` reports unusually short or verbose
+descriptions. Set `STUDIO_PLANNER_PIPELINE=single_pass` only for a provider
+that cannot support the multi-call path. The optional `STUDIO_H3_SKILLS_DIR`
+points at downloaded MiniMax-H3 skill packs; Nautilus selects the matching
+style pack and sends only its shot/continuity/audio/QC excerpt, never all
+workflow instructions at once.
 
 ## Security boundary
 
