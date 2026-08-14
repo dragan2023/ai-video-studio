@@ -152,6 +152,25 @@ function formatDuration(seconds) {
   return minutes ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
 }
 
+function shotRenderTiming(shot, now) {
+  if (
+    shot?.render_duration_seconds !== null &&
+    shot?.render_duration_seconds !== undefined
+  ) {
+    return `生成用时 ${formatDuration(shot.render_duration_seconds)}`;
+  }
+  if (shot?.status === "rendering" && shot?.render_started_at) {
+    const started = Date.parse(shot.render_started_at);
+    if (!Number.isNaN(started)) {
+      return `已用 ${formatDuration(Math.max(0, (now - started) / 1000))}`;
+    }
+  }
+  if (shot?.status === "complete" && shot?.selected_take_path) {
+    return "已完成 · 历史用时未记录";
+  }
+  return "尚未生成";
+}
+
 function estimateProjectSeconds(value, scale = 1) {
   if (!value?.shots?.length) return 0;
   let total = 0;
@@ -1563,6 +1582,9 @@ function App() {
                     <small>
                       {runtimeShotLabel(project, shot)} · {shot.inference_steps}{" "}
                       steps · {transitionLabel(shot)} · {shot.camera}
+                    </small>
+                    <small className="shot-render-timing">
+                      <Gauge size={11} /> {shotRenderTiming(shot, clockNow)}
                     </small>
                   </div>
                 </motion.article>

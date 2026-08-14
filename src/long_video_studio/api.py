@@ -395,6 +395,9 @@ def create_api_router() -> APIRouter:
                             "selected_take_path": None,
                             "anchor_frame_path": None,
                             "boundary_frame_path": None,
+                            "render_started_at": None,
+                            "render_completed_at": None,
+                            "render_duration_seconds": None,
                         }
                     )
                 except ValidationError as exc:

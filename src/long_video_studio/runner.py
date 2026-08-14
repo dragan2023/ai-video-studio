@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from long_video_studio.adapters.h3 import H3Client
@@ -23,6 +24,7 @@ from long_video_studio.domain import (
     ShotTask,
     effective_video_task,
     resolved_continuation_mode,
+    utc_now,
 )
 from long_video_studio.h3_context import stable_speaker_ids
 from long_video_studio.repository import StudioRepository
@@ -89,6 +91,8 @@ class RenderManager:
         project_speaker_ids = stable_speaker_ids(project.shots)
         ordered_shots = sorted(project.shots, key=lambda value: value.index)
         width, height = self._video_canvas(project.brief.aspect_ratio)
+        active_shot: ShotSpec | None = None
+        active_started_monotonic: float | None = None
         try:
             for position, shot in enumerate(ordered_shots):
                 job.current_shot_id = shot.id
@@ -120,6 +124,11 @@ class RenderManager:
                     self.repository.save_project(project)
                     continue
                 shot.status = ShotStatus.RENDERING
+                active_shot = shot
+                active_started_monotonic = time.monotonic()
+                shot.render_started_at = utc_now()
+                shot.render_completed_at = None
+                shot.render_duration_seconds = None
                 self.repository.save_project(project)
                 runtime_task = effective_video_task(
                     shot,
@@ -225,7 +234,12 @@ class RenderManager:
                 await asyncio.to_thread(self.media.extract_last_stable_frame, output_path, boundary)
                 shot.boundary_frame_path = str(boundary)
                 boundary_frames[shot.id] = boundary
+                shot.render_completed_at = utc_now()
+                if active_started_monotonic is not None:
+                    shot.render_duration_seconds = round(time.monotonic() - active_started_monotonic, 3)
                 self.repository.save_project(project)
+                active_shot = None
+                active_started_monotonic = None
 
             final_path = output_dir / "final.mp4"
             continuous_boundaries = [
@@ -253,6 +267,9 @@ class RenderManager:
             for shot in project.shots:
                 if shot.status == ShotStatus.RENDERING:
                     shot.status = ShotStatus.FAILED
+            if active_shot is not None and active_started_monotonic is not None:
+                active_shot.render_completed_at = utc_now()
+                active_shot.render_duration_seconds = round(time.monotonic() - active_started_monotonic, 3)
             self.repository.save_project(project)
             job.status = "failed"
             job.error = str(error)

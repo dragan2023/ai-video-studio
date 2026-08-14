@@ -396,6 +396,9 @@ def test_project_and_shot_dialog_updates_persist_and_invalidate_old_take(setting
     assert edited_shot["dialogue"][0]["text"] == "There you are."
     assert edited_shot["status"] == "planned"
     assert edited_shot["selected_take_path"] is None
+    assert edited_shot["render_started_at"] is None
+    assert edited_shot["render_completed_at"] is None
+    assert edited_shot["render_duration_seconds"] is None
     assert shot_update.json()["timeline"][1]["start_seconds"] == 8
 
 

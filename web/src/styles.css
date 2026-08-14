@@ -1109,6 +1109,20 @@ select {
   font-size: 9px;
   line-height: 1.6;
 }
+.shot-render-timing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  color: #d5b57a !important;
+  font-family: "DM Mono", monospace;
+  font-size: 8px !important;
+  letter-spacing: 0.02em;
+}
+.shot-render-timing svg {
+  flex: 0 0 auto;
+  color: var(--amber);
+}
 .empty-workspace {
   display: grid;
   min-height: 260px;

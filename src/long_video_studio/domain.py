@@ -304,6 +304,12 @@ class ShotSpec(BaseModel):
         ),
     )
     boundary_frame_path: str | None = None
+    # Render telemetry is persisted with the shot so the Studio can show the
+    # measured cost of the latest attempt after a page reload.  These fields
+    # are runtime metadata, not creator-editable storyboard content.
+    render_started_at: datetime | None = None
+    render_completed_at: datetime | None = None
+    render_duration_seconds: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_reference_contract(self) -> ShotSpec:

@@ -246,6 +246,10 @@ def test_fast_render_routes_continuation_to_tail_ref2va_and_leaves_asset_ref2va_
     persisted = repository.get_project(project.id)
     assert persisted is not None
     assert RenderManager.CONTINUATION_REF2VA_RULE not in persisted.shots[1].prompt
+    assert persisted.shots[1].render_started_at is not None
+    assert persisted.shots[1].render_completed_at is not None
+    assert persisted.shots[1].render_duration_seconds is not None
+    assert persisted.shots[1].render_duration_seconds >= 0
 
 
 def test_failed_render_can_resume_a_completed_first_clip(settings, tmp_path, monkeypatch):
