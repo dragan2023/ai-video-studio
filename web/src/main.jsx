@@ -390,6 +390,8 @@ function App() {
   const [dialogSaving, setDialogSaving] = useState(false);
   const fileInput = useRef(null);
   const projectRequest = useRef(0);
+  const traceEpoch = useRef(0);
+  const traceHiddenBefore = useRef(0);
 
   const addClientTrace = useCallback((status, message, payload = null) => {
     setClientTrace((events) => [
@@ -407,12 +409,31 @@ function App() {
 
   const refreshPlannerTrace = useCallback(async (id) => {
     if (!id) return;
+    const requestEpoch = traceEpoch.current;
     try {
       const value = await api(`/api/projects/${id}/planner-trace`);
-      setPlannerTrace(Array.isArray(value) ? value : []);
+      if (requestEpoch !== traceEpoch.current) return;
+      const hiddenBefore = traceHiddenBefore.current;
+      const visible = (Array.isArray(value) ? value : []).filter((event) => {
+        if (!hiddenBefore || !event.created_at) return true;
+        const createdAt = Date.parse(event.created_at);
+        return Number.isNaN(createdAt) || createdAt >= hiddenBefore;
+      });
+      setPlannerTrace(visible);
     } catch {
-      setPlannerTrace([]);
+      if (requestEpoch === traceEpoch.current) setPlannerTrace([]);
     }
+  }, []);
+
+  const clearDebugTrace = useCallback(() => {
+    // Invalidate in-flight polls and hide the server events that existed at
+    // the moment of the click. Otherwise the next poll immediately restores
+    // the same trace and makes the button appear ineffective.
+    traceEpoch.current += 1;
+    traceHiddenBefore.current = Date.now();
+    setPlannerTrace([]);
+    setClientTrace([]);
+    setNotice("Debug Console 已清空");
   }, []);
   const styleRegistryRef = useRef(stylePresets);
 
@@ -462,6 +483,8 @@ function App() {
     async (id) => {
       if (!id) return;
       const requestId = ++projectRequest.current;
+      const traceRequestEpoch = ++traceEpoch.current;
+      traceHiddenBefore.current = 0;
       setProjectLoading(true);
       // Clear the previous project before fetching so its video/job cannot be
       // mistaken for the project the creator just selected.
@@ -498,7 +521,9 @@ function App() {
       );
       setSelected(new Set(value.brief.reference_asset_ids || []));
       setJob(latest);
-      setPlannerTrace(Array.isArray(trace) ? trace : []);
+      if (traceRequestEpoch === traceEpoch.current) {
+        setPlannerTrace(Array.isArray(trace) ? trace : []);
+      }
       setClientTrace([]);
     },
     [customStyles],
@@ -667,6 +692,8 @@ function App() {
     setSelected(new Set());
     setActiveTab("brief");
     setPlanningError("");
+    traceEpoch.current += 1;
+    traceHiddenBefore.current = 0;
     setPlannerTrace([]);
     setClientTrace([]);
   };
@@ -1019,6 +1046,9 @@ function App() {
     }
     const requestId = ++projectRequest.current;
     setPlanningError("");
+    traceEpoch.current += 1;
+    traceHiddenBefore.current = Date.now();
+    setPlannerTrace([]);
     setBusy(true);
     const brief = makeBrief();
     addClientTrace("request", "POST /api/projects/plan", brief);
@@ -1275,10 +1305,7 @@ function App() {
               events={debugEvents}
               open={debugOpen}
               onToggle={() => setDebugOpen((value) => !value)}
-              onClear={() => {
-                setPlannerTrace([]);
-                setClientTrace([]);
-              }}
+              onClear={clearDebugTrace}
             />
           </section>
 
