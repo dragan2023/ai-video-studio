@@ -1998,7 +1998,7 @@ function App() {
                     <small>
                       {shotDraft.start_frame_asset_id
                         ? "已指定首帧素材，本 Prompt 会保留但不会调用 Image Edit。"
-                        : `由 Planner 生成并直接发送给 Image Edit；需完整绑定参考图，最多 1000 字符（当前 ${shotDraft.anchor_prompt.length}/1000），并以 Qwen 模板后的文本 tokens ≤ 1000 为最终门禁。`}
+                        : `由 Planner 生成；启用 Image Edit 后会作为首帧合成指令。参考素材不会自动变成首帧；需完整绑定参考图，最多 1000 字符（当前 ${shotDraft.anchor_prompt.length}/1000），并以 Qwen 模板后的文本 tokens ≤ 1000 为最终门禁。`}
                     </small>
                   </label>
                   <label className="dialog-field">

@@ -526,6 +526,73 @@ def test_planner_retrieves_matching_library_assets_when_none_are_selected(settin
     assert project.shots[0].start_frame_asset_id == cat.id
 
 
+def test_planner_keeps_reference_images_out_of_start_frame_and_writes_anchor_without_image_edit(settings):
+    repository = StudioRepository(settings.database_path)
+    assets = AssetService(settings, repository)
+    character = assets.ingest_stream(
+        png_bytes("red"),
+        "character.png",
+        "image/png",
+        tags=["主角"],
+        roles=[AssetRole.CHARACTER],
+    )
+    location = assets.ingest_stream(
+        png_bytes("blue"),
+        "location.png",
+        "image/png",
+        tags=["场景"],
+        roles=[AssetRole.LOCATION],
+    )
+
+    project = asyncio.run(
+        PlannerService(settings, repository).plan(
+            ProjectBrief(
+                prompt="主角在场景中发现一盏发光的灯。",
+                duration_seconds=15,
+                reference_asset_ids=[character.id, location.id],
+            )
+        )
+    )
+
+    first = project.shots[0]
+    assert first.start_frame_asset_id is None
+    assert {character.id, location.id}.issubset(first.reference_asset_ids)
+    assert first.anchor_prompt
+    assert "still" in first.anchor_prompt.lower()
+
+
+def test_shot_director_requires_generated_anchor_when_no_start_frame_is_selected(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    blueprint = ShotBlueprint(
+        index=0,
+        title="Opening",
+        purpose="Establish the scene",
+        transition_kind=TransitionKind.ANCHOR,
+    )
+
+    prompt = planner._shot_director_system_prompt(
+        ProjectBrief(prompt="A quiet opening."),
+        "cinematic style",
+        "H3 rules",
+        blueprint,
+        is_first=True,
+        needs_generated_anchor=True,
+    )
+
+    assert "MUST populate anchor_prompt" in prompt
+    assert "not a first frame" in prompt
+
+    continuous_prompt = planner._shot_director_system_prompt(
+        ProjectBrief(prompt="A quiet opening."),
+        "cinematic style",
+        "H3 rules",
+        blueprint.model_copy(update={"transition_kind": TransitionKind.CONTINUOUS}),
+        is_first=True,
+        needs_generated_anchor=True,
+    )
+    assert "MUST populate anchor_prompt" in continuous_prompt
+
+
 def test_planner_leaves_first_frame_empty_for_image_edit_references(settings):
     configured = replace(
         settings,

@@ -58,6 +58,12 @@ Nautilus treats an explicit creator start frame as immutable input:
 3. without either a start frame or usable references, rendering fails with an
    actionable input error unless a separate text-to-image provider is added.
 
+The planner-authored `anchor_prompt` is retained in the storyboard even when
+Image Edit is disabled. This makes the intended opening composition inspectable
+and editable before services are brought online; a reference image with only a
+character, location, prop, or style role is not treated as an explicit start
+frame.
+
 The default `scene-cuts` mode preserves the previous shot's boundary for
 continuous clips and composes a new anchor only for the opening shot or a real
 scene cut. This avoids overwriting creator intent and duplicating motion across

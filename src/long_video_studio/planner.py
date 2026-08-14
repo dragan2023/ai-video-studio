@@ -307,11 +307,6 @@ class PlannerService:
 
         shots: list[ShotSpec] = []
         all_reference_ids = [asset.id for asset in assets]
-        image_edit_configured = bool(
-            self.settings.image_edit_provider not in {"", "disabled", "none"}
-            and self.settings.image_edit_base_url
-            and self.settings.image_edit_model
-        )
         previous: ShotSpec | None = None
         for index in range(shot_count):
             progress = index / max(shot_count - 1, 1)
@@ -320,11 +315,12 @@ class PlannerService:
             is_cut = index > 0 and index % 4 == 0
             has_ref2va_inputs = bool(image_assets and audio_assets)
             task = ShotTask.REF2VA if is_cut and has_ref2va_inputs else ShotTask.FL2VA
-            start_frame_id = (
-                explicit_start_assets[0].id
-                if index == 0 and explicit_start_assets
-                else (None if image_edit_configured else image_assets[0].id if index == 0 and image_assets else None)
-            )
+            # A reference image is not implicitly a creator-selected opening
+            # frame.  Keep that distinction in the Film IR even when the
+            # optional Image Edit service is disabled: the storyboard still
+            # needs to show the planner-authored opening composition prompt,
+            # and a later render can compose it from the references.
+            start_frame_id = explicit_start_assets[0].id if index == 0 and explicit_start_assets else None
             references = list(all_reference_ids)
             camera = self._camera_for(index, shot_count)
             action = purpose
@@ -440,11 +436,7 @@ class PlannerService:
                 continuity_out=continuity_out,
                 inference_steps=50 if brief.quality == "final" else 12,
             )
-            if image_edit_configured and anchor_selected(
-                shot,
-                index,
-                self.settings.image_edit_anchor_mode,
-            ):
+            if anchor_selected(shot, index, self.settings.image_edit_anchor_mode):
                 shot.anchor_prompt = self._anchor_prompt(
                     brief=brief,
                     shot=shot,
@@ -571,7 +563,10 @@ Put character, location, prop, and general reference images in
 reference_asset_ids; the runtime may compose them into a new opening anchor.
 
 When a shot will receive a generated opening anchor, treat that as a separate
-single-instant composition task and write it in anchor_prompt, not prompt.
+single-instant composition task and write it in anchor_prompt, not prompt. This
+is a storyboard artifact, so write it even when the Image Edit endpoint is not
+configured yet; the creator must be able to inspect and edit the prompt before
+rendering.
 anchor_prompt is the complete final text sent directly to Qwen-Image-Edit; no
 runtime template will expand or repair it. Describe only the exact zero-second
 still image: named subjects, their identity and spatial relations, environment,
@@ -593,8 +588,10 @@ Do not include motion progression, camera movement, dialogue, sound, duration,
 "then", "next", or any event after the opening instant. Use captions and tags
 only as creator-provided visual hints and do not invent unlisted visual facts.
 If a shot has an explicit start_frame_asset_id, leave anchor_prompt empty because
-the creator's image is used directly. For generated anchors selected by the
-configured policy, anchor_prompt must be non-empty.
+the creator's image is used directly. For every generated anchor selected by the
+configured policy, anchor_prompt must be non-empty. Reference images without the
+explicit start_frame role are character, location, prop, or style references;
+they are not an opening frame and must not be promoted to start_frame_asset_id.
 """.strip()
         system_prompt += (
             f"\n\nSelected directing preset / global style contract:\n"
@@ -687,6 +684,9 @@ configured policy, anchor_prompt must be non-empty.
         asset_context = self._asset_context(assets)
         style_contract = style_prompt(brief.style_preset, brief.style_instructions)
         h3_rules = self._h3_skill_contract(brief.style_preset)
+        explicit_start_ids = {
+            asset.id for asset in assets if asset.kind == AssetKind.IMAGE and AssetRole.START_FRAME in asset.roles
+        }
         async with httpx.AsyncClient(
             timeout=self.settings.planner_timeout_seconds,
             transport=self._transport,
@@ -720,6 +720,22 @@ configured policy, anchor_prompt must be non-empty.
                             h3_rules,
                             blueprint,
                             is_first=index == 0,
+                            needs_generated_anchor=(
+                                not (
+                                    index == 0
+                                    and any(asset_id in explicit_start_ids for asset_id in brief.reference_asset_ids)
+                                )
+                            )
+                            and (
+                                index == 0
+                                or blueprint.transition_kind
+                                in {
+                                    TransitionKind.ANCHOR,
+                                    TransitionKind.HARD_CUT,
+                                    TransitionKind.MATCH_CUT,
+                                    TransitionKind.OCCLUSION_CUT,
+                                }
+                            ),
                         ),
                         {
                             "stage": "shot_director",
@@ -886,6 +902,7 @@ configured policy, anchor_prompt must be non-empty.
         blueprint: ShotBlueprint,
         *,
         is_first: bool,
+        needs_generated_anchor: bool,
     ) -> str:
         mode = (
             "This is the opening shot: begin exactly from the supplied/generated first-frame composition and "
@@ -893,6 +910,14 @@ configured policy, anchor_prompt must be non-empty.
             if is_first
             else "This is a continuation shot: begin after the prior clip's settled final moment, hold that state "
             "for 0.5-1.0 seconds, then advance one new action; never replay or summarize the prior action."
+        )
+        anchor_instruction = (
+            "No explicit start-frame asset is selected for this shot. You MUST populate anchor_prompt with a "
+            "complete zero-second still-image composition prompt. The supplied reference images are semantic "
+            "character/location/prop references, not a first frame; bind each ordered reference by ordinal and "
+            "describe the exact opening arrangement. Do not leave anchor_prompt blank."
+            if needs_generated_anchor
+            else "An explicit creator-selected start-frame asset exists for this shot. Leave anchor_prompt empty."
         )
         return (
             "You are a specialist H3 Shot Director. This is stage 2 of 3. Produce one complete ShotSpec, not a "
@@ -909,6 +934,7 @@ configured policy, anchor_prompt must be non-empty.
             f"{mode}\n\nGlobal style contract:\n{style_contract}\n\n"
             f"H3/style rules to apply:\n{h3_rules}\n\n"
             f"Blueprint to execute:\n{blueprint.model_dump_json(indent=2)}\n\n"
+            f"Opening-anchor contract:\n{anchor_instruction}\n\n"
             "Return exactly one JSON object matching the ShotSpec schema."
         )
 
@@ -1560,9 +1586,7 @@ configured policy, anchor_prompt must be non-empty.
             shot.audio_prompt = sanitize_audio_prompt(shot.audio_prompt, has_dialogue=bool(shot.dialogue))
             shot.anchor_prompt = self._limit_anchor_prompt(self._clean_generation_prompt(shot.anchor_prompt))
             shot.reference_asset_ids = [asset_id for asset_id in shot.reference_asset_ids if asset_id in valid_assets]
-            if (
-                image_edit_configured and shot.start_frame_asset_id not in explicit_start_ids
-            ) or shot.start_frame_asset_id not in valid_assets:
+            if shot.start_frame_asset_id not in explicit_start_ids or shot.start_frame_asset_id not in valid_assets:
                 shot.start_frame_asset_id = None
             if shot.audio_asset_id not in valid_assets:
                 shot.audio_asset_id = None
@@ -1572,14 +1596,6 @@ configured policy, anchor_prompt must be non-empty.
             self._validate_h3_language_contract(shot, output.world_bible)
             if shot.task == ShotTask.REF2VA and not (image_ids and media_ids):
                 shot.task = ShotTask.FL2VA
-            if (
-                shot.task == ShotTask.FL2VA
-                and index == 0
-                and not image_edit_configured
-                and not shot.start_frame_asset_id
-                and image_ids
-            ):
-                shot.start_frame_asset_id = image_ids[0]
             if (
                 index > 0
                 and not shot.start_frame_asset_id
@@ -1597,14 +1613,23 @@ configured policy, anchor_prompt must be non-empty.
                 # Image Edit stage can provide its anchor; without it the
                 # compiler will surface the missing capability explicitly.
                 shot.continuity_from_shot_id = None
-            needs_anchor = image_edit_configured and anchor_selected(
+            needs_anchor = anchor_selected(
                 shot,
                 index,
                 self.settings.image_edit_anchor_mode,
             )
             if needs_anchor and not shot.anchor_prompt:
-                raise ValueError(f"AI planner omitted anchor_prompt for shot {index + 1}")
-            if needs_anchor:
+                if image_edit_configured:
+                    raise ValueError(f"AI planner omitted anchor_prompt for shot {index + 1}")
+                # Keep planning useful when Image Edit is intentionally
+                # offline.  The deterministic fallback is still a complete
+                # creator-visible prompt and can be edited before rendering.
+                shot.anchor_prompt = self._anchor_prompt(
+                    brief=brief,
+                    shot=shot,
+                    assets=assets,
+                )
+            if needs_anchor and image_edit_configured:
                 self._validate_anchor_bindings(shot, valid_assets)
             if not needs_anchor:
                 shot.anchor_prompt = ""

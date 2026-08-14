@@ -109,7 +109,11 @@ references remain available when a creator opens a shot.
 
 Explicit creator start frames always win. If no start frame is selected and an
 image-edit provider is configured, Nautilus composes the opening anchor from
-the project context and ordered scene/character/prop references instead.
+the project context and ordered scene/character/prop references instead. The
+planner still writes and exposes that opening-frame prompt when Image Edit is
+offline, so creators can review or edit the storyboard before enabling render
+services; ordinary reference images are never silently promoted to a start
+frame.
 
 Project aspect ratio is sent explicitly to H3. The current model-native
 canvases are `1280x704` (16:9 landscape), `704x1280` (9:16 portrait), and
