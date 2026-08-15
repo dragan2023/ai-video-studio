@@ -45,7 +45,7 @@ class RenderEstimator:
             or shot.render_duration_seconds <= 0
         ):
             return False
-        task = self._runtime_task(shot)
+        task = self._runtime_task(project, shot)
         mode = self._mode(project, shot)
         completed = shot.render_completed_at.isoformat()
         observation = RenderObservation(
@@ -110,7 +110,7 @@ class RenderEstimator:
         now: datetime | None = None,
         include_completed: bool = False,
     ) -> ShotRenderEstimate:
-        task = self._runtime_task(shot)
+        task = self._runtime_task(project, shot)
         mode = self._mode(project, shot)
         samples = self._samples(task, mode, project.brief.aspect_ratio)
         if samples:
@@ -177,11 +177,17 @@ class RenderEstimator:
         trimmed = [value for value in samples if abs(value - center) <= 3.5 * mad]
         return median(trimmed or samples)
 
-    def _runtime_task(self, shot: ShotSpec) -> ShotTask:
+    def _runtime_task(self, project: FilmProject, shot: ShotSpec) -> ShotTask:
+        continuation_mode = (
+            resolved_continuation_mode(project, shot)
+            if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+            else None
+        )
         return effective_video_task(
             shot,
             ref2va_configured=bool(self.settings.h3_ref2va_url),
             fl2va_configured=bool(self.settings.h3_fl2va_url),
+            continuation_mode=continuation_mode,
         )
 
     @staticmethod

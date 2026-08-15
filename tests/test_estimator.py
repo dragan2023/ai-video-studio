@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from long_video_studio.domain import (
+    ContinuationMode,
     FilmProject,
     ProjectBrief,
     RenderObservation,
@@ -95,3 +96,40 @@ def test_render_estimator_falls_back_to_current_deployment_baseline(settings):
     assert estimate.source == "configured"
     assert estimate.shots[0].estimated_seconds == pytest.approx(396.2)
     assert estimate.total_seconds == pytest.approx(408.2)
+
+
+def test_render_estimator_marks_ultra_fast_continuation_as_fl2va(settings):
+    configured = replace(
+        settings,
+        h3_fl2va_url="http://fl2va.test",
+        h3_ref2va_url="http://ref2va.test",
+    )
+    repository = StudioRepository(configured.database_path)
+    estimator = RenderEstimator(configured, repository)
+    first = ShotSpec(
+        index=0,
+        title="Opening",
+        purpose="Open",
+        duration_seconds=5,
+        task=ShotTask.FL2VA,
+        prompt="Opening.",
+    )
+    continuation = ShotSpec(
+        index=1,
+        title="Continuation",
+        purpose="Continue",
+        duration_seconds=5,
+        task=ShotTask.REF2VA,
+        prompt="Continue from the boundary frame.",
+        continuity_from_shot_id=first.id,
+    )
+    project = FilmProject(
+        brief=ProjectBrief(prompt="A continuous scene.", continuation_mode=ContinuationMode.ULTRA_FAST),
+        world_bible=WorldBible(logline="Continuous", visual_style="Natural"),
+        shots=[first, continuation],
+    )
+
+    estimate = estimator.estimate_shot(project, continuation)
+
+    assert estimate.task == ShotTask.FL2VA
+    assert estimate.continuation_mode == "ultra_fast"

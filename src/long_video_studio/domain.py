@@ -37,6 +37,10 @@ class AssetRole(str, Enum):
 class ContinuationMode(str, Enum):
     """Creator-facing trade-off for extending an already rendered clip."""
 
+    # Boundary-frame FL2VA is intentionally separate from the two Ref2VA
+    # policies.  Keep the stable value explicit so persisted projects can
+    # select this path without depending on endpoint availability.
+    ULTRA_FAST = "ultra_fast"
     FAST = "fast"
     QUALITY = "quality"
 
@@ -348,6 +352,7 @@ def effective_video_task(
     *,
     ref2va_configured: bool,
     fl2va_configured: bool,
+    continuation_mode: ContinuationMode | None = None,
 ) -> ShotTask:
     """Select the runtime task without changing the storyboard's creative IR.
 
@@ -362,6 +367,11 @@ def effective_video_task(
     is_generated_clip_continuation = bool(shot.continuity_from_shot_id)
     if not is_generated_clip_continuation:
         return shot.task
+    if continuation_mode == ContinuationMode.ULTRA_FAST:
+        # This mode deliberately uses the previous shot's extracted boundary
+        # frame as FL2VA's start frame.  Do not promote it to Ref2VA merely
+        # because a Ref2VA endpoint happens to be configured.
+        return ShotTask.FL2VA
     if shot.task == ShotTask.REF2VA or ref2va_configured:
         return ShotTask.REF2VA
     if fl2va_configured:

@@ -153,17 +153,26 @@ class FilmCompiler:
                 if previous_stage:
                     dependencies.append(previous_stage)
 
+            continuation_mode = (
+                resolved_continuation_mode(project, shot)
+                if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+                else None
+            )
             runtime_task = effective_video_task(
                 shot,
                 ref2va_configured=bool(self.settings.h3_ref2va_url),
                 fl2va_configured=bool(self.settings.h3_fl2va_url),
+                continuation_mode=continuation_mode,
             )
             is_fl2va = runtime_task == ShotTask.FL2VA
+            is_boundary_frame_continuation = continuation_mode == ContinuationMode.ULTRA_FAST
             has_explicit_start = bool(shot.start_frame_asset_id)
             has_image_references = self._has_image_references(shot)
             has_start_reference = has_explicit_start or has_image_references
             missing_non_continuity_start = is_fl2va and not shot.continuity_from_shot_id and not has_start_reference
-            selected_by_mode = is_fl2va and anchor_selected(shot, position, anchor_mode)
+            selected_by_mode = (
+                is_fl2va and not is_boundary_frame_continuation and anchor_selected(shot, position, anchor_mode)
+            )
             if selected_by_mode and not shot.anchor_prompt:
                 raise ValueError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
 
@@ -214,20 +223,23 @@ class FilmCompiler:
                 and not shot.start_frame_asset_id
                 and runtime_task == ShotTask.FL2VA
                 and shot.task == ShotTask.FL2VA
+                and not is_boundary_frame_continuation
             ):
                 warnings.append(
                     f"Shot {position + 1} uses the internal FL2VA boundary fallback because "
                     "the Ref2VA endpoint is not configured."
                 )
-            continuation_mode = (
-                resolved_continuation_mode(project, shot)
-                if shot.continuity_from_shot_id and not shot.start_frame_asset_id and runtime_task == ShotTask.REF2VA
+            if is_boundary_frame_continuation:
+                warnings.append(f"Shot {position + 1} uses 极速续写: the previous boundary frame is sent to FL2VA.")
+            stage_continuation_mode = (
+                continuation_mode
+                if continuation_mode == ContinuationMode.ULTRA_FAST or runtime_task == ShotTask.REF2VA
                 else None
             )
             estimate = self._estimate_video_seconds(
                 shot.duration_seconds,
                 shot.inference_steps,
-                continuation_mode,
+                stage_continuation_mode,
             )
             video_stage = ExecutionStage(
                 shot_id=shot.id,
@@ -250,15 +262,7 @@ class FilmCompiler:
                     "start_frame_asset_id": shot.start_frame_asset_id,
                     "audio_asset_id": shot.audio_asset_id,
                     "continuity_from_shot_id": shot.continuity_from_shot_id,
-                    "continuation_mode": (
-                        resolved_continuation_mode(project, shot).value
-                        if (
-                            shot.continuity_from_shot_id
-                            and not shot.start_frame_asset_id
-                            and runtime_task == ShotTask.REF2VA
-                        )
-                        else None
-                    ),
+                    "continuation_mode": stage_continuation_mode.value if stage_continuation_mode else None,
                 },
                 estimated_seconds=estimate,
             )
@@ -360,6 +364,7 @@ class FilmCompiler:
         # and historical medians; this is the repository-free compiler fallback.
         reference_seconds = {
             None: 594.3,
+            ContinuationMode.ULTRA_FAST: 594.3,
             ContinuationMode.FAST: 594.3,
             ContinuationMode.QUALITY: 2570.7,
         }[continuation_mode]

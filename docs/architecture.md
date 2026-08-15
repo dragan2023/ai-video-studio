@@ -70,18 +70,18 @@ lease, select devices, or terminate a process.
 
 An explicit creator start frame always wins. Without one, the runtime may
 compose an anchor from project context and ordered references. Continuous
-shots use Ref2VA when configured: `fast` passes the previous clip's final five
-seconds, while `quality` passes the complete previous clip. The runtime adds a
-non-persistent anti-replay instruction only to these continuation requests, so
-storyboard prompts remain editable and retries cannot accumulate duplicate
-constraints. When Ref2VA is unavailable, the previous boundary frame and
-FL2VA remain an internal compatibility fallback. Real scene cuts can request
-a new anchor.
+shots expose three policies: `ultra_fast` extracts the previous boundary frame
+and sends it to FL2VA; `fast` sends the previous clip's final five seconds to
+Ref2VA; and `quality` sends the complete previous clip to Ref2VA. The two
+Ref2VA modes add a non-persistent anti-replay instruction only to those
+continuation requests, so storyboard prompts remain editable and retries
+cannot accumulate duplicate constraints. Real scene cuts can request a new
+anchor.
 
 The H3 adapter sends `quality=lossless` explicitly by default. This is separate
-from Nautilus's `fast`/`quality` continuation choice: the former selects the
-model's native versus Cache-DiT conditioning path, while the latter selects
-how much previous video is supplied. `flow_shift=12`,
+from Nautilus's continuation choice: the adapter's quality field selects the
+model's native versus Cache-DiT conditioning path, while `ultra_fast`/`fast`/
+`quality` select how the previous shot is supplied. `flow_shift=12`,
 `audio_flow_shift=3`, and 50 diffusion steps are the validated accuracy
 baseline. The model's internal reference-noise timestep remains fixed until a
 dedicated artifact/continuity sweep justifies exposing it.

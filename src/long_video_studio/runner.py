@@ -166,10 +166,16 @@ class RenderManager:
                 shot.render_completed_at = None
                 shot.render_duration_seconds = None
                 self.repository.save_project(project)
+                continuation_mode = (
+                    resolved_continuation_mode(project, shot)
+                    if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+                    else None
+                )
                 runtime_task = effective_video_task(
                     shot,
                     ref2va_configured=bool(self.settings.h3_ref2va_url),
                     fl2va_configured=bool(self.settings.h3_fl2va_url),
+                    continuation_mode=continuation_mode,
                 )
                 is_ref2va_continuation = bool(
                     runtime_task == ShotTask.REF2VA and shot.continuity_from_shot_id and not shot.start_frame_asset_id
@@ -453,6 +459,14 @@ class RenderManager:
         mode = self.settings.image_edit_anchor_mode
         if mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise RuntimeError(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {mode}")
+        if (
+            shot.continuity_from_shot_id
+            and not shot.start_frame_asset_id
+            and resolved_continuation_mode(project, shot) == ContinuationMode.ULTRA_FAST
+        ):
+            # 极速续写 is intentionally a pure boundary-frame -> FL2VA path.
+            # Do not insert an Image Edit/T2I anchor between adjacent clips.
+            return None
         if not anchor_selected(shot, position, mode):
             return None
         if not shot.anchor_prompt:

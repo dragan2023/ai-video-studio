@@ -622,6 +622,22 @@ def test_compiler_quality_continuation_uses_full_clip_ref2va(settings):
     assert stage.estimated_seconds > fast_stage.estimated_seconds
 
 
+def test_compiler_ultra_fast_continuation_routes_boundary_frame_to_fl2va(settings):
+    project = _anchor_mode_project()
+    project.brief.continuation_mode = ContinuationMode.ULTRA_FAST
+
+    plan = FilmCompiler(_configured_image_edit(settings, "every-shot")).compile(project)
+    stage = next(item for item in plan.stages if item.kind == "video" and item.shot_id == project.shots[1].id)
+
+    assert stage.capability_id == "minimax-h3-fl2va"
+    assert stage.inputs["continuation_mode"] == "ultra_fast"
+    assert stage.depends_on == [
+        next(item for item in plan.stages if item.kind == "video" and item.shot_id == project.shots[0].id).id
+    ]
+    assert not any(item.kind == "keyframe" and item.shot_id == project.shots[1].id for item in plan.stages)
+    assert any("极速续写" in warning for warning in plan.warnings)
+
+
 def test_compiler_keeps_fl2va_as_unconfigured_ref2va_fallback(settings):
     project = _anchor_mode_project()
     configured = replace(settings, h3_fl2va_url="http://fl2va.test")

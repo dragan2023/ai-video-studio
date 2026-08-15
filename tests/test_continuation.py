@@ -84,6 +84,25 @@ def test_effective_video_task_prefers_ref2va_but_preserves_safe_fallbacks():
     )
 
 
+def test_ultra_fast_continuation_forces_boundary_frame_fl2va_even_when_ref2va_is_ready():
+    continuation = _shot(
+        1,
+        continuity_from_shot_id="shot_previous",
+        continuation_mode=ContinuationMode.ULTRA_FAST,
+        task=ShotTask.REF2VA,
+    )
+
+    assert (
+        effective_video_task(
+            continuation,
+            ref2va_configured=True,
+            fl2va_configured=True,
+            continuation_mode=ContinuationMode.ULTRA_FAST,
+        )
+        == ShotTask.FL2VA
+    )
+
+
 def test_continuation_rule_is_ephemeral_and_idempotent():
     original = _shot(1, continuity_from_shot_id="shot_previous")
 
@@ -250,6 +269,85 @@ def test_fast_render_routes_continuation_to_tail_ref2va_and_leaves_asset_ref2va_
     assert persisted.shots[1].render_completed_at is not None
     assert persisted.shots[1].render_duration_seconds is not None
     assert persisted.shots[1].render_duration_seconds >= 0
+
+
+def test_ultra_fast_render_uses_only_previous_boundary_with_no_anchor_provider(
+    settings,
+    tmp_path,
+    monkeypatch,
+):
+    configured = replace(
+        settings,
+        h3_fl2va_url="http://fl2va",
+        h3_ref2va_url="http://ref2va",
+        image_edit_anchor_mode="every-shot",
+    )
+    repository = StudioRepository(configured.database_path)
+    assets = AssetService(configured, repository)
+    start = assets.ingest_stream(png_bytes(), "start.png", "image/png")
+    first = _shot(0, start_frame_asset_id=start.id, reference_asset_ids=[start.id])
+    continuation = _shot(
+        1,
+        continuity_from_shot_id=first.id,
+        continuation_mode=ContinuationMode.ULTRA_FAST,
+        task=ShotTask.REF2VA,
+        anchor_prompt="This must not be called for boundary-frame continuation.",
+    )
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(
+                prompt="A creator makes a boundary-frame continuation.",
+                duration_seconds=15,
+                continuation_mode=ContinuationMode.ULTRA_FAST,
+            ),
+            world_bible=WorldBible(logline="A short film", visual_style="cinematic"),
+            shots=[first, continuation],
+        )
+    )
+    manager = RenderManager(configured, repository)
+    fl2va_starts: list[Path] = []
+    fit_sources: list[Path] = []
+    ref2va_calls: list[Path] = []
+
+    async def fake_fl2va(self, shot, start_frame, output_path, **kwargs):
+        fl2va_starts.append(Path(start_frame))
+        output_path.write_bytes(b"fl2va")
+        return output_path
+
+    async def unexpected_ref2va(self, *args, **kwargs):
+        ref2va_calls.append(Path("called"))
+        raise AssertionError("ultra-fast continuation must not call Ref2VA")
+
+    def fake_fit(source, output, width, height):
+        fit_sources.append(Path(source))
+        output.write_bytes(Path(source).read_bytes())
+        return output
+
+    def fake_boundary(source, output):
+        output.write_bytes(png_bytes("green").getvalue())
+        return output
+
+    def fake_concatenate(videos, output, *args, **kwargs):
+        output.write_bytes(b"final")
+        return output
+
+    monkeypatch.setattr(H3Client, "generate_fl2va", fake_fl2va)
+    monkeypatch.setattr(H3Client, "generate_ref2va", unexpected_ref2va)
+    monkeypatch.setattr(manager.media, "fit_image_to_canvas", fake_fit)
+    monkeypatch.setattr(manager.media, "extract_last_stable_frame", fake_boundary)
+    monkeypatch.setattr(manager.media, "concatenate", fake_concatenate)
+
+    job = repository.save_job(RenderJob(project_id=project.id))
+    asyncio.run(manager._run(job.id))
+
+    completed = repository.get_job(job.id)
+    assert completed is not None and completed.status == "complete"
+    assert not ref2va_calls
+    assert len(fl2va_starts) == 2
+    assert fit_sources[1].name == "shot-001-boundary.png"
+    persisted = repository.get_project(project.id)
+    assert persisted is not None
+    assert persisted.shots[1].anchor_frame_path is None
 
 
 def test_failed_render_can_resume_a_completed_first_clip(settings, tmp_path, monkeypatch):

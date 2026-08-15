@@ -35,6 +35,7 @@ from long_video_studio.domain import (
     TransitionKind,
     WorldBible,
     effective_video_task,
+    resolved_continuation_mode,
     utc_now,
 )
 from long_video_studio.planner import PlannerError
@@ -541,11 +542,20 @@ def create_api_router() -> APIRouter:
             if force
             else [shot for shot in ordered_shots if RenderManager.reusable_take_path(shot) is None]
         )
+        continuation_modes = {
+            shot.id: (
+                resolved_continuation_mode(project, shot)
+                if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+                else None
+            )
+            for shot in pending_shots
+        }
         runtime_tasks = {
             shot.id: effective_video_task(
                 shot,
                 ref2va_configured=bool(services.settings.h3_ref2va_url),
                 fl2va_configured=bool(services.settings.h3_fl2va_url),
+                continuation_mode=continuation_modes[shot.id],
             )
             for shot in pending_shots
         }
@@ -572,7 +582,7 @@ def create_api_router() -> APIRouter:
                 missing.append(f"earlier continuation source for shot {shot.index + 1}")
             if runtime_task == ShotTask.FL2VA:
                 image_references = [asset for asset in assets if asset.kind == AssetKind.IMAGE]
-                needs_anchor = anchor_selected(
+                needs_anchor = continuation_modes[shot.id] != ContinuationMode.ULTRA_FAST and anchor_selected(
                     shot,
                     position,
                     services.settings.image_edit_anchor_mode,

@@ -123,6 +123,31 @@ const stylePresets = [
   },
 ];
 
+const continuationModeOptions = [
+  {
+    id: "ultra_fast",
+    label: "极速续写",
+    hint: "只取上一镜最后一帧 · FL2VA · 最快，连续性较弱",
+    dialogHint: "只取上一镜最后一帧（连续性较弱）",
+  },
+  {
+    id: "fast",
+    label: "快速续写",
+    hint: "参考上一镜最后 5 秒 · Ref2VA · 默认更快",
+    dialogHint: "参考上一镜最后 5 秒",
+  },
+  {
+    id: "quality",
+    label: "高质量续写",
+    hint: "参考完整上一镜 · Ref2VA · 上下文最完整",
+    dialogHint: "参考完整上一镜",
+  },
+];
+
+const continuationModeMeta = (mode) =>
+  continuationModeOptions.find((item) => item.id === mode) ||
+  continuationModeOptions.find((item) => item.id === "quality");
+
 function loadCustomStyles() {
   try {
     const value = JSON.parse(
@@ -174,12 +199,17 @@ function shotRenderTiming(shot, now) {
   return "尚未生成";
 }
 
+function resolvedContinuationMode(project, shot) {
+  return (
+    shot?.continuation_mode || project?.brief?.continuation_mode || "quality"
+  );
+}
+
 function runtimeShotTask(project, shot) {
   if (shot?.start_frame_asset_id) return "fl2va";
   if (shot?.continuity_from_shot_id) {
-    const mode =
-      shot.continuation_mode || project?.brief?.continuation_mode || "quality";
-    return mode === "quality" ? "ref2va" : "fl2va";
+    const mode = resolvedContinuationMode(project, shot);
+    return mode === "ultra_fast" ? "fl2va" : "ref2va";
   }
   return shot?.task || "fl2va";
 }
@@ -188,21 +218,27 @@ function runtimeShotLabel(project, shot) {
   if (shot.start_frame_asset_id) return "FL2VA · 显式首帧";
   const task = runtimeShotTask(project, shot);
   if (shot.continuity_from_shot_id) {
-    return task === "ref2va" ? "REF2VA · 高质量续写" : "FL2VA · 快速续写";
+    const mode = resolvedContinuationMode(project, shot);
+    if (mode === "ultra_fast") return "FL2VA · 极速续写";
+    return `REF2VA · ${continuationModeMeta(mode).label}`;
   }
   return String(task).toUpperCase();
 }
 
+function runtimeShotHint(project, shot) {
+  if (!shot?.continuity_from_shot_id) return "";
+  return continuationModeMeta(resolvedContinuationMode(project, shot)).hint;
+}
+
 function openingFrameSourceLabel(project, shot, assets) {
   if (shot.start_frame_asset_id) return "显式首帧";
-  if (runtimeShotTask(project, shot) === "ref2va") return "上一镜 Ref2VA 续写";
+  if (shot.continuity_from_shot_id) return runtimeShotHint(project, shot);
   const imageAssetIds = new Set(
     assets.filter((asset) => asset.kind === "image").map((asset) => asset.id),
   );
   if ((shot.reference_asset_ids || []).some((assetId) => imageAssetIds.has(assetId))) {
     return "Image Edit 首帧";
   }
-  if (shot.continuity_from_shot_id) return "上一镜边界帧";
   return "T2I 首帧";
 }
 
@@ -1126,6 +1162,7 @@ function App() {
         duration_seconds: project.brief.duration_seconds,
         aspect_ratio: project.brief.aspect_ratio,
         quality: project.brief.quality,
+        continuation_mode: project.brief.continuation_mode || "quality",
         subtitle_mode: project.brief.subtitle_mode || "none",
       },
       world_bible: {
@@ -1206,11 +1243,8 @@ function App() {
       setProject(value);
       setJob(null);
       await loadProjects();
-      setNotice(
-        mode === "fast"
-          ? "已切换为快速续写：后续镜头参考上一镜最后 5 秒"
-          : "已切换为高质量续写：后续镜头参考完整上一镜",
-      );
+      const selectedMode = continuationModeMeta(mode);
+      setNotice(`已切换为${selectedMode.label}：${selectedMode.hint}`);
     } catch (error) {
       setNotice(`续写模式保存失败：${error.message}`);
     }
@@ -1287,7 +1321,7 @@ function App() {
       return {
         ...current,
         task: "fl2va",
-        continuation_mode: value === "ref2va" ? "quality" : "fast",
+        continuation_mode: value === "ref2va" ? "quality" : "ultra_fast",
       };
     });
 
@@ -1852,20 +1886,18 @@ function App() {
             <div className="quality-toggle">
               <span>镜头续写</span>
               <div>
-                {["fast", "quality"].map((item) => (
+                {continuationModeOptions.map((item) => (
                   <button
-                    key={item}
-                    className={continuationMode === item ? "active" : ""}
-                    onClick={() => changeContinuationMode(item)}
+                    key={item.id}
+                    className={continuationMode === item.id ? "active" : ""}
+                    onClick={() => changeContinuationMode(item.id)}
                   >
-                    {item === "fast" ? "快速续写" : "高质量续写"}
+                    {item.label}
                   </button>
                 ))}
               </div>
               <small className="quality-hint">
-                {continuationMode === "fast"
-                  ? "参考上一镜最后 5 秒 · 默认更快"
-                  : "参考完整上一镜 · 上下文最完整"}
+                {continuationModeMeta(continuationMode).hint}
               </small>
             </div>
           </section>
@@ -2344,8 +2376,11 @@ function App() {
                         )
                       }
                     >
-                      <option value="fast">快速续写（上一镜最后 5 秒）</option>
-                      <option value="quality">高质量续写（完整上一镜）</option>
+                      {continuationModeOptions.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label}（{item.dialogHint}）
+                        </option>
+                      ))}
                     </select>
                     <small className="field-hint">
                       仅影响 clip1 及后续的镜头承接；首镜和显式首帧不受影响。
@@ -3056,8 +3091,11 @@ function App() {
                       }
                     >
                       <option value="">继承项目设定</option>
-                      <option value="fast">快速续写 · 最后 5 秒</option>
-                      <option value="quality">高质量续写 · 完整上一镜</option>
+                      {continuationModeOptions.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label} · {item.dialogHint}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <label className="dialog-field">

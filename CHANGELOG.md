@@ -18,6 +18,8 @@ All notable changes to Nautilus Studio will be documented here.
 - H3 best-practice storyboard fields for visual beats, continuity handoffs,
   dialogue delivery, soundscape, music, reference roles, and editable opening
   anchor prompts.
+- Three explicit continuation policies: boundary-frame FL2VA `ultra_fast`,
+  tail-reference Ref2VA `fast`, and full-reference Ref2VA `quality`.
 - A 14-second per-shot safety ceiling across planner, API, compiler, and H3
   transport boundaries so encoded Ref2VA inputs stay below H3's 15-second
   reference-video limit.
