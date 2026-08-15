@@ -133,6 +133,10 @@ class Settings:
     planner_project_concurrency: int = 3
     planner_continuity_critic: bool = True
     planner_skills_dir: Path | None = None
+    service_probe_timeout_seconds: float = 3.0
+    gpu_snapshot_path: Path | None = None
+    gpu_snapshot_max_age_seconds: float = 20.0
+    gpu_snapshot_max_bytes: int = 1_048_576
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> Settings:
@@ -236,6 +240,23 @@ class Settings:
             ),
             planner_continuity_critic=_enabled("STUDIO_PLANNER_CONTINUITY_CRITIC", default=True),
             planner_skills_dir=_discover_h3_skills_dir(),
+            service_probe_timeout_seconds=max(
+                0.2,
+                float(os.getenv("STUDIO_SERVICE_PROBE_TIMEOUT_SECONDS", "3")),
+            ),
+            gpu_snapshot_path=(
+                Path(os.environ["STUDIO_GPU_SNAPSHOT_PATH"]).expanduser().resolve()
+                if os.getenv("STUDIO_GPU_SNAPSHOT_PATH")
+                else None
+            ),
+            gpu_snapshot_max_age_seconds=max(
+                1.0,
+                float(os.getenv("STUDIO_GPU_SNAPSHOT_MAX_AGE_SECONDS", "20")),
+            ),
+            gpu_snapshot_max_bytes=max(
+                1024,
+                int(os.getenv("STUDIO_GPU_SNAPSHOT_MAX_BYTES", "1048576")),
+            ),
         )
 
     def ensure_directories(self) -> None:

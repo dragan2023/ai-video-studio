@@ -212,6 +212,14 @@ def create_api_router() -> APIRouter:
     def capabilities(request: Request):
         return _services(request).compiler.capabilities()
 
+    @router.get("/services/status")
+    async def services_status(request: Request) -> dict[str, object]:
+        services = _services(request)
+        return await services.service_status.collect(
+            planning_project_ids=_planning_manager(request).active_project_ids(),
+            active_jobs=services.repository.list_active_jobs(),
+        )
+
     @router.get("/style-presets")
     def style_presets() -> list[dict[str, object]]:
         """Return the canonical directing contracts used by the planner."""

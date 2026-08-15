@@ -48,6 +48,24 @@ drift apart.
   other vLLM-Omni, SGLang, or hosted video backends.
 - Media: local ffmpeg/ffprobe assembly and Pillow-based no-stretch image fit.
 
+## Observability boundary
+
+`GET /api/services/status` combines three independent signals without turning
+one into another:
+
+- provider health from each configured service's HTTP `/health` endpoint;
+- optional vLLM-Omni running/waiting request counters from `/metrics`;
+- optional GPU utilization from a versioned, atomically replaced local JSON
+  snapshot.
+
+The model-serving process and the GPU collector are separate operator-owned
+services. Nautilus never invokes SSH, a vendor GPU utility, a lease broker, or
+process-control commands from an API request. This keeps the public control
+plane portable across MUSA, CUDA, other local runtimes, and hosted vendors.
+Missing or stale GPU telemetry is reported explicitly and never converted to a
+false `0%` reading. GPU samples are diagnostic only and cannot authorize a
+lease, select devices, or terminate a process.
+
 ## Continuity policy
 
 An explicit creator start frame always wins. Without one, the runtime may

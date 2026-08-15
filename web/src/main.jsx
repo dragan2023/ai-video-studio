@@ -1,8 +1,10 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Activity,
   Aperture,
   ArrowUpRight,
   Check,
+  ChevronDown,
   CircleAlert,
   Clapperboard,
   CloudUpload,
@@ -14,6 +16,7 @@ import {
   Pencil,
   Play,
   Plus,
+  Server,
   Settings2,
   Sparkles,
   Trash2,
@@ -279,17 +282,214 @@ function AssetCard({ asset, selected, onToggle, onEdit }) {
   );
 }
 
-function StatusPill({ health, job }) {
-  const running = job?.status === "running" || job?.status === "queued";
-  const healthy = Boolean(health?.fl2va_healthy && health?.ref2va_healthy);
+const serviceStateCopy = {
+  ready: "在线",
+  busy: "运行中",
+  queued: "排队中",
+  unconfigured: "未配置",
+  unreachable: "无法连接",
+  error: "异常",
+  unknown: "检查中",
+};
+
+function formatMib(value) {
+  if (value == null) return "—";
+  if (value >= 1024)
+    return `${(value / 1024).toFixed(value >= 10240 ? 0 : 1)} GiB`;
+  return `${Math.round(value)} MiB`;
+}
+
+function gpuTelemetryCopy(state, mapped = true) {
+  if (state === "ready") return mapped ? "GPU 遥测在线" : "该服务尚未映射 GPU";
+  if (state === "stale") return "GPU 遥测已过期";
+  if (state === "missing") return "GPU 快照暂不可用";
+  if (state === "invalid") return "GPU 快照格式无效";
+  return "GPU 遥测未接入";
+}
+
+function ServiceStatusRow({ service, telemetryState }) {
+  const gpu = service.gpu;
+  const stateCopy = serviceStateCopy[service.state] || service.state;
   return (
-    <div className={`status-pill ${running ? "working" : "ready"}`}>
-      <span className="status-dot" />
-      {running
-        ? `${Math.round((job.progress || 0) * 100)}% 渲染中`
-        : healthy
-          ? "引擎在线"
-          : "检查连接"}
+    <article className={`runtime-service state-${service.state}`}>
+      <div className="runtime-service-head">
+        <span className="runtime-service-dot" />
+        <div>
+          <strong>{service.display_name}</strong>
+          <small>
+            {service.provider || "provider"}
+            {service.model ? ` · ${service.model}` : ""}
+          </small>
+        </div>
+        <b>{stateCopy}</b>
+      </div>
+      {service.configured ? (
+        <div className="runtime-service-metrics">
+          {service.requests_running != null ? (
+            <span>
+              RUN <b>{service.requests_running}</b>
+            </span>
+          ) : null}
+          {service.requests_waiting != null ? (
+            <span>
+              WAIT <b>{service.requests_waiting}</b>
+            </span>
+          ) : null}
+          {service.latency_ms != null ? (
+            <span>
+              PING <b>{Math.round(service.latency_ms)} ms</b>
+            </span>
+          ) : null}
+          {service.error ? (
+            <span className="runtime-service-error">{service.error}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {gpu ? (
+        <div className={`runtime-gpu state-${gpu.state}`}>
+          <div className="runtime-gpu-summary">
+            <span>GPU UTIL</span>
+            <strong>
+              {gpu.utilization_percent == null
+                ? "—"
+                : `${Math.round(gpu.utilization_percent)}%`}
+            </strong>
+            <small>
+              {formatMib(gpu.memory_used_mib)} /{" "}
+              {formatMib(gpu.memory_total_mib)}
+              {gpu.temperature_c == null
+                ? ""
+                : ` · ${Math.round(gpu.temperature_c)}°C`}
+            </small>
+          </div>
+          <div className="runtime-gpu-bar" aria-hidden="true">
+            <i style={{ width: `${gpu.utilization_percent || 0}%` }} />
+          </div>
+          <div className="runtime-gpu-devices">
+            {gpu.devices.map((device) => (
+              <span key={`${device.node || "gpu"}-${device.index}`}>
+                GPU {device.index}
+                <b>
+                  {device.utilization_percent == null
+                    ? "—"
+                    : `${Math.round(device.utilization_percent)}%`}
+                </b>
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : service.kind !== "planner" ? (
+        <div className="runtime-gpu-empty">
+          {gpuTelemetryCopy(telemetryState, false)}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function RuntimeStatus({ status, job, open, onToggle, onClose }) {
+  const root = useRef(null);
+  const services = status?.services || [];
+  const configured = services.filter((service) => service.configured);
+  const available = configured.filter((service) =>
+    ["ready", "busy", "queued"].includes(service.state),
+  );
+  const running = job?.status === "running" || job?.status === "queued";
+  const degraded = status?.status === "degraded";
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointer = (event) => {
+      if (!root.current?.contains(event.target)) onClose();
+    };
+    const handleKey = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("pointerdown", handlePointer);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointer);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [open, onClose]);
+
+  return (
+    <div className="runtime-status" ref={root}>
+      <button
+        type="button"
+        className={`status-pill ${running ? "working" : degraded ? "degraded" : "ready"}`}
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="status-dot" />
+        {running
+          ? `${Math.round((job.progress || 0) * 100)}% 渲染中`
+          : status
+            ? `${available.length}/${configured.length} 服务在线`
+            : "检查服务"}
+        <ChevronDown size={11} className={open ? "rotate" : ""} />
+      </button>
+      {open ? (
+        <div className="runtime-popover">
+          <div className="runtime-popover-head">
+            <div>
+              <span className="overline">INFRASTRUCTURE</span>
+              <h3>运行状态</h3>
+              <p>
+                {status?.checked_at
+                  ? `更新于 ${new Date(status.checked_at).toLocaleTimeString()}`
+                  : "正在读取服务状态…"}
+              </p>
+            </div>
+            <div className={`runtime-overall ${status ? (degraded ? "degraded" : "ready") : "checking"}`}>
+              <Activity size={14} />
+              {status ? (degraded ? "部分异常" : "系统就绪") : "检查中"}
+            </div>
+          </div>
+          {status ? (
+            <>
+              <div className="runtime-worker-strip">
+                <span>
+                  <Server size={12} /> 渲染任务
+                  <b>{status.activity?.render?.active_count || 0}</b>
+                </span>
+                <span>
+                  并发
+                  <b>
+                    {status.activity?.render?.running_count || 0}/
+                    {status.activity?.render?.max_concurrency || 0}
+                  </b>
+                </span>
+                <span>
+                  构思
+                  <b>{status.activity?.planning?.active_count || 0}</b>
+                </span>
+              </div>
+              <div className="runtime-service-list">
+                {services.map((service) => (
+                  <ServiceStatusRow
+                    key={service.id}
+                    service={service}
+                    telemetryState={status.gpu_telemetry?.state}
+                  />
+                ))}
+              </div>
+              <div
+                className={`runtime-telemetry state-${status.gpu_telemetry?.state || "unknown"}`}
+              >
+                <span />
+                {status.gpu_telemetry?.state === "ready"
+                  ? `GPU 数据 ${Math.round(status.gpu_telemetry.age_seconds || 0)} 秒前采集`
+                  : status.gpu_telemetry?.state === "stale"
+                    ? "GPU 数据已过期，数值仅供参考"
+                    : `${gpuTelemetryCopy(status.gpu_telemetry?.state)}；服务健康状态仍可用`}
+              </div>
+            </>
+          ) : (
+            <div className="runtime-loading">正在探测 Planner 与模型服务…</div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -352,6 +552,7 @@ function App() {
   const [projects, setProjects] = useState([]);
   const [project, setProject] = useState(null);
   const [health, setHealth] = useState(null);
+  const [serviceStatus, setServiceStatus] = useState(null);
   const [job, setJob] = useState(null);
   const [renderEstimate, setRenderEstimate] = useState(null);
   const [activeJobs, setActiveJobs] = useState([]);
@@ -381,6 +582,7 @@ function App() {
   const [plannerTrace, setPlannerTrace] = useState([]);
   const [clientTrace, setClientTrace] = useState([]);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [runtimeStatusOpen, setRuntimeStatusOpen] = useState(false);
   const [clockNow, setClockNow] = useState(Date.now());
   const [editingAsset, setEditingAsset] = useState(null);
   const [assetDraft, setAssetDraft] = useState({
@@ -487,6 +689,17 @@ function App() {
       setHealth(null);
     }
   }, []);
+  const loadServiceStatus = useCallback(async () => {
+    try {
+      const value = await api("/api/services/status");
+      setServiceStatus(value);
+      return value;
+    } catch {
+      // Observability must never block planning or rendering. Preserve the
+      // last valid sample when a probe request itself fails.
+      return null;
+    }
+  }, []);
 
   const availableStyles = useMemo(
     () => [...registryStyles, ...customStyles],
@@ -560,6 +773,7 @@ function App() {
           loadActiveJobs(),
           loadStylePresets(),
           loadHealth(),
+          loadServiceStatus(),
         ]);
         if (!cancelled && availableProjects.length)
           await loadProject(availableProjects[0].id);
@@ -571,7 +785,37 @@ function App() {
       cancelled = true;
       projectRequest.current += 1;
     };
-  }, [loadAssets, loadProjects, loadActiveJobs, loadStylePresets, loadHealth, loadProject]);
+  }, [
+    loadAssets,
+    loadProjects,
+    loadActiveJobs,
+    loadStylePresets,
+    loadHealth,
+    loadServiceStatus,
+    loadProject,
+  ]);
+
+  useEffect(() => {
+    let inFlight = false;
+    const refresh = async () => {
+      if (document.visibilityState === "hidden" || inFlight) return;
+      inFlight = true;
+      try {
+        await loadServiceStatus();
+      } finally {
+        inFlight = false;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    const timer = window.setInterval(refresh, 5000);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [loadServiceStatus]);
 
   useEffect(() => {
     const projectId = project?.id;
@@ -1296,11 +1540,26 @@ function App() {
     (left, right) => Date.parse(left.created_at || 0) - Date.parse(right.created_at || 0),
   );
   const h3Healthy = Boolean(health?.fl2va_healthy && health?.ref2va_healthy);
-  const t2iStatus = health?.t2i_healthy
-    ? "T2I 在线"
-    : health?.t2i_configured
-      ? "T2I 等待连接"
-      : "T2I 未配置";
+  const runtimeServices = serviceStatus?.services || [];
+  const configuredRuntimeServices = runtimeServices.filter(
+    (item) => item.configured,
+  );
+  const availableRuntimeServices = configuredRuntimeServices.filter((item) =>
+    ["ready", "busy", "queued"].includes(item.state),
+  );
+  const gpuUtilization = runtimeServices
+    .flatMap((item) => item.gpu?.devices || [])
+    .map((item) => item.utilization_percent)
+    .filter((value) => value != null);
+  const averageGpuUtilization = gpuUtilization.length
+    ? Math.round(
+        gpuUtilization.reduce((sum, value) => sum + value, 0) /
+          gpuUtilization.length,
+      )
+    : null;
+  const runtimeHealthy = serviceStatus
+    ? serviceStatus.status === "ready"
+    : h3Healthy;
   return (
     <div className="nautilus-app">
       <aside className="side-rail">
@@ -1329,16 +1588,26 @@ function App() {
           </button>
         ))}
         <div className="rail-spacer" />
-        <div className="engine-card">
+        <button
+          type="button"
+          className="engine-card"
+          onClick={() => setRuntimeStatusOpen(true)}
+        >
           <div className="engine-icon">
             <WandSparkles size={16} />
           </div>
           <div>
             <strong>海螺引擎</strong>
-            <span>{h3Healthy ? `H3 · 在线 · ${t2iStatus}` : "等待连接 H3"}</span>
+            <span>
+              {serviceStatus
+                ? `${availableRuntimeServices.length}/${configuredRuntimeServices.length} 服务${averageGpuUtilization == null ? "" : ` · GPU ${averageGpuUtilization}%`}`
+                : h3Healthy
+                  ? "H3 · 在线"
+                  : "等待连接 H3"}
+            </span>
           </div>
-          <span className={`engine-dot ${h3Healthy ? "on" : ""}`} />
-        </div>
+          <span className={`engine-dot ${runtimeHealthy ? "on" : ""}`} />
+        </button>
       </aside>
 
       <main className="main-canvas">
@@ -1385,7 +1654,13 @@ function App() {
             </button>
           </div>
           <div className="header-actions">
-            <StatusPill health={health} job={job} />
+            <RuntimeStatus
+              status={serviceStatus}
+              job={job}
+              open={runtimeStatusOpen}
+              onToggle={() => setRuntimeStatusOpen((value) => !value)}
+              onClose={() => setRuntimeStatusOpen(false)}
+            />
             <button className="header-new" onClick={newProject}>
               <Plus size={15} /> 新项目
             </button>

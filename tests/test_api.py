@@ -71,6 +71,24 @@ def test_creator_flow_upload_plan_edit_compile(settings):
     assert client.get("/").status_code == 200
 
 
+def test_service_status_api_keeps_optional_services_explicit(settings):
+    client = TestClient(create_app(settings))
+
+    response = client.get("/api/services/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "ready"
+    services = {item["id"]: item for item in payload["services"]}
+    assert services["planner"]["state"] == "ready"
+    assert services["fl2va"]["state"] == "unconfigured"
+    assert services["ref2va"]["state"] == "unconfigured"
+    assert services["image_edit"]["state"] == "unconfigured"
+    assert services["t2i"]["state"] == "unconfigured"
+    assert payload["gpu_telemetry"]["state"] == "not_configured"
+
+
 def test_style_presets_api_exposes_canonical_h3_contracts(settings):
     client = TestClient(create_app(settings))
     response = client.get("/api/style-presets")

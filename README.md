@@ -26,6 +26,7 @@ workflow:
 - previous-boundary-to-next-anchor continuity;
 - optional story-aware anchor frames built by Image Edit or zero-material T2I;
 - provider switching between self-hosted vLLM-Omni and hosted APIs;
+- live per-service readiness, request activity, and optional per-GPU telemetry;
 - resumable and deletable projects, concurrent background planning/rendering,
   history-calibrated ETAs, inline preview, and sidecar subtitles.
 
@@ -223,6 +224,53 @@ export STUDIO_T2I_GUIDANCE_SCALE=1.0
 Studio calls the OpenAI-compatible `/v1/images/generations` endpoint. The
 model field is optional for a single-model vLLM-Omni server.
 
+## Service and GPU status
+
+The header status control reports Planner, FL2VA, Ref2VA, Image Edit, and T2I
+independently. For vLLM-Omni deployments, Nautilus reads `/health` and the
+stable request counters from `/metrics`; a failed metrics endpoint never turns
+a successful health check into an outage.
+
+GPU telemetry is optional and provider-neutral. The Studio process never runs
+SSH, `mthreads-gmi`, `nvidia-smi`, or lease commands. Instead, an
+operator-owned collector writes one local JSON snapshot atomically and Studio
+only validates and displays it:
+
+```bash
+export STUDIO_GPU_SNAPSHOT_PATH=/var/run/nautilus/gpu-service-snapshot.json
+export STUDIO_GPU_SNAPSHOT_MAX_AGE_SECONDS=20
+```
+
+The versioned snapshot contract maps physical or container-visible devices to
+Studio service IDs:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "gpu_service_snapshot",
+  "captured_at": "2026-08-15T08:30:00Z",
+  "devices": [
+    {
+      "service_id": "fl2va",
+      "node": "video-node",
+      "index": 0,
+      "name": "accelerator",
+      "utilization_percent": 87,
+      "memory_used_mib": 64000,
+      "memory_total_mib": 81920,
+      "temperature_c": 61
+    }
+  ]
+}
+```
+
+Supported service IDs are `fl2va`, `ref2va`, `image_edit`, and `t2i`.
+Unknown fields are ignored for forward compatibility; invalid ranges,
+timezone-less timestamps, oversized files, and unsupported schema versions
+fail closed. A stale or unavailable snapshot is displayed as unknown rather
+than as `0%`. Telemetry is observational only: scheduling, lease ownership,
+and process cleanup remain external operator responsibilities.
+
 ## Configuration
 
 All configuration uses `STUDIO_` environment variables. Start from
@@ -329,6 +377,7 @@ src/long_video_studio/
   planning.py     concurrent background project planning
   estimator.py    profile-aware render ETA calibration
   runner.py       render orchestration
+  service_status.py service health, activity, and GPU snapshot projection
 web/              React creator UI and Vite build
 docs/             architecture and provider contracts
 scripts/          serving and probe helpers

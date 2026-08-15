@@ -8,6 +8,7 @@ from long_video_studio.config import Settings
 from long_video_studio.estimator import RenderEstimator
 from long_video_studio.planner import PlannerService
 from long_video_studio.repository import StudioRepository
+from long_video_studio.service_status import ServiceStatusCollector
 
 
 @dataclass
@@ -18,6 +19,7 @@ class StudioServices:
     planner: PlannerService
     compiler: FilmCompiler
     estimator: RenderEstimator
+    service_status: ServiceStatusCollector
 
     @classmethod
     def create(cls, settings: Settings) -> StudioServices:
@@ -32,4 +34,5 @@ class StudioServices:
             planner=PlannerService(settings, repository),
             compiler=FilmCompiler(settings, estimator=estimator, repository=repository),
             estimator=estimator,
+            service_status=ServiceStatusCollector(settings),
         )

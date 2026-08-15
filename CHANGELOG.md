@@ -23,6 +23,8 @@ All notable changes to Nautilus Studio will be documented here.
   reference-video limit.
 - CI, Docker/Compose packaging, security policy, contribution guide, issue
   templates, and third-party license inventory.
+- A per-service runtime status panel with vLLM-Omni request activity and an
+  optional provider-neutral GPU telemetry snapshot contract.
 
 ### Changed
 
