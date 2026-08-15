@@ -215,6 +215,52 @@ def test_hierarchical_planner_calls_director_shot_directors_and_critic(settings)
     assert [shot.index for shot in output.shots] == [0, 1, 2]
 
 
+def test_hierarchical_planner_keeps_draft_when_critic_json_is_truncated(settings, monkeypatch):
+    repository = StudioRepository(settings.database_path)
+    planner = PlannerService(
+        replace(
+            settings,
+            planner_base_url="http://planner.test/v1",
+            planner_model="test-model",
+            planner_allow_fallback=False,
+            planner_pipeline_mode="hierarchical",
+            planner_continuity_critic=True,
+        ),
+        repository,
+    )
+    brief = ProjectBrief(prompt="A woman crosses a rainy courtyard.", duration_seconds=24)
+    spine = planner._plan_heuristically(brief, [])
+    blueprints = [planner._blueprint_from_shot(shot) for shot in spine.shots]
+    director_payload = DirectorPlan(
+        world_bible=spine.world_bible,
+        shot_blueprints=blueprints,
+    ).model_dump(mode="json")
+    shot_payloads = [shot.model_dump(mode="json") for shot in spine.shots]
+
+    async def fake_request_json(
+        _self,
+        _client,
+        _system_prompt,
+        user_payload,
+        *,
+        schema,
+        schema_name,
+    ):
+        del schema
+        if schema_name == "nautilus_creative_director":
+            return director_payload
+        if schema_name.startswith("nautilus_shot_director_"):
+            return {"shot": shot_payloads[int(user_payload["shot_index"])]}
+        raise json.JSONDecodeError("truncated critic response", "{", 1)
+
+    monkeypatch.setattr(PlannerService, "_request_json", fake_request_json)
+    output = asyncio.run(planner._plan_with_llm(brief, []))
+
+    assert len(output.shots) == len(spine.shots)
+    assert [shot.index for shot in output.shots] == list(range(len(spine.shots)))
+    assert all(shot.prompt for shot in output.shots)
+
+
 def test_normalizer_preserves_an_explicit_hard_cut(settings):
     planner = PlannerService(settings, StudioRepository(settings.database_path))
     brief = ProjectBrief(prompt="A story with a deliberate scene cut.", duration_seconds=16)

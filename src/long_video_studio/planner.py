@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 import time
@@ -33,6 +34,8 @@ from long_video_studio.domain import (
 from long_video_studio.h3_context import sanitize_audio_prompt
 from long_video_studio.repository import StudioRepository
 from long_video_studio.style_registry import get_style_contract, style_prompt
+
+logger = logging.getLogger(__name__)
 
 BEATS = [
     ("Opening image", "Establish the world, protagonist, tone, and visual promise."),
@@ -772,27 +775,45 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
 
             final = draft
             if self.settings.planner_continuity_critic:
-                critic_raw = await self._request_json(
-                    client,
-                    self._continuity_critic_system_prompt(brief, style_contract, h3_rules),
-                    {
-                        "stage": "continuity_critic",
-                        "brief": brief.model_dump(mode="json"),
-                        "world_bible": draft.world_bible.model_dump(mode="json"),
-                        "shots": [shot.model_dump(mode="json") for shot in draft.shots],
-                        "checks": [
-                            "identity, wardrobe, and reference bindings remain stable",
-                            "fixed landmarks, eyelines, camera axis, lighting, and motion direction inherit",
-                            "an exited character is not silently reintroduced",
-                            "the opening begins after the prior ending and never replays it",
-                            "dialogue, ambience, Foley, and music remain separate",
-                            "each shot stays between 4 and 14 seconds and keeps complete beat coverage",
-                        ],
-                    },
-                    schema=self._planner_json_schema(),
-                    schema_name="nautilus_continuity_critic",
-                )
-                final = self._parse_planner_payload(self._unwrap_stage_payload(critic_raw))
+                try:
+                    critic_raw = await self._request_json(
+                        client,
+                        self._continuity_critic_system_prompt(brief, style_contract, h3_rules),
+                        {
+                            "stage": "continuity_critic",
+                            "brief": brief.model_dump(mode="json"),
+                            "world_bible": draft.world_bible.model_dump(mode="json"),
+                            "shots": [shot.model_dump(mode="json") for shot in draft.shots],
+                            "checks": [
+                                "identity, wardrobe, and reference bindings remain stable",
+                                "fixed landmarks, eyelines, camera axis, lighting, and motion direction inherit",
+                                "an exited character is not silently reintroduced",
+                                "the opening begins after the prior ending and never replays it",
+                                "dialogue, ambience, Foley, and music remain separate",
+                                "each shot stays between 4 and 14 seconds and keeps complete beat coverage",
+                            ],
+                        },
+                        schema=self._planner_json_schema(),
+                        schema_name="nautilus_continuity_critic",
+                    )
+                    final = self._parse_planner_payload(self._unwrap_stage_payload(critic_raw))
+                except Exception as error:
+                    # The shot-director draft is already a complete, validated
+                    # creative plan.  A continuity critic response is an
+                    # enhancement, not a reason to discard an otherwise useful
+                    # storyboard when a provider truncates or malforms its
+                    # large aggregate JSON response.
+                    logger.warning(
+                        "continuity critic unavailable; retaining shot-director draft: %s",
+                        error,
+                    )
+                    await self._record_trace(
+                        "nautilus_continuity_critic",
+                        "fallback",
+                        message="continuity critic output invalid; retained shot-director draft",
+                        error=str(error),
+                    )
+                    final = draft
 
             final = self._lock_director_schedule(final, blueprints)
 
