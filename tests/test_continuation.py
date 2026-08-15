@@ -307,3 +307,45 @@ def test_failed_render_can_resume_a_completed_first_clip(settings, tmp_path, mon
     completed = repository.get_job(job.id)
     assert completed is not None and completed.status == "complete"
     assert ref2va_media == [completed_video]
+
+
+def test_forced_render_clears_previous_takes_and_final_output(settings):
+    repository = StudioRepository(settings.database_path)
+    manager = RenderManager(settings, repository)
+    output_dir = settings.output_dir / "project-force"
+    output_dir.mkdir(parents=True)
+    old_take = output_dir / "shot-001.mp4"
+    old_boundary = output_dir / "shot-001-boundary.png"
+    final = output_dir / "final.mp4"
+    old_take.write_bytes(b"old take")
+    old_boundary.write_bytes(b"old boundary")
+    final.write_bytes(b"old final")
+    shot = ShotSpec(
+        index=0,
+        title="Old shot",
+        purpose="Old",
+        duration_seconds=10,
+        task=ShotTask.FL2VA,
+        prompt="Old shot.",
+        status=ShotStatus.COMPLETE,
+        selected_take_path=str(old_take),
+        boundary_frame_path=str(old_boundary),
+        render_duration_seconds=100,
+    )
+    project = FilmProject(
+        id="project-force",
+        brief=ProjectBrief(prompt="Render again."),
+        world_bible=WorldBible(logline="Again", visual_style="Natural"),
+        shots=[shot],
+        status="complete",
+    )
+
+    manager._clear_forced_render_state(project, output_dir)
+
+    assert shot.status == ShotStatus.PLANNED
+    assert shot.selected_take_path is None
+    assert shot.boundary_frame_path is None
+    assert shot.render_duration_seconds is None
+    assert not old_take.exists()
+    assert not old_boundary.exists()
+    assert not final.exists()

@@ -247,6 +247,31 @@ def test_async_planner_accepts_multiple_projects_before_either_finishes(settings
         assert client.get(f"/api/projects/{second.json()['id']}").json()["status"] == "planned"
 
 
+def test_render_force_query_is_forwarded_to_runner(settings, monkeypatch):
+    app = create_app(settings)
+    project = app.state.services.repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="Render this project again."),
+            world_bible=WorldBible(logline="Again", visual_style="Natural"),
+            shots=[],
+            status="complete",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    def fake_submit(project_id: str, *, force: bool = False) -> RenderJob:
+        captured.update(project_id=project_id, force=force)
+        return RenderJob(project_id=project_id, force_rerender=force)
+
+    monkeypatch.setattr(app.state.render_manager, "submit", fake_submit)
+
+    response = TestClient(app).post(f"/api/projects/{project.id}/render?force=true")
+
+    assert response.status_code == 200
+    assert captured == {"project_id": project.id, "force": True}
+    assert response.json()["force_rerender"] is True
+
+
 def test_failed_planning_keeps_a_recoverable_project_draft(settings, monkeypatch):
     app = create_app(settings)
 

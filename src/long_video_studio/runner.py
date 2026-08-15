@@ -60,7 +60,7 @@ class RenderManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._semaphore = asyncio.Semaphore(settings.render_max_concurrency)
 
-    def submit(self, project_id: str) -> RenderJob:
+    def submit(self, project_id: str, *, force: bool = False) -> RenderJob:
         project = self.repository.get_project(project_id)
         if not project:
             raise KeyError(project_id)
@@ -72,7 +72,13 @@ class RenderManager:
             if active_job and active_job.project_id == project_id:
                 return active_job
         estimate = self.estimator.estimate_project(project, include_completed=True)
-        job = self.repository.save_job(RenderJob(project_id=project_id, estimated_seconds=estimate.total_seconds))
+        job = self.repository.save_job(
+            RenderJob(
+                project_id=project_id,
+                force_rerender=force,
+                estimated_seconds=estimate.total_seconds,
+            )
+        )
         # FastAPI invokes the render route on its event-loop thread.  Resolve
         # that loop explicitly so a worker-thread refactor cannot lose it.
         loop = asyncio.get_running_loop()
@@ -100,6 +106,10 @@ class RenderManager:
         self.repository.save_project(project)
         output_dir = self.settings.output_dir / project.id
         output_dir.mkdir(parents=True, exist_ok=True)
+        if job.force_rerender:
+            self._clear_forced_render_state(project, output_dir)
+            project.updated_at = utc_now()
+            self.repository.save_project(project)
         rendered: list[Path] = []
         rendered_by_shot: dict[str, Path] = {}
         boundary_frames: dict[str, Path] = {}
@@ -115,7 +125,7 @@ class RenderManager:
                 job.message = f"rendering shot {position + 1}/{len(project.shots)}"
                 self.repository.save_job(job)
                 output_path = output_dir / f"shot-{position + 1:03d}.mp4"
-                reusable_take = self.reusable_take_path(shot)
+                reusable_take = None if job.force_rerender else self.reusable_take_path(shot)
                 if reusable_take is not None:
                     shot.status = ShotStatus.COMPLETE
                     rendered.append(reusable_take)
@@ -384,6 +394,24 @@ class RenderManager:
         if not path.is_file() or path.stat().st_size <= 0:
             return None
         return path
+
+    @staticmethod
+    def _clear_forced_render_state(project: FilmProject, output_dir: Path) -> None:
+        """Make the explicit “again” action visibly and semantically fresh."""
+
+        for shot in project.shots:
+            shot.status = ShotStatus.PLANNED
+            shot.selected_take_path = None
+            shot.boundary_frame_path = None
+            shot.anchor_frame_path = None
+            shot.render_started_at = None
+            shot.render_completed_at = None
+            shot.render_duration_seconds = None
+        for path in output_dir.iterdir():
+            if not path.is_file():
+                continue
+            if path.name.startswith("shot-") or path.name in {"final.mp4", "final.srt", "concat.txt"}:
+                path.unlink()
 
     def _start_frame(self, shot, boundary_frames: dict[str, Path]) -> Path:
         # A creator-selected start frame is an explicit composition decision

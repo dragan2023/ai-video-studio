@@ -484,14 +484,22 @@ def create_api_router() -> APIRouter:
         return plan
 
     @router.post("/projects/{project_id}/render", response_model=RenderJob)
-    async def render_project(request: Request, project_id: str) -> RenderJob:
+    async def render_project(
+        request: Request,
+        project_id: str,
+        force: bool = Query(False, description="Re-render every shot instead of reusing completed takes"),
+    ) -> RenderJob:
         services = _services(request)
         project = services.repository.get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
         missing: list[str] = []
         ordered_shots = sorted(project.shots, key=lambda shot: shot.index)
-        pending_shots = [shot for shot in ordered_shots if RenderManager.reusable_take_path(shot) is None]
+        pending_shots = (
+            ordered_shots
+            if force
+            else [shot for shot in ordered_shots if RenderManager.reusable_take_path(shot) is None]
+        )
         runtime_tasks = {
             shot.id: effective_video_task(
                 shot,
@@ -537,7 +545,7 @@ def create_api_router() -> APIRouter:
                 detail=f"render requires configured endpoint(s): {', '.join(missing)}",
             )
         try:
-            return _runner(request).submit(project_id)
+            return _runner(request).submit(project_id, force=force)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="project not found") from error
 

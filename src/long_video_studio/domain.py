@@ -470,6 +470,7 @@ class RenderJob(BaseModel):
     output_path: str | None = None
     subtitle_path: str | None = None
     error: str | None = None
+    force_rerender: bool = False
     estimated_seconds: float | None = Field(default=None, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None

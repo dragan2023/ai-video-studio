@@ -1179,19 +1179,43 @@ function App() {
   const render = async () => {
     if (!project?.id) return setNotice("先生成故事板，再渲染成片");
     const projectId = project.id;
+    const forceRerender = job?.status === "complete";
     setBusy(true);
     try {
-      const value = await api(`/api/projects/${projectId}/render`, {
-        method: "POST",
-      });
+      const value = await api(
+        `/api/projects/${projectId}/render${forceRerender ? "?force=true" : ""}`,
+        {
+          method: "POST",
+        },
+      );
       setJob(value);
+      if (forceRerender) {
+        setProject((current) => ({
+          ...current,
+          status: "rendering",
+          shots: (current.shots || []).map((shot) => ({
+            ...shot,
+            status: "planned",
+            selected_take_path: null,
+            boundary_frame_path: null,
+            anchor_frame_path: null,
+            render_started_at: null,
+            render_completed_at: null,
+            render_duration_seconds: null,
+          })),
+        }));
+      }
       const estimate = await api(`/api/projects/${projectId}/render-estimate`).catch(
         () => null,
       );
       setRenderEstimate(estimate);
       void loadActiveJobs();
       setActiveTab("render");
-      setNotice("渲染已开始，期间可以继续编辑项目");
+      setNotice(
+        forceRerender
+          ? "已开始重新生成全部镜头，不会复用上一版成片"
+          : "渲染已开始，期间可以继续编辑项目",
+      );
     } catch (error) {
       setNotice(error.message);
     } finally {
