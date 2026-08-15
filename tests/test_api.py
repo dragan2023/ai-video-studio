@@ -19,6 +19,7 @@ from long_video_studio.domain import (
     WorldBible,
 )
 from long_video_studio.planner import PlannerError
+from long_video_studio.repository import StudioRepository
 from long_video_studio.runner import RenderManager
 
 
@@ -242,9 +243,33 @@ def test_async_planner_accepts_multiple_projects_before_either_finishes(settings
         assert second.status_code == 202
         assert first.json()["id"] != second.json()["id"]
         assert accepted_in < 0.08
+        assert set(client.get("/api/planning/active").json()) == {
+            first.json()["id"],
+            second.json()["id"],
+        }
         time.sleep(0.14)
         assert client.get(f"/api/projects/{first.json()['id']}").json()["status"] == "planned"
         assert client.get(f"/api/projects/{second.json()['id']}").json()["status"] == "planned"
+        assert client.get("/api/planning/active").json() == []
+
+
+def test_app_startup_marks_interrupted_planning_project_failed(settings):
+    repository = StudioRepository(settings.database_path)
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="Interrupted planning."),
+            world_bible=WorldBible(logline="Interrupted", visual_style="Natural"),
+            shots=[],
+            status="planning",
+        )
+    )
+
+    app = create_app(settings)
+    recovered = app.state.services.repository.get_project(project.id)
+    assert recovered is not None
+    assert recovered.status == "failed"
+    assert recovered.planner_trace[-1].status == "failed"
+    assert "重启" in (recovered.planner_trace[-1].error or "")
 
 
 def test_render_force_query_is_forwarded_to_runner(settings, monkeypatch):

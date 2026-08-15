@@ -520,7 +520,10 @@ function App() {
       setStyleInstructions(
         value.brief.style_instructions || loadedStyle?.instructions || "",
       );
-      setSelected(new Set(value.brief.reference_asset_ids || []));
+      // Material selection belongs to the next planning request, not to the
+      // project being viewed.  Never repopulate the composer from a project's
+      // historical references during refresh/project switching; creators must
+      // explicitly opt assets into a new request.
       setJob(latest);
       setRenderEstimate(estimate);
       if (traceRequestEpoch === traceEpoch.current) {

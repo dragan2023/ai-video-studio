@@ -315,6 +315,53 @@ def test_hierarchical_planner_keeps_draft_when_critic_json_is_truncated(settings
     assert all(shot.prompt for shot in output.shots)
 
 
+def test_planner_retries_transient_provider_overload(settings, monkeypatch):
+    configured = replace(
+        settings,
+        planner_retry_attempts=2,
+        planner_retry_backoff_seconds=0,
+    )
+    repository = StudioRepository(configured.database_path)
+    planner = PlannerService(configured, repository)
+    calls = 0
+
+    async def fake_wire(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("Our servers are currently overloaded. Please try again later.")
+        return {"ok": True}
+
+    monkeypatch.setattr(planner, "_request_json_wire", fake_wire)
+    async def request():
+        async with httpx.AsyncClient() as client:
+            return await planner._request_json(
+                client,
+                "system",
+                {"stage": "test"},
+                schema={"type": "object"},
+                schema_name="test_retry",
+            )
+
+    result = asyncio.run(request())
+    assert result == {"ok": True}
+    assert calls == 2
+
+
+def test_continuity_critic_cannot_erase_shot_director_anchor(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(prompt="A creator addresses the camera.", duration_seconds=15)
+    draft = planner._plan_heuristically(brief, [])
+    assert draft.shots[0].anchor_prompt
+    critic = PlannerOutput(
+        world_bible=draft.world_bible,
+        shots=[draft.shots[0].model_copy(update={"anchor_prompt": ""})],
+    )
+
+    restored = planner._restore_critic_dropped_fields(critic, draft)
+    assert restored.shots[0].anchor_prompt == draft.shots[0].anchor_prompt
+
+
 def test_normalizer_preserves_an_explicit_hard_cut(settings):
     planner = PlannerService(settings, StudioRepository(settings.database_path))
     brief = ProjectBrief(prompt="A story with a deliberate scene cut.", duration_seconds=16)

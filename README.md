@@ -144,11 +144,13 @@ If no endpoint is configured, Nautilus uses its deterministic planner.
 By default, planning uses three focused calls: a creative director builds the
 World Bible and shot spine, independent shot directors write detailed H3
 timelines, and a continuity critic repairs adjacent-boundary drift. Configure
-the number of concurrent shot calls and the optional local MiniMax-H3 style
-packs with:
+the global provider-call cap, transient retry policy, and optional local
+MiniMax-H3 style packs with:
 
 ```bash
 export STUDIO_PLANNER_PIPELINE=hierarchical
+export STUDIO_PLANNER_RETRY_ATTEMPTS=3
+export STUDIO_PLANNER_RETRY_BACKOFF_SECONDS=2
 export STUDIO_PLANNER_SHOT_CONCURRENCY=3
 export STUDIO_PLANNER_PROJECT_CONCURRENCY=3
 export STUDIO_H3_SKILLS_DIR=/path/to/long-video-studio/skills

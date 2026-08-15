@@ -119,6 +119,8 @@ class Settings:
     # tests; it is never selected implicitly on failure.
     planner_pipeline_mode: str = "hierarchical"
     planner_timeout_seconds: float = 300.0
+    planner_retry_attempts: int = 3
+    planner_retry_backoff_seconds: float = 2.0
     planner_shot_concurrency: int = 3
     planner_project_concurrency: int = 3
     planner_continuity_critic: bool = True
@@ -200,6 +202,11 @@ class Settings:
             web_root=os.getenv("STUDIO_WEB_ROOT") or None,
             planner_pipeline_mode=os.getenv("STUDIO_PLANNER_PIPELINE", "hierarchical").strip().lower(),
             planner_timeout_seconds=float(os.getenv("STUDIO_PLANNER_TIMEOUT_SECONDS", "300")),
+            planner_retry_attempts=max(1, int(os.getenv("STUDIO_PLANNER_RETRY_ATTEMPTS", "3"))),
+            planner_retry_backoff_seconds=max(
+                0.0,
+                float(os.getenv("STUDIO_PLANNER_RETRY_BACKOFF_SECONDS", "2")),
+            ),
             planner_shot_concurrency=max(1, int(os.getenv("STUDIO_PLANNER_SHOT_CONCURRENCY", "3"))),
             planner_project_concurrency=max(
                 1,

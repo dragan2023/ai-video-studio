@@ -122,6 +122,10 @@ class PlannerService:
             default=None,
         )
         self._trace_lock = asyncio.Lock()
+        # One PlannerService is shared by all projects. Keep provider pressure
+        # globally bounded instead of multiplying shot concurrency by the
+        # number of concurrently planning projects.
+        self._provider_semaphore = asyncio.Semaphore(settings.planner_shot_concurrency)
         if settings.image_edit_anchor_mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise ValueError(f"unsupported image edit anchor mode: {settings.image_edit_anchor_mode}")
 
@@ -790,11 +794,31 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                     )
                     final = draft
 
+            final = self._restore_critic_dropped_fields(final, draft)
             final = self._lock_director_schedule(final, blueprints)
 
         if not final.shots:
             raise ValueError("hierarchical planner returned no shots after continuity review")
         return self._normalize_agent_output(final, brief, assets)
+
+    @staticmethod
+    def _restore_critic_dropped_fields(output: PlannerOutput, draft: PlannerOutput) -> PlannerOutput:
+        """Keep valid shot-director work when the critic clears a field.
+
+        The critic is allowed to repair continuity but must not erase the
+        opening-frame composition authored by a shot director.  This matters
+        especially for text-only projects: there may be no reference image to
+        reconstruct an omitted anchor after the aggregate critic call.
+        """
+
+        draft_by_index = {shot.index: shot for shot in draft.shots}
+        restored: list[ShotSpec] = []
+        for shot in output.shots:
+            source = draft_by_index.get(shot.index)
+            if source and not shot.anchor_prompt.strip() and source.anchor_prompt.strip():
+                shot = shot.model_copy(update={"anchor_prompt": source.anchor_prompt})
+            restored.append(shot)
+        return PlannerOutput(world_bible=output.world_bible, shots=restored)
 
     @staticmethod
     def _lock_director_schedule(output: PlannerOutput, blueprints: list[ShotBlueprint]) -> PlannerOutput:
@@ -978,31 +1002,69 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             message="sending structured planner request",
             request_payload=request_payload,
         )
-        try:
-            result = await self._request_json_wire(
-                client,
-                system_prompt,
-                user_payload,
-                schema=schema,
-                schema_name=schema_name,
-            )
-        except Exception as error:
+        attempts = max(1, self.settings.planner_retry_attempts)
+        for attempt in range(attempts):
+            try:
+                async with self._provider_semaphore:
+                    result = await self._request_json_wire(
+                        client,
+                        system_prompt,
+                        user_payload,
+                        schema=schema,
+                        schema_name=schema_name,
+                    )
+            except Exception as error:
+                if attempt + 1 < attempts and self._is_retryable_planner_error(error):
+                    delay = self.settings.planner_retry_backoff_seconds * (2**attempt)
+                    await self._record_trace(
+                        schema_name,
+                        "client",
+                        message=f"transient planner provider error; retrying in {delay:g}s "
+                        f"({attempt + 2}/{attempts})",
+                        error=str(error),
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                    )
+                    if delay:
+                        await asyncio.sleep(delay)
+                    continue
+                await self._record_trace(
+                    schema_name,
+                    "failed",
+                    message="provider request or JSON decode failed",
+                    error=str(error),
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
+                raise
             await self._record_trace(
                 schema_name,
-                "failed",
-                message="provider request or JSON decode failed",
-                error=str(error),
+                "response",
+                message="structured planner response decoded",
+                response_payload=result,
                 duration_ms=(time.perf_counter() - started) * 1000,
             )
-            raise
-        await self._record_trace(
-            schema_name,
-            "response",
-            message="structured planner response decoded",
-            response_payload=result,
-            duration_ms=(time.perf_counter() - started) * 1000,
+            return result
+        raise RuntimeError(f"planner request exhausted retry attempts: {schema_name}")
+
+    @staticmethod
+    def _is_retryable_planner_error(error: Exception) -> bool:
+        if isinstance(error, (httpx.TimeoutException, httpx.NetworkError, json.JSONDecodeError)):
+            return True
+        if isinstance(error, httpx.HTTPStatusError):
+            return error.response.status_code in {408, 425, 429, 500, 502, 503, 504}
+        message = str(error).casefold()
+        return any(
+            marker in message
+            for marker in (
+                "overloaded",
+                "try again later",
+                "temporarily unavailable",
+                "rate limit",
+                "server disconnected",
+                "connection attempts failed",
+                "truncated",
+                "expecting ',' delimiter",
+            )
         )
-        return result
 
     async def _request_json_wire(
         self,

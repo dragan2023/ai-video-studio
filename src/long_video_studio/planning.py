@@ -5,7 +5,7 @@ import logging
 from contextlib import suppress
 
 from long_video_studio.config import Settings
-from long_video_studio.domain import FilmProject, ProjectBrief, WorldBible, utc_now
+from long_video_studio.domain import FilmProject, PlannerTraceEvent, ProjectBrief, WorldBible, utc_now
 from long_video_studio.planner import PlannerService
 from long_video_studio.repository import StudioRepository
 
@@ -25,6 +25,7 @@ class PlanningManager:
         self.planner = planner
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._semaphore = asyncio.Semaphore(settings.planner_project_concurrency)
+        self._recover_interrupted_projects()
 
     async def start(self, brief: ProjectBrief) -> FilmProject:
         draft = FilmProject(
@@ -49,6 +50,9 @@ class PlanningManager:
         task = self._tasks.get(project_id)
         return bool(task and not task.done())
 
+    def active_project_ids(self) -> list[str]:
+        return sorted(project_id for project_id, task in self._tasks.items() if not task.done())
+
     async def cancel(self, project_id: str) -> bool:
         task = self._tasks.get(project_id)
         if task is None or task.done():
@@ -59,11 +63,16 @@ class PlanningManager:
         return True
 
     async def shutdown(self) -> None:
-        tasks = [task for task in self._tasks.values() if not task.done()]
+        active = [(project_id, task) for project_id, task in self._tasks.items() if not task.done()]
+        tasks = [task for _, task in active]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for project_id, _ in active:
+            project = self.repository.get_project(project_id)
+            if project and project.status == "planning":
+                self._mark_failed(project_id, "构思因 Studio 服务关闭而中断，请重新构思")
 
     async def _run(self, project_id: str, brief: ProjectBrief) -> None:
         try:
@@ -82,8 +91,25 @@ class PlanningManager:
             return
         project.status = "failed"
         project.updated_at = utc_now()
+        if not project.planner_trace or project.planner_trace[-1].status != "failed":
+            project.planner_trace.append(
+                PlannerTraceEvent(
+                    stage="planner",
+                    status="failed",
+                    message="planning task did not complete",
+                    error=error,
+                )
+            )
         self.repository.save_project(project)
         logger.warning("project %s planning failed: %s", project_id, error)
+
+    def _recover_interrupted_projects(self) -> None:
+        for project in self.repository.list_projects():
+            if project.status == "planning":
+                self._mark_failed(
+                    project.id,
+                    "构思任务因 Studio 服务重启而中断，请重新构思",
+                )
 
     def _discard(self, project_id: str, completed: asyncio.Task[None]) -> None:
         if self._tasks.get(project_id) is completed:

@@ -384,7 +384,7 @@ class PlannerTraceEvent(BaseModel):
     id: str = Field(default_factory=lambda: new_id("trace"))
     created_at: datetime = Field(default_factory=utc_now)
     stage: str
-    status: Literal["started", "request", "response", "completed", "failed", "client"]
+    status: Literal["started", "request", "response", "completed", "failed", "fallback", "client"]
     message: str = ""
     request_payload: str | None = None
     response_payload: str | None = None

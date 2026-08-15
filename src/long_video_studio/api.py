@@ -320,6 +320,10 @@ def create_api_router() -> APIRouter:
     async def plan_project_async(request: Request, brief: ProjectBrief) -> FilmProject:
         return _project_view(await _planning_manager(request).start(brief))
 
+    @router.get("/planning/active", response_model=list[str])
+    def active_planning_projects(request: Request) -> list[str]:
+        return _planning_manager(request).active_project_ids()
+
     @router.get("/projects", response_model=list[FilmProject])
     def list_projects(request: Request) -> list[FilmProject]:
         return [_project_view(project) for project in _services(request).repository.list_projects()]
