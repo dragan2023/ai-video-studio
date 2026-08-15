@@ -137,6 +137,7 @@ class Settings:
     gpu_snapshot_path: Path | None = None
     gpu_snapshot_max_age_seconds: float = 20.0
     gpu_snapshot_max_bytes: int = 1_048_576
+    h3_quality: str = "lossless"
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> Settings:
@@ -168,6 +169,11 @@ class Settings:
             h3_fl2va_url=os.getenv("STUDIO_H3_FL2VA_URL") or None,
             h3_ref2va_url=os.getenv("STUDIO_H3_REF2VA_URL") or None,
             h3_flow_shift=float(os.getenv("STUDIO_H3_FLOW_SHIFT", "12.0")),
+            h3_quality=(
+                os.getenv("STUDIO_H3_QUALITY", "lossless").strip().lower()
+                if os.getenv("STUDIO_H3_QUALITY", "lossless").strip().lower() in {"lossless", "high"}
+                else "lossless"
+            ),
             # Ref2VA continuation requests include a reference-video encode and
             # can legitimately exceed 30 minutes on a functional MUSA setup.
             # Keep this configurable; deployments that need a tighter guard

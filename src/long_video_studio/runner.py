@@ -197,6 +197,7 @@ class RenderManager:
                         self.settings.h3_fl2va_url,
                         self.settings.h3_timeout_seconds,
                         self.settings.h3_flow_shift,
+                        self.settings.h3_quality,
                     ).generate_fl2va(
                         shot,
                         prepared_start,
@@ -224,6 +225,7 @@ class RenderManager:
                         self.settings.h3_ref2va_url,
                         self.settings.h3_timeout_seconds,
                         self.settings.h3_flow_shift,
+                        self.settings.h3_quality,
                     ).generate_ref2va(
                         request_shot,
                         image,
@@ -248,6 +250,7 @@ class RenderManager:
                         self.settings.h3_ref2va_url,
                         self.settings.h3_timeout_seconds,
                         self.settings.h3_flow_shift,
+                        self.settings.h3_quality,
                     ).generate_ref2va(
                         shot,
                         image,

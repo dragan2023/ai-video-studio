@@ -19,12 +19,14 @@ class H3Client:
         endpoint: str,
         timeout_seconds: float = 7200,
         flow_shift: float = 12.0,
+        quality: str = "lossless",
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.endpoint = self._normalize_endpoint(endpoint)
         self.timeout_seconds = timeout_seconds
         self.timeout = httpx.Timeout(timeout_seconds, connect=30)
         self.flow_shift = flow_shift
+        self.quality = quality if quality in {"lossless", "high"} else "lossless"
         self.transport = transport
 
     @staticmethod
@@ -237,6 +239,7 @@ class H3Client:
             "num_inference_steps": str(shot.inference_steps),
             "seed": str(shot.seed),
             "flow_shift": str(self.flow_shift),
+            "quality": self.quality,
             "extra_params": json.dumps(extra_params, ensure_ascii=False),
         }
         # Width/height are top-level VideoGenerationRequest fields. Putting

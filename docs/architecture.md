@@ -78,6 +78,14 @@ constraints. When Ref2VA is unavailable, the previous boundary frame and
 FL2VA remain an internal compatibility fallback. Real scene cuts can request
 a new anchor.
 
+The H3 adapter sends `quality=lossless` explicitly by default. This is separate
+from Nautilus's `fast`/`quality` continuation choice: the former selects the
+model's native versus Cache-DiT conditioning path, while the latter selects
+how much previous video is supplied. `flow_shift=12`,
+`audio_flow_shift=3`, and 50 diffusion steps are the validated accuracy
+baseline. The model's internal reference-noise timestep remains fixed until a
+dedicated artifact/continuity sweep justifies exposing it.
+
 Every planned H3 shot is limited to 14 seconds. This intentionally leaves
 container-timestamp headroom below H3's hard 15-second reference-video limit:
 a nominal 15-second encode can be reported by ffprobe as slightly longer than

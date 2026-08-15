@@ -169,7 +169,17 @@ FL2VA and Ref2VA are separate model partitions and may be served independently:
 ```bash
 export STUDIO_H3_FL2VA_URL=http://127.0.0.1:8091
 export STUDIO_H3_REF2VA_URL=http://127.0.0.1:8092
+export STUDIO_H3_QUALITY=lossless
 ```
+
+`lossless` is the default and keeps the native H3 reference-conditioning path.
+`high` is an explicit opt-in for Cache-DiT deployments; it can improve
+throughput but may lower reference fidelity and should not be used as the
+correctness baseline. The validated MUSA baseline is 50 steps with
+`flow_shift=12` and `audio_flow_shift=3`. The internal H3 conditioning noise
+strength is intentionally not exposed as a serving knob yet; changing it
+would trade continuity for artifact suppression and needs a separate accuracy
+matrix.
 
 Nautilus submits durable jobs to the vLLM-Omni `/v1/videos` endpoint and polls
 their status, so long 50-step clips are not held behind a short HTTP request

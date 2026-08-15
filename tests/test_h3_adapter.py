@@ -106,6 +106,8 @@ def test_fl2va_adapter_uses_current_video_api(tmp_path: Path):
     assert b'name="input_reference"' in request_body
     assert b'name="image"' not in request_body
     assert b'name="extra_params"' in request_body
+    assert b'name="quality"' in request_body
+    assert b"\r\n\r\nlossless\r\n" in request_body
     assert b'"task": "fl2va"' in request_body
     assert b'name="width"' in request_body
     assert b'name="height"' in request_body
@@ -147,6 +149,8 @@ def test_ref2va_video_adapter_uses_plural_reference_field(tmp_path: Path):
     assert b'name="image"' not in request_body
     assert b'name="video"' not in request_body
     assert b'"task": "ref2va"' in request_body
+    assert b'name="quality"' in request_body
+    assert b"\r\n\r\nlossless\r\n" in request_body
     assert b'name="width"' in request_body
     assert b'name="height"' in request_body
     assert b"\r\n\r\n704\r\n" in request_body
