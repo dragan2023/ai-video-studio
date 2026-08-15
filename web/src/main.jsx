@@ -1912,14 +1912,14 @@ function App() {
         {styleDialog ? (
           <motion.div
             className="director-dialog-backdrop"
-            initial={{ opacity: 0 }}
+            initial={false}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onMouseDown={() => setStyleDialog(false)}
           >
             <motion.div
               className="director-dialog"
-              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+              initial={{ y: 8, scale: 0.99 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, scale: 0.98 }}
               onMouseDown={(event) => event.stopPropagation()}
@@ -1991,14 +1991,14 @@ function App() {
         {projectDialog && projectDraft ? (
           <motion.div
             className="director-dialog-backdrop"
-            initial={{ opacity: 0 }}
+            initial={false}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onMouseDown={() => setProjectDialog(false)}
           >
             <motion.form
               className="director-dialog wide-dialog"
-              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+              initial={{ y: 8, scale: 0.99 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, scale: 0.98 }}
               onSubmit={saveProjectDialog}
@@ -2171,14 +2171,14 @@ function App() {
         {editingShot && shotDraft ? (
           <motion.div
             className="director-dialog-backdrop"
-            initial={{ opacity: 0 }}
+            initial={false}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onMouseDown={() => setEditingShot(null)}
           >
             <motion.form
               className="director-dialog wide-dialog shot-dialog"
-              initial={{ opacity: 0, y: 14, scale: 0.97 }}
+              initial={{ y: 8, scale: 0.99 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, scale: 0.98 }}
               onSubmit={saveShotDialog}
