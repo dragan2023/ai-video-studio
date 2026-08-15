@@ -1589,7 +1589,7 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             shot.audio_prompt = self._clean_generation_prompt(shot.audio_prompt)
             shot.music_prompt = self._clean_generation_prompt(shot.music_prompt)
             shot.audio_prompt = sanitize_audio_prompt(shot.audio_prompt, has_dialogue=bool(shot.dialogue))
-            shot.anchor_prompt = self._limit_anchor_prompt(self._clean_generation_prompt(shot.anchor_prompt))
+            shot.anchor_prompt = self._clean_generation_prompt(shot.anchor_prompt)
             shot.reference_asset_ids = [asset_id for asset_id in shot.reference_asset_ids if asset_id in valid_assets]
             if shot.start_frame_asset_id not in explicit_start_ids or shot.start_frame_asset_id not in valid_assets:
                 shot.start_frame_asset_id = None
@@ -1635,7 +1635,17 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                     assets=assets,
                 )
             if needs_anchor and image_edit_configured:
+                # The model may describe references using the global asset
+                # order (for example, "the third reference") and the
+                # continuity critic may then drop unrelated assets.  At this
+                # point ``reference_asset_ids`` is the authoritative order
+                # sent to Image Edit, so repair the human-readable manifest
+                # against that final order instead of rejecting an otherwise
+                # useful storyboard after all planner stages have completed.
+                shot.anchor_prompt = self._ensure_anchor_bindings(shot, valid_assets)
                 self._validate_anchor_bindings(shot, valid_assets)
+            elif needs_anchor:
+                shot.anchor_prompt = self._limit_anchor_prompt(shot.anchor_prompt)
             if not needs_anchor:
                 shot.anchor_prompt = ""
             # Creative agents choose story and camera language, not model
@@ -1883,6 +1893,52 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                 and not re.search(r"[A-Za-z]{2,}", value)
             ):
                 raise ValueError(f"AI planner returned non-English H3 model field for shot {shot.index + 1}")
+
+    @staticmethod
+    def _anchor_binding_manifest(
+        shot: ShotSpec,
+        valid_assets: dict[str, AssetRecord],
+    ) -> tuple[list[AssetRecord], str]:
+        image_assets = [
+            valid_assets[asset_id]
+            for asset_id in shot.reference_asset_ids
+            if asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
+        ]
+        bindings = []
+        for reference_index, asset in enumerate(image_assets, start=1):
+            label = (asset.display_name or asset.original_name).strip()
+            roles = ", ".join(role.value for role in asset.roles) or "reference"
+            bindings.append(f"参考图{reference_index} {label} ({roles})")
+        return image_assets, "Ordered reference bindings: " + "; ".join(bindings) + "."
+
+    @classmethod
+    def _ensure_anchor_bindings(
+        cls,
+        shot: ShotSpec,
+        valid_assets: dict[str, AssetRecord],
+    ) -> str:
+        """Repair reference labels after the agent changes the asset subset.
+
+        Shot directors see the full project asset list, while the normalized
+        shot may retain only the assets relevant to that shot.  Their ordinal
+        references can therefore become stale ("third reference" becomes
+        reference 1).  The runner sends references in ``shot.reference_asset_ids``
+        order, so prepend a compact canonical manifest only when the authored
+        prompt does not contain every final ordinal/name pair.
+        """
+
+        prompt = cls._clean_generation_prompt(shot.anchor_prompt)
+        image_assets, manifest = cls._anchor_binding_manifest(shot, valid_assets)
+        if not image_assets:
+            return cls._limit_anchor_prompt(prompt)
+        missing = []
+        for reference_index, asset in enumerate(image_assets, start=1):
+            label = (asset.display_name or asset.original_name).strip()
+            if f"参考图{reference_index}" not in prompt or label not in prompt:
+                missing.append((reference_index, label))
+        if missing:
+            prompt = f"{manifest}\n{prompt}" if prompt else manifest
+        return cls._limit_anchor_prompt(prompt)
 
     @staticmethod
     def _validate_anchor_bindings(

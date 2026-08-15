@@ -846,7 +846,7 @@ def test_planner_rejects_llm_output_without_required_anchor(settings):
         planner._normalize_agent_output(output, brief, [])
 
 
-def test_planner_rejects_anchor_missing_ordered_asset_binding(settings):
+def test_planner_repairs_anchor_missing_ordered_asset_binding(settings):
     configured = replace(
         settings,
         image_edit_provider="vllm-omni",
@@ -873,8 +873,75 @@ def test_planner_rejects_anchor_missing_ordered_asset_binding(settings):
     output = planner._plan_heuristically(brief, [asset])
     output.shots[0].anchor_prompt = "太和殿中的一幅电影感开场静帧。"
 
-    with pytest.raises(ValueError, match="参考图1"):
-        planner._normalize_agent_output(output, brief, [asset])
+    normalized = planner._normalize_agent_output(output, brief, [asset])
+    prompt = normalized.shots[0].anchor_prompt
+    assert "参考图1 太和殿" in prompt
+    assert "太和殿中的一幅电影感开场静帧" in prompt
+
+
+def test_planner_repairs_anchor_bindings_using_final_reference_order(settings):
+    configured = replace(
+        settings,
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://image-edit.test",
+        image_edit_model="Qwen-Image-Edit-2511",
+    )
+    repository = StudioRepository(configured.database_path)
+    assets = AssetService(configured, repository)
+    first = assets.ingest_stream(png_bytes("red"), "first.png", "image/png", roles=[AssetRole.CHARACTER])
+    second = assets.ingest_stream(png_bytes("blue"), "second.png", "image/png", roles=[AssetRole.CHARACTER])
+    first = assets.update(first.id, AssetUpdate(display_name="第一角色"))
+    second = assets.update(second.id, AssetUpdate(display_name="第二角色"))
+    planner = PlannerService(configured, repository)
+    brief = ProjectBrief(
+        prompt="Two characters meet.",
+        duration_seconds=15,
+        reference_asset_ids=[first.id, second.id],
+    )
+    output = planner._plan_heuristically(brief, [first, second])
+    shot = output.shots[0]
+    shot.reference_asset_ids = [second.id, first.id]
+    shot.anchor_prompt = "The two supplied character references share one coherent opening composition."
+
+    normalized = planner._normalize_agent_output(output, brief, [first, second])
+    prompt = normalized.shots[0].anchor_prompt
+    assert "参考图1 第二角色" in prompt
+    assert "参考图2 第一角色" in prompt
+    assert prompt.index("参考图1 第二角色") < prompt.index("参考图2 第一角色")
+
+
+def test_planner_anchor_binding_repair_preserves_budget_and_is_idempotent(settings):
+    configured = replace(
+        settings,
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://image-edit.test",
+        image_edit_model="Qwen-Image-Edit-2511",
+    )
+    repository = StudioRepository(configured.database_path)
+    asset = AssetService(configured, repository).ingest_stream(
+        png_bytes("blue"),
+        "hero.png",
+        "image/png",
+        roles=[AssetRole.CHARACTER],
+    )
+    asset = AssetService(configured, repository).update(
+        asset.id,
+        AssetUpdate(display_name="Hero"),
+    )
+    planner = PlannerService(configured, repository)
+    brief = ProjectBrief(prompt="A hero enters.", duration_seconds=15, reference_asset_ids=[asset.id])
+    output = planner._plan_heuristically(brief, [asset])
+    body = "A coherent opening still with precise lighting, pose, lens, and spatial detail. " + ("detail. " * 220)
+    output.shots[0].anchor_prompt = body
+
+    normalized = planner._normalize_agent_output(output, brief, [asset])
+    prompt = normalized.shots[0].anchor_prompt
+    assert len(prompt) <= 1000
+    assert "参考图1 Hero" in prompt
+    assert prompt.count("参考图1 Hero") == 1
+
+    normalized_again = planner._normalize_agent_output(normalized, brief, [asset])
+    assert normalized_again.shots[0].anchor_prompt == prompt
 
 
 def test_compiler_snapshots_structured_storyboard_fields(settings):
