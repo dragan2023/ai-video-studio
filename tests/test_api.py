@@ -272,6 +272,69 @@ def test_app_startup_marks_interrupted_planning_project_failed(settings):
     assert "重启" in (recovered.planner_trace[-1].error or "")
 
 
+def test_zero_material_render_requires_text_to_image_endpoint(settings):
+    configured = replace(settings, h3_fl2va_url="http://fl2va.test")
+    app = create_app(configured)
+    shot = ShotSpec(
+        index=0,
+        title="Zero material opening",
+        purpose="Establish a new world",
+        prompt="A creator enters a sunlit empty studio.",
+        anchor_prompt="A complete cinematic 16:9 opening still in a sunlit empty studio.",
+        duration_seconds=4,
+        task=ShotTask.FL2VA,
+        reference_asset_ids=[],
+    )
+    project = app.state.services.repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="A new studio.", reference_asset_ids=[]),
+            world_bible=WorldBible(logline="Arrival", visual_style="cinematic"),
+            shots=[shot],
+            status="planned",
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/projects/{project.id}/render")
+
+    assert response.status_code == 409
+    assert "STUDIO_T2I_BASE_URL" in response.json()["detail"]
+
+
+def test_zero_material_render_accepts_configured_text_to_image_endpoint(settings):
+    configured = replace(
+        settings,
+        h3_fl2va_url="http://fl2va.test",
+        text_to_image_provider="vllm-omni",
+        text_to_image_base_url="http://t2i.test",
+        text_to_image_model="Qwen/Qwen-Image-2512",
+    )
+    app = create_app(configured)
+    shot = ShotSpec(
+        index=0,
+        title="Zero material opening",
+        purpose="Establish a new world",
+        prompt="A creator enters a sunlit empty studio.",
+        anchor_prompt="A complete cinematic 16:9 opening still in a sunlit empty studio.",
+        duration_seconds=4,
+        task=ShotTask.FL2VA,
+        reference_asset_ids=[],
+    )
+    project = app.state.services.repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="A new studio.", reference_asset_ids=[]),
+            world_bible=WorldBible(logline="Arrival", visual_style="cinematic"),
+            shots=[shot],
+            status="planned",
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/projects/{project.id}/render")
+
+    assert response.status_code == 200
+
+
 def test_render_force_query_is_forwarded_to_runner(settings, monkeypatch):
     app = create_app(settings)
     project = app.state.services.repository.save_project(

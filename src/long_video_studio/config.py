@@ -108,6 +108,14 @@ class Settings:
     image_edit_true_cfg_scale: float = 4.0
     image_edit_guidance_scale: float = 1.0
     image_edit_tokenizer_path: Path | None = None
+    text_to_image_provider: str = "disabled"
+    text_to_image_base_url: str | None = None
+    text_to_image_api_key: str | None = None
+    text_to_image_model: str | None = None
+    text_to_image_timeout_seconds: float = 900.0
+    text_to_image_steps: int = 50
+    text_to_image_true_cfg_scale: float = 4.0
+    text_to_image_guidance_scale: float = 1.0
     render_estimate_scale: float = 1.0
     render_profile: str = "minimax-h3-s5000-tp4-te4-vpp4-flash"
     render_fl2va_baseline_seconds: float = 396.2
@@ -178,6 +186,20 @@ class Settings:
                 Path(os.environ["STUDIO_IMAGE_EDIT_TOKENIZER_PATH"]).expanduser().resolve()
                 if os.getenv("STUDIO_IMAGE_EDIT_TOKENIZER_PATH")
                 else None
+            ),
+            text_to_image_provider=os.getenv("STUDIO_T2I_PROVIDER", "disabled").strip().lower(),
+            text_to_image_base_url=os.getenv("STUDIO_T2I_BASE_URL") or None,
+            text_to_image_api_key=os.getenv("STUDIO_T2I_API_KEY") or None,
+            text_to_image_model=os.getenv("STUDIO_T2I_MODEL") or None,
+            text_to_image_timeout_seconds=float(os.getenv("STUDIO_T2I_TIMEOUT_SECONDS", "900")),
+            text_to_image_steps=max(1, int(os.getenv("STUDIO_T2I_STEPS", "50"))),
+            text_to_image_true_cfg_scale=max(
+                0.0,
+                float(os.getenv("STUDIO_T2I_TRUE_CFG_SCALE", "4.0")),
+            ),
+            text_to_image_guidance_scale=max(
+                0.0,
+                float(os.getenv("STUDIO_T2I_GUIDANCE_SCALE", "1.0")),
             ),
             render_estimate_scale=max(
                 0.1,

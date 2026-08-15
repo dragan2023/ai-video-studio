@@ -30,6 +30,6 @@ class StudioServices:
             repository=repository,
             assets=AssetService(settings, repository),
             planner=PlannerService(settings, repository),
-            compiler=FilmCompiler(settings, estimator=estimator),
+            compiler=FilmCompiler(settings, estimator=estimator, repository=repository),
             estimator=estimator,
         )

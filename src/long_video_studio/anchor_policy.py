@@ -6,7 +6,7 @@ IMAGE_EDIT_ANCHOR_MODES = frozenset({"first-shot", "scene-cuts", "every-shot"})
 
 
 def anchor_selected(shot: ShotSpec, position: int, mode: str) -> bool:
-    """Return whether Image Edit should create a planner-authored anchor."""
+    """Return whether an image provider should create a planner-authored anchor."""
 
     if shot.task is not ShotTask.FL2VA or shot.start_frame_asset_id:
         return False

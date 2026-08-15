@@ -5,11 +5,13 @@ import shutil
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from long_video_studio.adapters.h3 import H3Client
+from long_video_studio.anchor_policy import anchor_selected
 from long_video_studio.domain import (
     AssetKind,
     AssetRecord,
@@ -133,6 +135,22 @@ def _planning_manager(request: Request) -> PlanningManager:
     return request.app.state.planning_manager
 
 
+async def _openai_compatible_health(base_url: str | None) -> bool:
+    if not base_url:
+        return False
+    root = base_url.rstrip("/")
+    if root.endswith("/v1/images/generations"):
+        root = root[: -len("/v1/images/generations")]
+    elif root.endswith("/v1"):
+        root = root[:-3]
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{root}/health")
+        return response.status_code < 400
+    except httpx.HTTPError:
+        return False
+
+
 def create_api_router() -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -161,6 +179,13 @@ def create_api_router() -> APIRouter:
             labels.append("ref2va")
         results = await asyncio.gather(*probes) if probes else []
         healthy = dict(zip(labels, results, strict=True))
+        capabilities = {item.id: item for item in services.compiler.capabilities()}
+        t2i_configured = capabilities["qwen-image-t2i"].available
+        t2i_healthy = (
+            await _openai_compatible_health(services.settings.text_to_image_base_url)
+            if t2i_configured
+            else False
+        )
         return {
             "status": "ok",
             "planner": services.settings.planner_wire_api if services.settings.planner_base_url else "heuristic",
@@ -171,8 +196,12 @@ def create_api_router() -> APIRouter:
             "ref2va_configured": bool(services.settings.h3_ref2va_url),
             "ref2va_healthy": healthy.get("ref2va", False),
             "image_edit_provider": services.settings.image_edit_provider,
-            "image_edit_configured": services.compiler.capabilities()[0].available,
+            "image_edit_configured": capabilities["qwen-image-edit"].available,
             "image_edit_max_references": services.settings.image_edit_max_references,
+            "t2i_provider": services.settings.text_to_image_provider,
+            "t2i_model": services.settings.text_to_image_model,
+            "t2i_configured": t2i_configured,
+            "t2i_healthy": t2i_healthy,
             "render_estimate_scale": services.settings.render_estimate_scale,
             "render_profile": services.settings.render_profile,
             "render_max_concurrency": services.settings.render_max_concurrency,
@@ -517,8 +546,8 @@ def create_api_router() -> APIRouter:
         if any(task == ShotTask.REF2VA for task in runtime_tasks.values()) and not services.settings.h3_ref2va_url:
             missing.append("STUDIO_H3_REF2VA_URL")
         preceding_shot_ids: set[str] = set()
-        for shot in ordered_shots:
-            if RenderManager.reusable_take_path(shot) is not None:
+        for position, shot in enumerate(ordered_shots):
+            if not force and RenderManager.reusable_take_path(shot) is not None:
                 preceding_shot_ids.add(shot.id)
                 continue
             runtime_task = runtime_tasks[shot.id]
@@ -533,10 +562,42 @@ def create_api_router() -> APIRouter:
                 and shot.continuity_from_shot_id not in preceding_shot_ids
             ):
                 missing.append(f"earlier continuation source for shot {shot.index + 1}")
-            if runtime_task == ShotTask.FL2VA and not shot.continuity_from_shot_id:
-                has_start = bool(shot.start_frame_asset_id or any(asset.kind == AssetKind.IMAGE for asset in assets))
-                if not has_start:
-                    missing.append(f"start frame for shot {shot.index + 1}")
+            if runtime_task == ShotTask.FL2VA:
+                image_references = [asset for asset in assets if asset.kind == AssetKind.IMAGE]
+                needs_anchor = anchor_selected(
+                    shot,
+                    position,
+                    services.settings.image_edit_anchor_mode,
+                )
+                if needs_anchor:
+                    uses_image_edit = bool(image_references or shot.continuity_from_shot_id)
+                    if uses_image_edit:
+                        image_edit_configured = bool(
+                            services.settings.image_edit_provider not in {"", "disabled", "none"}
+                            and services.settings.image_edit_base_url
+                            and services.settings.image_edit_model
+                        )
+                        if not image_edit_configured:
+                            missing.append(
+                                f"Image Edit endpoint for shot {shot.index + 1} "
+                                "(set STUDIO_IMAGE_EDIT_BASE_URL and STUDIO_IMAGE_EDIT_MODEL)"
+                            )
+                    else:
+                        t2i_configured = bool(
+                            services.settings.text_to_image_provider not in {"", "disabled", "none"}
+                            and services.settings.text_to_image_base_url
+                        )
+                        if not t2i_configured:
+                            missing.append(
+                                f"T2I endpoint for zero-material shot {shot.index + 1} "
+                                "(set STUDIO_T2I_BASE_URL)"
+                            )
+                elif (
+                    not shot.start_frame_asset_id
+                    and not image_references
+                    and not shot.continuity_from_shot_id
+                ):
+                    missing.append(f"explicit start frame for shot {shot.index + 1}")
             if runtime_task == ShotTask.REF2VA and not is_clip_continuation:
                 has_image = any(asset.kind == AssetKind.IMAGE for asset in assets)
                 has_media = any(asset.kind in {AssetKind.AUDIO, AssetKind.VIDEO} for asset in assets)
@@ -546,7 +607,7 @@ def create_api_router() -> APIRouter:
         if missing:
             raise HTTPException(
                 status_code=409,
-                detail=f"render requires configured endpoint(s): {', '.join(missing)}",
+                detail="制作前置条件未满足：" + "；".join(missing),
             )
         try:
             return _runner(request).submit(project_id, force=force)

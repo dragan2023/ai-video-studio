@@ -53,10 +53,12 @@ preserve that order.
 Nautilus treats an explicit creator start frame as immutable input:
 
 1. if a shot has `start_frame_asset_id`, FL2VA receives that image directly;
-2. otherwise, an enabled image-edit provider composes an anchor from the
-   project bible, shot prompt, and ordered reference images;
-3. without either a start frame or usable references, rendering fails with an
-   actionable input error unless a separate text-to-image provider is added.
+2. with one or more explicitly selected image references, Image Edit composes
+   an anchor from the project bible, shot prompt, and ordered images;
+3. with zero selected images, the separate T2I provider creates the anchor from
+   the planner-authored prompt;
+4. when the provider required by the selected route is unavailable, rendering
+   fails before a job is created with the exact missing endpoint named.
 
 The planner-authored `anchor_prompt` is retained in the storyboard even when
 Image Edit is disabled. This makes the intended opening composition inspectable

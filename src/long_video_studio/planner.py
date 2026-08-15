@@ -551,24 +551,25 @@ reference_asset_ids; the runtime may compose them into a new opening anchor.
 
 When a shot will receive a generated opening anchor, treat that as a separate
 single-instant composition task and write it in anchor_prompt, not prompt. This
-is a storyboard artifact, so write it even when the Image Edit endpoint is not
-configured yet; the creator must be able to inspect and edit the prompt before
-rendering.
-anchor_prompt is the complete final text sent directly to Qwen-Image-Edit; no
-runtime template will expand or repair it. Describe only the exact zero-second
+is a storyboard artifact, so write it even when the opening-frame endpoint is
+not configured yet; the creator must be able to inspect and edit the prompt
+before rendering.
+anchor_prompt is the complete final text sent directly to the opening-frame
+image model; no runtime template will expand or repair it. Describe only the exact zero-second
 still image: named subjects, their identity and spatial relations, environment,
 wardrobe, props, pose, facial expression, composition, lighting, lens/framing,
-and output aspect ratio. For every image in reference_asset_ids, bind its exact
-request order as "参考图1", "参考图2", etc. together with its display name, role,
-caption/tag semantics, and intended visual contribution. Never use an opaque
-asset ID. Include concise constraints against face fusion, literal-name
+and output aspect ratio. When reference_asset_ids contains images, bind every
+image's exact request order as "参考图1", "参考图2", etc. together with its display
+name, role, caption/tag semantics, and intended visual contribution. When it is
+empty, write a standalone T2I composition and never mention Reference N,
+selected references, source images, or unavailable material. Never use an
+opaque asset ID. Include concise constraints against face fusion, literal-name
 misinterpretation, unrequested subjects, text, subtitles, logos, and watermarks.
 Use the available budget rather than over-compressing: target 650-900 Unicode
 characters whenever the selected assets and composition contain enough useful
 visual detail, with a hard maximum of 1000 Unicode characters. The runtime also
-enforces at most 1000 Qwen text tokens after Qwen-Image-Edit applies its prompt
-template and subtracts the empty-template baseline. This leaves 24 tokens below
-the model's 1024-token hard limit. Do not pad with repetition merely to hit the
+enforces at most 1000 Qwen text tokens. This leaves room below the image model's
+1024-token hard limit. Do not pad with repetition merely to hit the
 target; prioritize complete identity, appearance, scene, spatial, lens,
 lighting, and exclusion constraints in one dense production-ready prompt.
 Do not include motion progression, camera movement, dialogue, sound, duration,
@@ -722,6 +723,9 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                                     TransitionKind.MATCH_CUT,
                                     TransitionKind.OCCLUSION_CUT,
                                 }
+                            ),
+                            has_reference_images=any(
+                                asset.kind is AssetKind.IMAGE for asset in assets
                             ),
                         ),
                         {
@@ -928,6 +932,7 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         *,
         is_first: bool,
         needs_generated_anchor: bool,
+        has_reference_images: bool = False,
     ) -> str:
         mode = (
             "This is the opening shot: begin exactly from the supplied/generated first-frame composition and "
@@ -936,14 +941,23 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             else "This is a continuation shot: begin after the prior clip's settled final moment, hold that state "
             "for 0.5-1.0 seconds, then advance one new action; never replay or summarize the prior action."
         )
-        anchor_instruction = (
-            "No explicit start-frame asset is selected for this shot. You MUST populate anchor_prompt with a "
-            "complete zero-second still-image composition prompt. The supplied reference images are semantic "
-            "character/location/prop references, not a first frame; bind each ordered reference by ordinal and "
-            "describe the exact opening arrangement. Do not leave anchor_prompt blank."
-            if needs_generated_anchor
-            else "An explicit creator-selected start-frame asset exists for this shot. Leave anchor_prompt empty."
-        )
+        if needs_generated_anchor and has_reference_images:
+            anchor_instruction = (
+                "No explicit start-frame asset is selected for this shot. You MUST populate anchor_prompt with a "
+                "complete zero-second Image Edit composition prompt. The supplied images are semantic character/"
+                "location/prop references, not a first frame; bind each ordered reference by ordinal and describe "
+                "the exact opening arrangement. Do not leave anchor_prompt blank."
+            )
+        elif needs_generated_anchor:
+            anchor_instruction = (
+                "No image material is supplied. You MUST populate anchor_prompt with a standalone zero-second T2I "
+                "composition prompt derived only from the World Bible and opening state. Never mention 参考图, "
+                "Reference N, selected references, source images, or asset IDs. Do not leave anchor_prompt blank."
+            )
+        else:
+            anchor_instruction = (
+                "An explicit creator-selected start-frame asset exists for this shot. Leave anchor_prompt empty."
+            )
         return (
             "You are a specialist H3 Shot Director. This is stage 2 of 3. Produce one complete ShotSpec, not a "
             "story summary. Expand the supplied blueprint into a production-ready visual prompt of roughly "
@@ -1632,6 +1646,10 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             and self.settings.image_edit_base_url
             and self.settings.image_edit_model
         )
+        text_to_image_configured = bool(
+            self.settings.text_to_image_provider not in {"", "disabled", "none"}
+            and self.settings.text_to_image_base_url
+        )
         media_ids = [asset.id for asset in assets if asset.kind in {AssetKind.AUDIO, AssetKind.VIDEO}]
         prompts: set[str] = set()
         previous: ShotSpec | None = None
@@ -1681,10 +1699,18 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                 index,
                 self.settings.image_edit_anchor_mode,
             )
+            has_image_references = any(
+                asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
+                for asset_id in shot.reference_asset_ids
+            )
+            uses_image_edit = has_image_references or bool(shot.continuity_from_shot_id)
+            anchor_provider_configured = (
+                image_edit_configured if uses_image_edit else text_to_image_configured
+            )
             if needs_anchor and not shot.anchor_prompt:
-                if image_edit_configured:
+                if anchor_provider_configured:
                     raise ValueError(f"AI planner omitted anchor_prompt for shot {index + 1}")
-                # Keep planning useful when Image Edit is intentionally
+                # Keep planning useful when the opening-frame provider is
                 # offline.  The deterministic fallback is still a complete
                 # creator-visible prompt and can be edited before rendering.
                 shot.anchor_prompt = self._anchor_prompt(
@@ -1692,7 +1718,7 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                     shot=shot,
                     assets=assets,
                 )
-            if needs_anchor and image_edit_configured:
+            if needs_anchor and image_edit_configured and has_image_references:
                 # The model may describe references using the global asset
                 # order (for example, "the third reference") and the
                 # continuity critic may then drop unrelated assets.  At this
@@ -2091,12 +2117,21 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                 f"参考图{reference_index} {asset.display_name or asset.original_name} "
                 f"(role={roles}; caption={description}; tags={tags})"
             )
-        reference_text = "; ".join(references) or "the selected canonical visual references"
-        return (
-            f"Create the exact opening still for {shot.title}. Ordered references: {reference_text}. "
-            f"Show one coherent zero-second moment that establishes {shot.purpose} in {brief.style}. "
+        reference_clause = (
+            f"Ordered references: {'; '.join(references)}. "
+            if references
+            else "No source image or visual reference is supplied; compose this frame from the World Bible only. "
+        )
+        preservation_clause = (
             "Preserve every referenced character's identity and every referenced location/prop's defining "
-            "appearance. Arrange all requested subjects in the same physically coherent space with a clear "
+            "appearance. "
+            if references
+            else "Keep the named subjects consistent with the World Bible and do not invent source-image claims. "
+        )
+        return (
+            f"Create the exact opening still for {shot.title}. {reference_clause}"
+            f"Show one coherent zero-second moment that establishes {shot.purpose} in {brief.style}. "
+            f"{preservation_clause}Arrange all requested subjects in the same physically coherent space with a clear "
             f"{brief.aspect_ratio} composition, natural proportions, readable poses and expressions, and "
             "cinematic lighting. This is a still frame only: no motion progression, camera movement, dialogue, "
             "sound, text, subtitles, logo, or watermark."

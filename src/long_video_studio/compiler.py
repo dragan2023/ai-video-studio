@@ -6,12 +6,14 @@ from long_video_studio.adapters.image_edit import known_multi_image_support
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
 from long_video_studio.domain import (
+    AssetKind,
     ContinuationMode,
     DeploymentRequest,
     ExecutionPlan,
     ExecutionStage,
     FilmProject,
     ModelCapability,
+    ShotSpec,
     ShotTask,
     effective_video_task,
     resolved_continuation_mode,
@@ -19,14 +21,21 @@ from long_video_studio.domain import (
 
 if TYPE_CHECKING:
     from long_video_studio.estimator import RenderEstimator
+    from long_video_studio.repository import StudioRepository
 
 
 class FilmCompiler:
     """Compile creator-level Film IR into an infrastructure-facing execution plan."""
 
-    def __init__(self, settings: Settings, estimator: RenderEstimator | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        estimator: RenderEstimator | None = None,
+        repository: StudioRepository | None = None,
+    ):
         self.settings = settings
         self.estimator = estimator
+        self.repository = repository
 
     def capabilities(self) -> list[ModelCapability]:
         image_edit_configured = bool(
@@ -39,6 +48,10 @@ class FilmCompiler:
         )
         invalid_reference_limit = known_multi_image is False and self.settings.image_edit_max_references > 1
         image_edit_available = image_edit_configured and not invalid_reference_limit
+        text_to_image_available = bool(
+            self.settings.text_to_image_provider not in {"", "disabled", "none"}
+            and self.settings.text_to_image_base_url
+        )
         image_edit_notes = [
             f"Provider: {self.settings.image_edit_provider}.",
             "Supports local vLLM-Omni and hosted OpenAI-compatible adapters.",
@@ -63,6 +76,18 @@ class FilmCompiler:
                 # self-hosted GPU count until that exact backend is validated.
                 recommended_gpus=0,
                 notes=image_edit_notes,
+            ),
+            ModelCapability(
+                id="qwen-image-t2i",
+                display_name="Text-to-Image Provider",
+                task="text_to_image",
+                endpoint=self.settings.text_to_image_base_url,
+                available=text_to_image_available,
+                recommended_gpus=0,
+                notes=[
+                    f"Provider: {self.settings.text_to_image_provider}.",
+                    "Generates an authorized opening frame when no material image is selected.",
+                ],
             ),
             ModelCapability(
                 id="minimax-h3-fl2va",
@@ -116,6 +141,7 @@ class FilmCompiler:
         video_stage_by_shot: dict[str, str] = {}
         total_estimate = 0.0
         image_edit = capability_map["qwen-image-edit"]
+        text_to_image = capability_map["qwen-image-t2i"]
         anchor_mode = self.settings.image_edit_anchor_mode
         if image_edit.available and anchor_mode not in IMAGE_EDIT_ANCHOR_MODES:
             warnings.append(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {anchor_mode}")
@@ -133,23 +159,25 @@ class FilmCompiler:
                 fl2va_configured=bool(self.settings.h3_fl2va_url),
             )
             is_fl2va = runtime_task == ShotTask.FL2VA
-            has_start_reference = bool(shot.start_frame_asset_id or shot.reference_asset_ids)
+            has_explicit_start = bool(shot.start_frame_asset_id)
+            has_image_references = self._has_image_references(shot)
+            has_start_reference = has_explicit_start or has_image_references
             missing_non_continuity_start = is_fl2va and not shot.continuity_from_shot_id and not has_start_reference
-            selected_by_mode = is_fl2va and image_edit.available and anchor_selected(shot, position, anchor_mode)
+            selected_by_mode = is_fl2va and anchor_selected(shot, position, anchor_mode)
             if selected_by_mode and not shot.anchor_prompt:
                 raise ValueError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
 
-            # A configured Image Edit provider follows RenderManager's anchor
-            # mode exactly.  When it is disabled, retain the plan-only
-            # keyframe stage for a genuinely missing non-continuity start image
-            # so callers still receive the actionable warning below.  Direct
-            # start/reference images continue to use the existing video path.
-            needs_keyframe = selected_by_mode or (not image_edit.available and missing_non_continuity_start)
+            # Anchor creation is a creative requirement independent of service
+            # availability.  Route selected images/boundary frames to Image
+            # Edit and zero-image shots to the dedicated T2I provider.
+            needs_keyframe = selected_by_mode or missing_non_continuity_start
             if needs_keyframe:
+                uses_image_edit = has_image_references or bool(shot.continuity_from_shot_id)
+                keyframe_capability = image_edit if uses_image_edit else text_to_image
                 keyframe_stage = ExecutionStage(
                     shot_id=shot.id,
                     kind="keyframe",
-                    capability_id="qwen-image-edit",
+                    capability_id=keyframe_capability.id,
                     inputs={
                         "reference_asset_ids": shot.reference_asset_ids,
                         "instruction": shot.continuity_in.model_dump(mode="json"),
@@ -166,27 +194,16 @@ class FilmCompiler:
                 # before the previous boundary exists.
                 dependencies = [keyframe_stage.id]
                 total_estimate += keyframe_stage.estimated_seconds or 0
-                if not image_edit.available:
+                if not keyframe_capability.available:
+                    route = "Image Edit" if uses_image_edit else "T2I"
                     warnings.append(
-                        f"Shot {position + 1} has no non-continuity start image and requires a "
-                        "generated anchor frame; image-edit adapter is not configured."
+                        f"Shot {position + 1} requires a generated anchor frame; {route} is not configured."
                     )
-                elif missing_non_continuity_start:
-                    warnings.append(f"Shot {position + 1} is selected for Image Edit but has no image reference.")
             elif missing_non_continuity_start:
-                if image_edit.available:
-                    warnings.append(
-                        f"Shot {position + 1} has no non-continuity start image; "
-                        f"anchor mode '{anchor_mode}' does not select it."
-                    )
-                else:
-                    # This branch is defensive (the unavailable-provider
-                    # fallback above normally creates the keyframe stage), but
-                    # keeps the warning contract stable if that policy changes.
-                    warnings.append(
-                        f"Shot {position + 1} has no non-continuity start image and requires a "
-                        "generated anchor frame; image-edit adapter is not configured."
-                    )
+                warnings.append(
+                    f"Shot {position + 1} has no non-continuity start image; "
+                    f"anchor mode '{anchor_mode}' does not select it."
+                )
 
             capability_id = "minimax-h3-ref2va" if runtime_task == ShotTask.REF2VA else "minimax-h3-fl2va"
             capability = capability_map[capability_id]
@@ -273,15 +290,26 @@ class FilmCompiler:
         stages.append(assembly)
         total_estimate += assembly.estimated_seconds or 0
         deployments: list[DeploymentRequest] = []
-        for capability_id in ("minimax-h3-fl2va", "minimax-h3-ref2va", "qwen-image-edit"):
+        for capability_id in (
+            "minimax-h3-fl2va",
+            "minimax-h3-ref2va",
+            "qwen-image-edit",
+            "qwen-image-t2i",
+        ):
             capability = capability_map[capability_id]
             shot_ids = [
                 stage.shot_id
                 for stage in stages
                 if stage.kind == "video" and stage.capability_id == capability_id and stage.shot_id
             ]
-            if not shot_ids and capability_id == "qwen-image-edit":
-                shot_ids = [stage.shot_id for stage in stages if stage.kind == "keyframe" and stage.shot_id]
+            if not shot_ids and capability_id in {"qwen-image-edit", "qwen-image-t2i"}:
+                shot_ids = [
+                    stage.shot_id
+                    for stage in stages
+                    if stage.kind == "keyframe"
+                    and stage.capability_id == capability_id
+                    and stage.shot_id
+                ]
             if not shot_ids:
                 continue
             deployments.append(
@@ -309,6 +337,16 @@ class FilmCompiler:
             deployments=deployments,
             warnings=list(dict.fromkeys(warnings)),
             estimated_seconds=round(calibrated_total, 1),
+        )
+
+    def _has_image_references(self, shot: ShotSpec) -> bool:
+        if not shot.reference_asset_ids:
+            return False
+        if self.repository is None:
+            return bool(shot.reference_asset_ids)
+        return any(
+            (asset := self.repository.get_asset(asset_id)) is not None and asset.kind is AssetKind.IMAGE
+            for asset_id in shot.reference_asset_ids
         )
 
     @staticmethod

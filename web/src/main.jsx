@@ -190,6 +190,19 @@ function runtimeShotLabel(project, shot) {
   return String(task).toUpperCase();
 }
 
+function openingFrameSourceLabel(project, shot, assets) {
+  if (shot.start_frame_asset_id) return "显式首帧";
+  if (runtimeShotTask(project, shot) === "ref2va") return "上一镜 Ref2VA 续写";
+  const imageAssetIds = new Set(
+    assets.filter((asset) => asset.kind === "image").map((asset) => asset.id),
+  );
+  if ((shot.reference_asset_ids || []).some((assetId) => imageAssetIds.has(assetId))) {
+    return "Image Edit 首帧";
+  }
+  if (shot.continuity_from_shot_id) return "上一镜边界帧";
+  return "T2I 首帧";
+}
+
 function transitionLabel(shot) {
   return (
     {
@@ -268,12 +281,13 @@ function AssetCard({ asset, selected, onToggle, onEdit }) {
 
 function StatusPill({ health, job }) {
   const running = job?.status === "running" || job?.status === "queued";
+  const healthy = Boolean(health?.fl2va_healthy && health?.ref2va_healthy);
   return (
     <div className={`status-pill ${running ? "working" : "ready"}`}>
       <span className="status-dot" />
       {running
         ? `${Math.round((job.progress || 0) * 100)}% 渲染中`
-        : health
+        : healthy
           ? "引擎在线"
           : "检查连接"}
     </div>
@@ -361,6 +375,7 @@ function App() {
   const [activeTab, setActiveTab] = useState("brief");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [renderBlocker, setRenderBlocker] = useState("");
   const [planningError, setPlanningError] = useState("");
   const [projectLoading, setProjectLoading] = useState(false);
   const [plannerTrace, setPlannerTrace] = useState([]);
@@ -467,9 +482,9 @@ function App() {
   const loadHealth = useCallback(async () => {
     try {
       const value = await api("/api/health");
-      setHealth(value.fl2va_healthy && value.ref2va_healthy);
+      setHealth(value);
     } catch {
-      setHealth(false);
+      setHealth(null);
     }
   }, []);
 
@@ -489,6 +504,7 @@ function App() {
       // mistaken for the project the creator just selected.
       setProject(null);
       setJob(null);
+      setRenderBlocker("");
       setRenderEstimate(null);
       setSelected(new Set());
       const [value, latest, trace, estimate] = await Promise.all([
@@ -1184,6 +1200,7 @@ function App() {
     const projectId = project.id;
     const forceRerender = job?.status === "complete";
     setBusy(true);
+    setRenderBlocker("");
     try {
       const value = await api(
         `/api/projects/${projectId}/render${forceRerender ? "?force=true" : ""}`,
@@ -1192,6 +1209,7 @@ function App() {
         },
       );
       setJob(value);
+      setRenderBlocker("");
       if (forceRerender) {
         setProject((current) => ({
           ...current,
@@ -1220,6 +1238,7 @@ function App() {
           : "渲染已开始，期间可以继续编辑项目",
       );
     } catch (error) {
+      setRenderBlocker(error.message);
       setNotice(error.message);
     } finally {
       setBusy(false);
@@ -1276,6 +1295,12 @@ function App() {
   const debugEvents = [...plannerTrace, ...clientTrace].sort(
     (left, right) => Date.parse(left.created_at || 0) - Date.parse(right.created_at || 0),
   );
+  const h3Healthy = Boolean(health?.fl2va_healthy && health?.ref2va_healthy);
+  const t2iStatus = health?.t2i_healthy
+    ? "T2I 在线"
+    : health?.t2i_configured
+      ? "T2I 等待连接"
+      : "T2I 未配置";
   return (
     <div className="nautilus-app">
       <aside className="side-rail">
@@ -1310,9 +1335,9 @@ function App() {
           </div>
           <div>
             <strong>海螺引擎</strong>
-            <span>{health ? "H3 · 在线" : "等待连接"}</span>
+            <span>{h3Healthy ? `H3 · 在线 · ${t2iStatus}` : "等待连接 H3"}</span>
           </div>
-          <span className={`engine-dot ${health ? "on" : ""}`} />
+          <span className={`engine-dot ${h3Healthy ? "on" : ""}`} />
         </div>
       </aside>
 
@@ -1726,7 +1751,8 @@ function App() {
                     <p>{shot.purpose}</p>
                     <small>
                       {runtimeShotLabel(project, shot)} · {shot.inference_steps}{" "}
-                      steps · {transitionLabel(shot)} · {shot.camera}
+                      steps · {openingFrameSourceLabel(project, shot, assets)} ·{" "}
+                      {transitionLabel(shot)} · {shot.camera}
                     </small>
                     <small className="shot-render-timing">
                       <Gauge size={11} /> {shotRenderTiming(shot, clockNow)}
@@ -1839,13 +1865,14 @@ function App() {
                 </div>
                 <div className="render-state">
                   <span />
-                  尚未开始
+                  {renderBlocker ? "等待配置" : "尚未开始"}
                 </div>
               </div>
               <div className="empty-render-body">
                 <Aperture size={22} />
                 <p>
-                  当前项目还没有制作任务。确认故事板后，点击开始制作即可看到实时进度、倒计时和每一镜的锚点更新。
+                  {renderBlocker ||
+                    "当前项目还没有制作任务。确认故事板后，点击开始制作即可看到实时进度、倒计时和每一镜的锚点更新。"}
                 </p>
                 {renderEstimate ? (
                   <small>
@@ -2207,8 +2234,8 @@ function App() {
                     />
                     <small>
                       {shotDraft.start_frame_asset_id
-                        ? "已指定首帧素材，本 Prompt 会保留但不会调用 Image Edit。"
-                        : `由 Planner 生成；启用 Image Edit 后会作为首帧合成指令。参考素材不会自动变成首帧；需完整绑定参考图，最多 1000 字符（当前 ${shotDraft.anchor_prompt.length}/1000），并以 Qwen 模板后的文本 tokens ≤ 1000 为最终门禁。`}
+                        ? "已指定首帧素材，本 Prompt 会保留但不会调用图像生成服务。"
+                        : `${openingFrameSourceLabel(project, shotDraft, assets)}；由 Planner 生成并直接作为首帧合成指令。选择图片参考时走 Image Edit，零素材时走 T2I。最多 1000 字符（当前 ${shotDraft.anchor_prompt.length}/1000）。`}
                     </small>
                   </label>
                   <label className="dialog-field">
@@ -2769,7 +2796,7 @@ function App() {
                         )
                       }
                     >
-                      <option value="">未指定，由素材与上下文自动生成</option>
+                      <option value="">未指定：有图片走 Image Edit，无图片走 T2I</option>
                       {assets
                         .filter((asset) => asset.kind === "image")
                         .map((asset) => (

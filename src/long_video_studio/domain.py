@@ -298,8 +298,8 @@ class ShotSpec(BaseModel):
     anchor_prompt: str = Field(
         default="",
         description=(
-            "Complete, direct-to-image-edit opening-frame prompt. It must already bind each ordered reference "
-            "image by ordinal, display name, role, and visual contribution; runtime adapters do not expand it. "
+            "Complete direct-to-image opening-frame prompt. Image Edit prompts bind each ordered reference by "
+            "ordinal and display name; zero-reference T2I prompts stand alone. Runtime adapters do not expand it. "
             "The planner normalizes agent output to Studio's 1000-character preflight before persistence."
         ),
     )

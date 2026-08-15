@@ -24,7 +24,7 @@ workflow:
   start-frame, and audio roles;
 - FL2VA and Ref2VA video adapters;
 - previous-boundary-to-next-anchor continuity;
-- optional story-aware anchor frames built by an image-edit provider;
+- optional story-aware anchor frames built by Image Edit or zero-material T2I;
 - provider switching between self-hosted vLLM-Omni and hosted APIs;
 - resumable and deletable projects, concurrent background planning/rendering,
   history-calibrated ETAs, inline preview, and sidecar subtitles.
@@ -38,7 +38,8 @@ Creator brief + material library
               |
      World bible + storyboard
               |
-       optional Image Edit
+ Image Edit (with references)
+     or T2I (zero material)
    (vLLM-Omni or vendor API)
               |
        MiniMax-H3 / provider
@@ -202,6 +203,25 @@ token limit when no local tokenizer is available.
 Use `openai-compatible` instead of `vllm-omni` for a hosted provider. See
 [Image-edit providers](docs/image-edit-providers.md) for the request contract,
 reference manifest, and acceptance matrix.
+
+### Text to Image
+
+T2I is a separate opening-frame route for projects with no selected image
+material. It never reads from the material library implicitly and does not
+silently fall back to Image Edit.
+
+```bash
+export STUDIO_T2I_PROVIDER=vllm-omni
+export STUDIO_T2I_BASE_URL=http://127.0.0.1:8094
+# Optional for single-model servers; omit to avoid a served-model-name mismatch.
+# export STUDIO_T2I_MODEL=Qwen/Qwen-Image-2512
+export STUDIO_T2I_STEPS=50
+export STUDIO_T2I_TRUE_CFG_SCALE=4.0
+export STUDIO_T2I_GUIDANCE_SCALE=1.0
+```
+
+Studio calls the OpenAI-compatible `/v1/images/generations` endpoint. The
+model field is optional for a single-model vLLM-Omni server.
 
 ## Configuration
 

@@ -8,6 +8,7 @@ from long_video_studio.adapters.image_edit import (
     ImageEditCapabilities,
     ImageEditRequest,
 )
+from long_video_studio.adapters.text_to_image import TextToImageRequest
 from long_video_studio.assets import AssetService
 from long_video_studio.domain import (
     AssetRole,
@@ -27,10 +28,28 @@ class FakeImageEditProvider:
         self.request: ImageEditRequest | None = None
 
     @property
+    def configured(self):
+        return True
+
+    @property
     def capabilities(self):
         return ImageEditCapabilities("fake", "test", True, 4)
 
     async def edit(self, request: ImageEditRequest):
+        self.request = request
+        request.output_path.write_bytes(png_bytes().getvalue())
+        return request.output_path
+
+
+class FakeTextToImageProvider:
+    def __init__(self):
+        self.request: TextToImageRequest | None = None
+
+    @property
+    def configured(self):
+        return True
+
+    async def generate(self, request: TextToImageRequest):
         self.request = request
         request.output_path.write_bytes(png_bytes().getvalue())
         return request.output_path
@@ -138,6 +157,47 @@ def test_missing_planner_anchor_fails_closed(settings):
         assert "planner-authored anchor_prompt" in str(exc)
     else:
         raise AssertionError("missing planner anchor must fail closed")
+
+
+def test_zero_material_anchor_uses_text_to_image_only(settings):
+    configured = replace(settings, image_edit_anchor_mode="first-shot")
+    repository = StudioRepository(configured.database_path)
+    shot = ShotSpec(
+        index=0,
+        title="New world",
+        purpose="Establish a completely new setting",
+        prompt="A creator enters a sunlit empty studio.",
+        anchor_prompt="A 16:9 cinematic opening still of a creator entering a sunlit empty studio.",
+        negative_prompt="text, logo, watermark",
+        duration_seconds=4,
+        task=ShotTask.FL2VA,
+        seed=23,
+        reference_asset_ids=[],
+    )
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(prompt="A new studio."),
+            world_bible=WorldBible(logline="Arrival", visual_style="cinematic"),
+            shots=[shot],
+        )
+    )
+    image_edit = FakeImageEditProvider()
+    text_to_image = FakeTextToImageProvider()
+    manager = RenderManager(configured, repository)
+    manager.image_edit_provider = image_edit
+    manager.text_to_image_provider = text_to_image
+    output_dir = configured.output_dir / project.id
+    output_dir.mkdir(parents=True)
+
+    anchor = asyncio.run(manager._maybe_make_anchor(project, shot, 0, {}, output_dir))
+
+    assert anchor == output_dir / "shot-001-anchor.png"
+    assert image_edit.request is None
+    assert text_to_image.request is not None
+    assert text_to_image.request.prompt == shot.anchor_prompt
+    assert text_to_image.request.negative_prompt == shot.negative_prompt
+    assert text_to_image.request.seed == 23
+    assert (text_to_image.request.width, text_to_image.request.height) == (1280, 720)
 
 
 def test_explicit_start_frame_bypasses_image_edit(settings):

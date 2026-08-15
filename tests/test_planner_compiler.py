@@ -551,6 +551,33 @@ def test_compiler_image_edit_anchor_modes_apply_only_to_fl2va(settings, mode, ex
     assert not any(stage.shot_id == project.shots[2].id for stage in keyframes)
 
 
+def test_compiler_routes_zero_material_anchors_to_text_to_image(settings):
+    configured = replace(
+        settings,
+        text_to_image_provider="vllm-omni",
+        text_to_image_base_url="http://text-to-image.test",
+        text_to_image_model="Qwen/Qwen-Image-2512",
+    )
+    repository = StudioRepository(configured.database_path)
+    planner = PlannerService(configured, repository)
+    project = asyncio.run(
+        planner.plan(
+            ProjectBrief(
+                prompt="A creator enters a completely new empty studio.",
+                duration_seconds=15,
+                reference_asset_ids=[],
+            )
+        )
+    )
+
+    plan = FilmCompiler(configured, repository=repository).compile(project)
+    keyframes = [stage for stage in plan.stages if stage.kind == "keyframe"]
+    assert keyframes
+    assert all(stage.capability_id == "qwen-image-t2i" for stage in keyframes)
+    assert any(item.capability_id == "qwen-image-t2i" for item in plan.deployments)
+    assert not any(item.capability_id == "qwen-image-edit" for item in plan.deployments)
+
+
 def test_compiler_rejects_missing_planner_anchor(settings):
     project = _anchor_mode_project()
     project.shots[0].anchor_prompt = ""
@@ -729,7 +756,8 @@ def test_shot_director_requires_generated_anchor_when_no_start_frame_is_selected
     )
 
     assert "MUST populate anchor_prompt" in prompt
-    assert "not a first frame" in prompt
+    assert "standalone zero-second T2I" in prompt
+    assert "Never mention 参考图" in prompt
 
     continuous_prompt = planner._shot_director_system_prompt(
         ProjectBrief(prompt="A quiet opening."),
@@ -740,6 +768,18 @@ def test_shot_director_requires_generated_anchor_when_no_start_frame_is_selected
         needs_generated_anchor=True,
     )
     assert "MUST populate anchor_prompt" in continuous_prompt
+
+
+def test_zero_material_heuristic_anchor_never_invents_visual_references(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(prompt="A creator enters a new studio.", duration_seconds=15)
+    shot = planner._plan_heuristically(brief, []).shots[0]
+    prompt = planner._anchor_prompt(brief=brief, shot=shot, assets=[])
+
+    assert "No source image or visual reference is supplied" in prompt
+    assert "selected canonical visual references" not in prompt
+    assert "参考图" not in prompt
+    assert "asset_" not in prompt
 
 
 def test_planner_leaves_first_frame_empty_for_image_edit_references(settings):
@@ -981,9 +1021,9 @@ def test_planner_strips_duration_and_reference_video_boilerplate(prompt, expecte
 def test_planner_rejects_llm_output_without_required_anchor(settings):
     configured = replace(
         settings,
-        image_edit_provider="vllm-omni",
-        image_edit_base_url="http://image-edit.test",
-        image_edit_model="Qwen/Qwen-Image-Edit-2511",
+        text_to_image_provider="vllm-omni",
+        text_to_image_base_url="http://text-to-image.test",
+        text_to_image_model="Qwen/Qwen-Image-2512",
     )
     repository = StudioRepository(configured.database_path)
     planner = PlannerService(configured, repository)

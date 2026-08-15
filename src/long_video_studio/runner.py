@@ -12,6 +12,11 @@ from long_video_studio.adapters.image_edit import (
     provider_from_settings,
 )
 from long_video_studio.adapters.media import MediaTools
+from long_video_studio.adapters.text_to_image import (
+    TextToImageProvider,
+    TextToImageRequest,
+    text_to_image_provider_from_settings,
+)
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
 from long_video_studio.domain import (
@@ -57,6 +62,12 @@ class RenderManager:
             self.image_edit_provider = provider_from_settings(settings)
         except ValueError as error:
             self.image_edit_provider_error = str(error)
+        self.text_to_image_provider: TextToImageProvider | None = None
+        self.text_to_image_provider_error: str | None = None
+        try:
+            self.text_to_image_provider = text_to_image_provider_from_settings(settings)
+        except ValueError as error:
+            self.text_to_image_provider_error = str(error)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._semaphore = asyncio.Semaphore(settings.render_max_concurrency)
 
@@ -164,7 +175,6 @@ class RenderManager:
                     runtime_task == ShotTask.REF2VA and shot.continuity_from_shot_id and not shot.start_frame_asset_id
                 )
                 if runtime_task == ShotTask.FL2VA:
-                    start_frame = self._start_frame(shot, boundary_frames)
                     anchor = await self._maybe_make_anchor(
                         project,
                         shot,
@@ -172,8 +182,7 @@ class RenderManager:
                         boundary_frames,
                         output_dir,
                     )
-                    if anchor:
-                        start_frame = anchor
+                    start_frame = anchor or self._start_frame(shot, boundary_frames)
                     prepared_start = output_dir / f"shot-{position + 1:03d}-start-{width}x{height}.png"
                     await asyncio.to_thread(
                         self.media.fit_image_to_canvas,
@@ -335,7 +344,6 @@ class RenderManager:
                 for shot in project.shots:
                     if shot.status == ShotStatus.RENDERING:
                         shot.status = ShotStatus.FAILED
-                        shot.error = "Studio stopped before the render completed"
                 project.updated_at = utc_now()
                 self.repository.save_project(project)
 
@@ -437,13 +445,8 @@ class RenderManager:
         boundary_frames: dict[str, Path],
         output_dir: Path,
     ) -> Path | None:
-        """Optionally build a story-aware FL2VA anchor through Image Edit."""
+        """Build an FL2VA anchor through Image Edit or zero-reference T2I."""
 
-        if self.image_edit_provider_error:
-            raise RuntimeError(self.image_edit_provider_error)
-        provider = self.image_edit_provider
-        if provider is None:
-            return None
         mode = self.settings.image_edit_anchor_mode
         if mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise RuntimeError(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {mode}")
@@ -454,24 +457,50 @@ class RenderManager:
 
         references = self._anchor_references(shot, boundary_frames)
         anchor_path = output_dir / f"shot-{position + 1:03d}-anchor.png"
-        await provider.edit(
-            ImageEditRequest(
-                # The planner owns the complete direct-to-Qwen prompt. Keep
-                # adapters transport-only so a second template cannot overflow
-                # the model's 1024-token input limit or alter creative intent.
-                prompt=shot.anchor_prompt,
-                references=tuple(references),
-                output_path=anchor_path,
-                width={"16:9": 1280, "9:16": 720, "1:1": 1024}[project.brief.aspect_ratio],
-                height={"16:9": 720, "9:16": 1280, "1:1": 1024}[project.brief.aspect_ratio],
-                negative_prompt=shot.negative_prompt or None,
-                extra_body={
-                    "num_inference_steps": self.settings.image_edit_steps,
-                    "true_cfg_scale": self.settings.image_edit_true_cfg_scale,
-                    "guidance_scale": self.settings.image_edit_guidance_scale,
-                },
+        width = {"16:9": 1280, "9:16": 720, "1:1": 1024}[project.brief.aspect_ratio]
+        height = {"16:9": 720, "9:16": 1280, "1:1": 1024}[project.brief.aspect_ratio]
+        if references:
+            if self.image_edit_provider_error:
+                raise RuntimeError(self.image_edit_provider_error)
+            provider = self.image_edit_provider
+            if provider is None or not provider.configured:
+                raise RuntimeError("Image Edit anchor requested but provider is not configured")
+            await provider.edit(
+                ImageEditRequest(
+                    # The planner owns the complete direct-to-Qwen prompt. Keep
+                    # adapters transport-only so a second template cannot overflow
+                    # the model's 1024-token input limit or alter creative intent.
+                    prompt=shot.anchor_prompt,
+                    references=tuple(references),
+                    output_path=anchor_path,
+                    width=width,
+                    height=height,
+                    negative_prompt=shot.negative_prompt or None,
+                    extra_body={
+                        "num_inference_steps": self.settings.image_edit_steps,
+                        "true_cfg_scale": self.settings.image_edit_true_cfg_scale,
+                        "guidance_scale": self.settings.image_edit_guidance_scale,
+                    },
+                )
             )
-        )
+        else:
+            if self.text_to_image_provider_error:
+                raise RuntimeError(self.text_to_image_provider_error)
+            provider = self.text_to_image_provider
+            if provider is None or not provider.configured:
+                raise RuntimeError(
+                    "T2I anchor requested but provider is not configured; set STUDIO_T2I_BASE_URL"
+                )
+            await provider.generate(
+                TextToImageRequest(
+                    prompt=shot.anchor_prompt,
+                    negative_prompt=shot.negative_prompt,
+                    output_path=anchor_path,
+                    width=width,
+                    height=height,
+                    seed=shot.seed,
+                )
+            )
         shot.anchor_frame_path = str(anchor_path)
         self.repository.save_project(project)
         return anchor_path
@@ -522,8 +551,6 @@ class RenderManager:
                 tuple(asset.tags),
                 asset.caption,
             )
-        if not references:
-            raise RuntimeError(f"shot {shot.id} has no image reference for Image Edit")
         return references
 
     def _ref2va_inputs(self, shot) -> tuple[Path, Path]:
