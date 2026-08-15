@@ -861,6 +861,13 @@ select {
   font-family: "DM Mono", monospace;
   font-size: 9px;
 }
+.library-permission-hint {
+  margin: -6px 0 14px;
+  color: #777a74;
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+  line-height: 1.55;
+}
 .storyboard-heading {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

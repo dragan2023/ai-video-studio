@@ -65,6 +65,60 @@ def test_planner_builds_continuity_aware_film_ir(settings):
     assert len(project.timeline) == len(project.shots)
 
 
+def test_planner_never_retrieves_unselected_library_assets(settings):
+    repository = StudioRepository(settings.database_path)
+    asset = AssetService(settings, repository).ingest_stream(
+        png_bytes("blue"),
+        "private-character.png",
+        "image/png",
+        roles=[AssetRole.CHARACTER],
+    )
+    asset = AssetService(settings, repository).update(
+        asset.id,
+        AssetUpdate(display_name="Unselected Character"),
+    )
+    planner = PlannerService(settings, repository)
+    brief = ProjectBrief(
+        prompt="A completely new character enters an empty studio.",
+        duration_seconds=15,
+        reference_asset_ids=[],
+    )
+
+    project = asyncio.run(planner.plan(brief))
+    serialized = project.model_dump_json()
+    assert project.brief.reference_asset_ids == []
+    assert all(shot.reference_asset_ids == [] for shot in project.shots)
+    assert asset.id not in serialized
+    assert asset.display_name not in serialized
+
+
+def test_planner_retrieves_only_explicitly_selected_assets(settings):
+    repository = StudioRepository(settings.database_path)
+    assets = AssetService(settings, repository)
+    unselected = assets.ingest_stream(
+        png_bytes("blue"),
+        "unselected.png",
+        "image/png",
+        roles=[AssetRole.CHARACTER],
+    )
+    selected = assets.ingest_stream(
+        png_bytes("red"),
+        "selected.png",
+        "image/png",
+        roles=[AssetRole.CHARACTER],
+    )
+    planner = PlannerService(settings, repository)
+    brief = ProjectBrief(
+        prompt="A character enters an empty studio.",
+        duration_seconds=15,
+        reference_asset_ids=[selected.id],
+    )
+
+    retrieved = planner._retrieve_assets(brief)
+    assert [asset.id for asset in retrieved] == [selected.id]
+    assert unselected.id not in {asset.id for asset in retrieved}
+
+
 def test_style_registry_has_a_complete_contract_for_each_planner_preset():
     expected = {
         "cinematic",
@@ -549,7 +603,7 @@ def test_compiler_explicit_start_frame_bypasses_configured_image_edit(settings):
     assert all(stage.shot_id != project.shots[0].id for stage in keyframes)
 
 
-def test_planner_retrieves_matching_library_assets_when_none_are_selected(settings):
+def test_planner_does_not_retrieve_matching_library_assets_when_none_are_selected(settings):
     repository = StudioRepository(settings.database_path)
     assets = AssetService(settings, repository)
     cat = assets.ingest_stream(
@@ -568,8 +622,10 @@ def test_planner_retrieves_matching_library_assets_when_none_are_selected(settin
             )
         )
     )
-    assert cat.id in project.brief.reference_asset_ids
-    assert project.shots[0].start_frame_asset_id == cat.id
+    assert project.brief.reference_asset_ids == []
+    assert project.shots[0].reference_asset_ids == []
+    assert project.shots[0].start_frame_asset_id is None
+    assert cat.id not in project.model_dump_json()
 
 
 def test_planner_keeps_reference_images_out_of_start_frame_and_writes_anchor_without_image_edit(settings):
@@ -947,13 +1003,17 @@ def test_planner_repairs_anchor_bindings_using_final_reference_order(settings):
     output = planner._plan_heuristically(brief, [first, second])
     shot = output.shots[0]
     shot.reference_asset_ids = [second.id, first.id]
-    shot.anchor_prompt = "The two supplied character references share one coherent opening composition."
+    shot.anchor_prompt = (
+        f"Use {second.id} and {first.id} for the two character identities in one coherent opening composition."
+    )
 
     normalized = planner._normalize_agent_output(output, brief, [first, second])
     prompt = normalized.shots[0].anchor_prompt
     assert "参考图1 第二角色" in prompt
     assert "参考图2 第一角色" in prompt
     assert prompt.index("参考图1 第二角色") < prompt.index("参考图2 第一角色")
+    assert second.id not in prompt
+    assert first.id not in prompt
 
 
 def test_planner_anchor_binding_repair_preserves_budget_and_is_idempotent(settings):
@@ -988,6 +1048,32 @@ def test_planner_anchor_binding_repair_preserves_budget_and_is_idempotent(settin
 
     normalized_again = planner._normalize_agent_output(normalized, brief, [asset])
     assert normalized_again.shots[0].anchor_prompt == prompt
+
+
+def test_planner_anchor_binding_scrubs_unreadable_asset_ids(settings):
+    configured = replace(
+        settings,
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://image-edit.test",
+        image_edit_model="Qwen-Image-Edit-2511",
+    )
+    repository = StudioRepository(configured.database_path)
+    asset = AssetService(configured, repository).ingest_stream(
+        png_bytes("blue"),
+        "hero.png",
+        "image/png",
+        roles=[AssetRole.CHARACTER],
+    )
+    asset = AssetService(configured, repository).update(asset.id, AssetUpdate(display_name="Hero"))
+    planner = PlannerService(configured, repository)
+    brief = ProjectBrief(prompt="A hero enters.", duration_seconds=15, reference_asset_ids=[asset.id])
+    output = planner._plan_heuristically(brief, [asset])
+    output.shots[0].anchor_prompt = f"Use {asset.id} for identity only in the opening still."
+
+    normalized = planner._normalize_agent_output(output, brief, [asset])
+    prompt = normalized.shots[0].anchor_prompt
+    assert asset.id not in prompt
+    assert "参考图1 Hero" in prompt
 
 
 def test_compiler_snapshots_structured_storyboard_fields(settings):

@@ -1594,6 +1594,9 @@ function App() {
               </button>
             </div>
           </div>
+          <p className="library-permission-hint">
+            只有明确勾选的素材会进入本项目的 Agent 与模型请求；未勾选素材不会被自动检索或引用。
+          </p>
           <div className="upload-meta">
             <label>
               素材用途

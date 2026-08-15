@@ -108,6 +108,12 @@ The direction, project bible, shot cards, and material metadata are edited in
 focused dialogs. The storyboard stays compact while full prompts and ordered
 references remain available when a creator opens a shot.
 
+The creator's material selection is an authorization boundary. Only asset IDs
+explicitly selected for the project are sent to the planner or downstream
+model providers. An empty selection means that no material-library asset is
+retrieved, inserted into prompts, or attached to generated shots. A future
+automatic-retrieval mode must remain an explicit creator choice.
+
 Explicit creator start frames always win. If no start frame is selected and an
 image-edit provider is configured, Nautilus composes the opening anchor from
 the project context and ordered scene/character/prop references instead. The

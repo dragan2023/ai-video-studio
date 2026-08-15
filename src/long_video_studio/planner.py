@@ -143,8 +143,6 @@ class PlannerService:
 
     async def _plan_impl(self, brief: ProjectBrief, project_id: str | None = None) -> FilmProject:
         assets = self._retrieve_assets(brief)
-        if assets and not brief.reference_asset_ids:
-            brief = brief.model_copy(update={"reference_asset_ids": [asset.id for asset in assets]})
         if self._llm_available:
             try:
                 output = await self._plan_with_llm(brief, assets)
@@ -235,34 +233,11 @@ class PlannerService:
         return assets
 
     def _retrieve_assets(self, brief: ProjectBrief) -> list[AssetRecord]:
-        if brief.reference_asset_ids:
-            return self._get_assets(brief.reference_asset_ids)
-        candidates = self.repository.list_assets()
-        if not candidates:
-            return []
-        query = brief.prompt.lower()
-        # Captions/tags are the durable retrieval surface. Chinese phrases are
-        # also kept as a whole substring, while ASCII words get token matches.
-        terms = set(re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", query))
-        chinese = "".join(re.findall(r"[\u4e00-\u9fff]", query))
-        terms.update(chinese[index : index + 2] for index in range(max(0, len(chinese) - 1)))
-        scored: list[tuple[int, AssetRecord]] = []
-        for asset in candidates:
-            haystack = " ".join([asset.original_name.lower(), asset.caption.lower(), *asset.tags])
-            score = sum(3 if term in asset.tags else 1 for term in terms if term in haystack)
-            if AssetRole.CHARACTER in asset.roles:
-                score += 2
-            if AssetRole.START_FRAME in asset.roles:
-                score += 2
-            if AssetRole.STYLE in asset.roles:
-                score += 1
-            if asset.kind == AssetKind.IMAGE:
-                score += 1
-            scored.append((score, asset))
-        scored.sort(key=lambda pair: (pair[0], pair[1].created_at), reverse=True)
-        # Keep the planner context small and let the creator see/override the
-        # selected references in the storyboard after planning.
-        return [asset for score, asset in scored[:5] if score > 0] or [scored[0][1]]
+        # The project brief is the authorization boundary for local material.
+        # An empty selection means no library asset may enter planner context,
+        # prompts, or runtime inputs.  Automatic retrieval can be reintroduced
+        # later only as an explicit creator-controlled mode.
+        return self._get_assets(brief.reference_asset_ids) if brief.reference_asset_ids else []
 
     def _plan_heuristically(self, brief: ProjectBrief, assets: list[AssetRecord]) -> FilmProject:
         shot_count = max(1, math.ceil(brief.duration_seconds / 12))
@@ -1948,7 +1923,11 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         prompt does not contain every final ordinal/name pair.
         """
 
-        prompt = cls._clean_generation_prompt(shot.anchor_prompt)
+        prompt = cls._sanitize_anchor_asset_ids(
+            cls._clean_generation_prompt(shot.anchor_prompt),
+            shot,
+            valid_assets,
+        )
         image_assets, manifest = cls._anchor_binding_manifest(shot, valid_assets)
         if not image_assets:
             return cls._limit_anchor_prompt(prompt)
@@ -1960,6 +1939,38 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         if missing:
             prompt = f"{manifest}\n{prompt}" if prompt else manifest
         return cls._limit_anchor_prompt(prompt)
+
+    @staticmethod
+    def _sanitize_anchor_asset_ids(
+        prompt: str,
+        shot: ShotSpec,
+        valid_assets: dict[str, AssetRecord],
+    ) -> str:
+        """Replace internal asset IDs with readable reference labels.
+
+        Asset IDs are useful in the JSON IR but are not meaningful to Qwen or
+        creators.  Providers occasionally echo them despite the prompt
+        contract, so scrub them at the final anchor boundary.  Selected images
+        receive their actual ordinal; other IDs are rendered as excluded
+        references rather than accidentally looking like supplied images.
+        """
+
+        selected_images = [
+            valid_assets[asset_id]
+            for asset_id in shot.reference_asset_ids
+            if asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
+        ]
+        replacements: dict[str, str] = {}
+        for reference_index, asset in enumerate(selected_images, start=1):
+            label = (asset.display_name or asset.original_name).strip()
+            replacements[asset.id] = f"参考图{reference_index} {label}"
+        for asset_id, asset in valid_assets.items():
+            if asset_id not in replacements:
+                label = (asset.display_name or asset.original_name).strip()
+                replacements[asset_id] = f"excluded reference {label}"
+        for asset_id in sorted(replacements, key=len, reverse=True):
+            prompt = prompt.replace(asset_id, replacements[asset_id])
+        return prompt
 
     @staticmethod
     def _validate_anchor_bindings(
