@@ -57,6 +57,17 @@ class VllmOmniTextToImageProvider:
         self.model = model
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        # Keep connection establishment bounded while allowing the model's
+        # synchronous generation/read to run for the full configured budget.
+        # Explicit fields make this contract visible (and testable) instead
+        # of relying on httpx's overloaded scalar timeout constructor.
+        connect_timeout = min(30.0, max(0.1, timeout_seconds))
+        self.timeout = httpx.Timeout(
+            connect=connect_timeout,
+            read=timeout_seconds,
+            write=timeout_seconds,
+            pool=connect_timeout,
+        )
         self.steps = steps
         self.true_cfg_scale = true_cfg_scale
         self.guidance_scale = guidance_scale
@@ -87,14 +98,24 @@ class VllmOmniTextToImageProvider:
             payload["negative_prompt"] = request.negative_prompt
         if request.seed is not None:
             payload["seed"] = request.seed
-        async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-            response = await client.post(
-                self._endpoint(),
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            image = await self._extract_image(response, client)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+                response = await client.post(
+                    self._endpoint(),
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                image = await self._extract_image(response, client)
+        except httpx.RequestError as error:
+            # ReadTimeout's string representation is often empty.  Preserve
+            # the concrete exception type so the render job/UI can tell a
+            # stalled upstream apart from a refused connection.
+            detail = str(error).strip() or repr(error)
+            raise RuntimeError(
+                f"text-to-image request failed at {self._endpoint()}: "
+                f"{type(error).__name__}: {detail}"
+            ) from error
         temporary = request.output_path.with_suffix(f"{request.output_path.suffix}.tmp")
         temporary.write_bytes(image)
         temporary.replace(request.output_path)

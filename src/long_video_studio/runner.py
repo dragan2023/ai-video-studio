@@ -317,7 +317,7 @@ class RenderManager:
                 active_shot.render_duration_seconds = round(time.monotonic() - active_started_monotonic, 3)
             self.repository.save_project(project)
             job.status = "failed"
-            job.error = str(error)
+            job.error = self._format_error(error)
             job.message = "render failed"
             job.completed_at = utc_now()
             self.repository.save_job(job)
@@ -331,6 +331,13 @@ class RenderManager:
             if job:
                 active.add(job.project_id)
         return active
+
+    @staticmethod
+    def _format_error(error: BaseException) -> str:
+        """Persist a useful failure even when an exception has no message."""
+
+        detail = str(error).strip() or repr(error)
+        return f"{type(error).__name__}: {detail}"
 
     async def shutdown(self) -> None:
         active = [(job_id, task) for job_id, task in self._tasks.items() if not task.done()]

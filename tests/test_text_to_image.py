@@ -11,6 +11,7 @@ from long_video_studio.adapters.text_to_image import (
     TextToImageRequest,
     VllmOmniTextToImageProvider,
 )
+from long_video_studio.runner import RenderManager
 
 
 def test_vllm_omni_text_to_image_posts_generation_payload(tmp_path):
@@ -118,3 +119,54 @@ def test_text_to_image_rejects_response_without_image(tmp_path):
                 )
             )
         )
+
+
+def test_text_to_image_uses_long_read_budget_and_bounded_connect_timeout():
+    provider = VllmOmniTextToImageProvider(
+        base_url="http://t2i.test",
+        model=None,
+        api_key=None,
+        timeout_seconds=7200,
+        steps=2,
+        true_cfg_scale=1.0,
+        guidance_scale=1.0,
+    )
+
+    assert provider.timeout_seconds == 7200
+    assert provider.timeout.connect == 30
+    assert provider.timeout.read == 7200
+    assert provider.timeout.write == 7200
+
+
+def test_text_to_image_surfaces_timeout_exception_type(tmp_path):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+
+    provider = VllmOmniTextToImageProvider(
+        base_url="http://t2i.test",
+        model=None,
+        api_key=None,
+        timeout_seconds=7200,
+        steps=2,
+        true_cfg_scale=1.0,
+        guidance_scale=1.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RuntimeError, match=r"ReadTimeout"):
+        asyncio.run(
+            provider.generate(
+                TextToImageRequest(
+                    prompt="frame",
+                    output_path=tmp_path / "frame.png",
+                    width=64,
+                    height=64,
+                )
+            )
+        )
+
+
+def test_render_error_formatter_keeps_empty_timeout_type():
+    error = httpx.ReadTimeout("", request=httpx.Request("POST", "http://t2i.test"))
+
+    assert RenderManager._format_error(error).startswith("ReadTimeout:")

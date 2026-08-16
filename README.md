@@ -229,6 +229,9 @@ export STUDIO_T2I_BASE_URL=http://127.0.0.1:8094
 export STUDIO_T2I_STEPS=50
 export STUDIO_T2I_TRUE_CFG_SCALE=4.0
 export STUDIO_T2I_GUIDANCE_SCALE=1.0
+# The vLLM-Omni image endpoint is synchronous; allow long MUSA generations.
+# Connection setup remains bounded separately by the adapter.
+export STUDIO_T2I_TIMEOUT_SECONDS=7200
 ```
 
 Studio calls the OpenAI-compatible `/v1/images/generations` endpoint. The
