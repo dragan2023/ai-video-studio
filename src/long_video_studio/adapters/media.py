@@ -126,10 +126,28 @@ class MediaTools:
         output_path: Path,
         transition_seconds: float = 0.0,
         continuous_boundaries: list[bool] | None = None,
+        scene_transitions: list[str] | None = None,
     ) -> Path:
         if not videos:
             raise ValueError("cannot concatenate an empty video list")
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        if scene_transitions and len(videos) > 1:
+            if len(scene_transitions) != len(videos) - 1:
+                raise ValueError("scene_transitions must have one entry per boundary")
+            if any(style != "hard_cut" for style in scene_transitions):
+                try:
+                    self._concatenate_with_scene_transitions(
+                        videos,
+                        output_path,
+                        transition_seconds=max(0.1, transition_seconds),
+                        transitions=scene_transitions,
+                    )
+                    return output_path
+                except (OSError, subprocess.CalledProcessError, ValueError, json.JSONDecodeError):
+                    # Keep the final movie usable if a host ffmpeg does not
+                    # provide xfade/acrossfade; hard-cut concatenation remains
+                    # a safe fallback.
+                    pass
         boundaries = [True] * (len(videos) - 1) if continuous_boundaries is None else continuous_boundaries
         use_transition = (
             transition_seconds > 0 and len(videos) > 1 and len(boundaries) == len(videos) - 1 and any(boundaries)
@@ -143,6 +161,108 @@ class MediaTools:
                 # capability is unavailable on a host.
                 pass
         return self._concatenate_copy(videos, output_path)
+
+    def _concatenate_with_scene_transitions(
+        self,
+        videos: list[Path],
+        output_path: Path,
+        *,
+        transition_seconds: float,
+        transitions: list[str],
+    ) -> None:
+        """Join independent short-drama shots with video and audio fades."""
+
+        ffmpeg_transitions = {
+            "fade_black": "fadeblack",
+            "dissolve": "dissolve",
+            "fade": "fade",
+        }
+        if any(style not in ffmpeg_transitions for style in transitions):
+            raise ValueError("scene transition must be fade_black, dissolve, or fade")
+
+        durations: list[float] = []
+        filters: list[str] = []
+        for index, video in enumerate(videos):
+            probe = subprocess.run(
+                [
+                    self.ffprobe_binary,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration:stream=codec_type",
+                    "-of",
+                    "json",
+                    str(video),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            metadata = json.loads(probe.stdout)
+            if not any(stream.get("codec_type") == "audio" for stream in metadata.get("streams", [])):
+                raise ValueError("scene transition requires an audio stream")
+            duration = float(metadata["format"]["duration"])
+            if duration <= transition_seconds:
+                raise ValueError("clip is shorter than transition duration")
+            durations.append(duration)
+            filters.append(
+                f"[{index}:v]fps=24,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[v{index}]"
+            )
+            filters.append(
+                f"[{index}:a]asetpts=PTS-STARTPTS,aresample=async=1,"
+                f"aformat=sample_rates=32000:channel_layouts=stereo[a{index}]"
+            )
+
+        video_label = "v0"
+        audio_label = "a0"
+        composed_duration = durations[0]
+        for boundary, style in enumerate(transitions, start=1):
+            next_video = f"vx{boundary}"
+            next_audio = f"ax{boundary}"
+            offset = composed_duration - transition_seconds
+            filters.append(
+                f"[{video_label}][v{boundary}]xfade=transition={ffmpeg_transitions[style]}:"
+                f"duration={transition_seconds:.6f}:offset={offset:.6f}[{next_video}]"
+            )
+            filters.append(
+                f"[{audio_label}][a{boundary}]acrossfade=d={transition_seconds:.6f}:"
+                f"c1=tri:c2=tri[{next_audio}]"
+            )
+            video_label = next_video
+            audio_label = next_audio
+            composed_duration += durations[boundary] - transition_seconds
+
+        command = [self.ffmpeg_binary, "-hide_banner", "-loglevel", "error"]
+        for video in videos:
+            command.extend(["-i", str(video)])
+        command.extend(
+            [
+                "-filter_complex",
+                ";".join(filters),
+                "-map",
+                f"[{video_label}]",
+                "-map",
+                f"[{audio_label}]",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                "-y",
+                str(output_path),
+            ]
+        )
+        subprocess.run(command, check=True, timeout=1800)
 
     def _concatenate_copy(self, videos: list[Path], output_path: Path) -> Path:
         list_path = output_path.with_suffix(".concat.txt")

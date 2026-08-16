@@ -69,14 +69,15 @@ lease, select devices, or terminate a process.
 ## Continuity policy
 
 An explicit creator start frame always wins. Without one, the runtime may
-compose an anchor from project context and ordered references. Continuous
-shots expose three policies: `ultra_fast` extracts the previous boundary frame
-and sends it to FL2VA; `fast` sends the previous clip's final five seconds to
-Ref2VA; and `quality` sends the complete previous clip to Ref2VA. The two
-Ref2VA modes add a non-persistent anti-replay instruction only to those
-continuation requests, so storyboard prompts remain editable and retries
-cannot accumulate duplicate constraints. Real scene cuts can request a new
-anchor.
+compose an anchor from project context and ordered references. `ultra_fast`
+defaults to storyboard anchors: shot 1 uses selected materials through Image
+Edit or falls back to T2I, while shot 2 and later edit the previous final frame
+into a new composition and append selected creator references after it. Every
+shot then runs through FL2VA and the media layer adds a fixed or seeded-random
+transition. Its legacy `boundary` strategy still sends the previous final
+frame directly to FL2VA. `fast` sends the previous clip's final five seconds
+to Ref2VA; `quality` sends the complete previous clip. The two Ref2VA modes add
+a non-persistent anti-replay instruction only to those continuation requests.
 
 The H3 adapter sends `quality=lossless` explicitly by default. This is separate
 from Nautilus's continuation choice: the adapter's quality field selects the

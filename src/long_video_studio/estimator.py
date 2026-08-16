@@ -6,6 +6,7 @@ from statistics import median
 
 from long_video_studio.config import Settings
 from long_video_studio.domain import (
+    ContinuationMode,
     FilmProject,
     ProjectRenderEstimate,
     RenderObservation,
@@ -15,6 +16,7 @@ from long_video_studio.domain import (
     ShotTask,
     effective_video_task,
     resolved_continuation_mode,
+    uses_independent_ultra_fast_anchor,
     utc_now,
 )
 from long_video_studio.repository import StudioRepository
@@ -178,9 +180,14 @@ class RenderEstimator:
         return median(trimmed or samples)
 
     def _runtime_task(self, project: FilmProject, shot: ShotSpec) -> ShotTask:
+        resolved_mode = resolved_continuation_mode(project, shot)
         continuation_mode = (
-            resolved_continuation_mode(project, shot)
-            if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+            resolved_mode
+            if not shot.start_frame_asset_id
+            and (
+                shot.continuity_from_shot_id
+                or resolved_mode == ContinuationMode.ULTRA_FAST
+            )
             else None
         )
         return effective_video_task(
@@ -192,6 +199,8 @@ class RenderEstimator:
 
     @staticmethod
     def _mode(project: FilmProject, shot: ShotSpec) -> str:
+        if uses_independent_ultra_fast_anchor(project, shot):
+            return "ultra_fast"
         if not shot.continuity_from_shot_id:
             return "initial"
         return resolved_continuation_mode(project, shot).value

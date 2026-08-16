@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from pathlib import Path
 
@@ -27,8 +28,11 @@ from long_video_studio.domain import (
     ShotSpec,
     ShotStatus,
     ShotTask,
+    UltraFastAnchorStrategy,
+    UltraFastTransition,
     effective_video_task,
     resolved_continuation_mode,
+    uses_independent_ultra_fast_anchor,
     utc_now,
 )
 from long_video_studio.estimator import RenderEstimator
@@ -166,9 +170,14 @@ class RenderManager:
                 shot.render_completed_at = None
                 shot.render_duration_seconds = None
                 self.repository.save_project(project)
+                resolved_mode = resolved_continuation_mode(project, shot)
                 continuation_mode = (
-                    resolved_continuation_mode(project, shot)
-                    if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+                    resolved_mode
+                    if not shot.start_frame_asset_id
+                    and (
+                        shot.continuity_from_shot_id
+                        or resolved_mode == ContinuationMode.ULTRA_FAST
+                    )
                     else None
                 )
                 runtime_task = effective_video_task(
@@ -286,15 +295,26 @@ class RenderManager:
                 active_started_monotonic = None
 
             final_path = output_dir / "final.mp4"
-            continuous_boundaries = [
-                bool(shot.continuity_from_shot_id and not shot.start_frame_asset_id) for shot in project.shots[1:]
-            ]
+            scene_transitions = self._ultra_fast_scene_transitions(project)
+            continuous_boundaries = (
+                [False] * max(0, len(project.shots) - 1)
+                if scene_transitions is not None
+                else [
+                    bool(shot.continuity_from_shot_id and not shot.start_frame_asset_id)
+                    for shot in project.shots[1:]
+                ]
+            )
             await asyncio.to_thread(
                 self.media.concatenate,
                 rendered,
                 final_path,
-                self.settings.transition_seconds,
-                continuous_boundaries,
+                transition_seconds=(
+                    project.brief.ultra_fast_transition_seconds
+                    if scene_transitions is not None
+                    else self.settings.transition_seconds
+                ),
+                continuous_boundaries=continuous_boundaries,
+                scene_transitions=scene_transitions,
             )
             subtitle_path = self._write_sidecar_subtitles(project, output_dir)
             project.status = "complete"
@@ -338,6 +358,27 @@ class RenderManager:
 
         detail = str(error).strip() or repr(error)
         return f"{type(error).__name__}: {detail}"
+
+    @staticmethod
+    def _ultra_fast_scene_transitions(project: FilmProject) -> list[str] | None:
+        brief = project.brief
+        if (
+            brief.continuation_mode != ContinuationMode.ULTRA_FAST
+            or brief.ultra_fast_anchor_strategy != UltraFastAnchorStrategy.INDEPENDENT
+        ):
+            return None
+        boundary_count = max(0, len(project.shots) - 1)
+        if brief.ultra_fast_transition == UltraFastTransition.HARD_CUT:
+            return ["hard_cut"] * boundary_count
+        if brief.ultra_fast_transition == UltraFastTransition.FADE_BLACK:
+            return ["fade_black"] * boundary_count
+        if brief.ultra_fast_transition == UltraFastTransition.DISSOLVE:
+            return ["dissolve"] * boundary_count
+        rng = random.Random(f"{project.id}:ultra-fast-transitions")
+        return [
+            rng.choice(("fade_black", "dissolve", "fade"))
+            for _ in range(boundary_count)
+        ]
 
     async def shutdown(self) -> None:
         active = [(job_id, task) for job_id, task in self._tasks.items() if not task.done()]
@@ -466,20 +507,28 @@ class RenderManager:
         mode = self.settings.image_edit_anchor_mode
         if mode not in IMAGE_EDIT_ANCHOR_MODES:
             raise RuntimeError(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {mode}")
+        is_ultra_independent = uses_independent_ultra_fast_anchor(project, shot)
         if (
             shot.continuity_from_shot_id
             and not shot.start_frame_asset_id
             and resolved_continuation_mode(project, shot) == ContinuationMode.ULTRA_FAST
+            and not is_ultra_independent
         ):
-            # 极速续写 is intentionally a pure boundary-frame -> FL2VA path.
-            # Do not insert an Image Edit/T2I anchor between adjacent clips.
+            # Preserve the legacy boundary-frame -> FL2VA strategy when the
+            # creator explicitly selects it.
             return None
-        if not anchor_selected(shot, position, mode):
+        if not is_ultra_independent and not anchor_selected(shot, position, mode):
             return None
         if not shot.anchor_prompt:
             raise RuntimeError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
 
-        references = self._anchor_references(shot, boundary_frames)
+        references = self._anchor_references(
+            shot,
+            boundary_frames,
+            # In independent ultra-fast mode the previous boundary is edited
+            # into a new composition; it is not used directly as FL2VA input.
+            include_boundary=True,
+        )
         anchor_path = output_dir / f"shot-{position + 1:03d}-anchor.png"
         width = {"16:9": 1280, "9:16": 720, "1:1": 1024}[project.brief.aspect_ratio]
         height = {"16:9": 720, "9:16": 1280, "1:1": 1024}[project.brief.aspect_ratio]
@@ -533,6 +582,8 @@ class RenderManager:
         self,
         shot,
         boundary_frames: dict[str, Path],
+        *,
+        include_boundary: bool = True,
     ) -> list[ImageEditReference]:
         references: list[ImageEditReference] = []
         seen: set[Path] = set()
@@ -544,7 +595,11 @@ class RenderManager:
             seen.add(resolved)
             references.append(ImageEditReference(path, label, role, tags, caption))
 
-        if shot.continuity_from_shot_id and shot.continuity_from_shot_id in boundary_frames:
+        if (
+            include_boundary
+            and shot.continuity_from_shot_id
+            and shot.continuity_from_shot_id in boundary_frames
+        ):
             add(boundary_frames[shot.continuity_from_shot_id], "previous shot boundary", "continuity")
         if shot.start_frame_asset_id:
             asset = self.repository.get_asset(shot.start_frame_asset_id)

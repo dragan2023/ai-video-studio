@@ -13,6 +13,7 @@ from long_video_studio.assets import AssetService
 from long_video_studio.domain import (
     AssetRole,
     AssetUpdate,
+    ContinuationMode,
     FilmProject,
     ProjectBrief,
     ShotSpec,
@@ -198,6 +199,68 @@ def test_zero_material_anchor_uses_text_to_image_only(settings):
     assert text_to_image.request.negative_prompt == shot.negative_prompt
     assert text_to_image.request.seed == 23
     assert (text_to_image.request.width, text_to_image.request.height) == (1280, 720)
+
+
+def test_ultra_fast_edits_previous_boundary_into_a_fresh_anchor(settings, tmp_path):
+    configured = replace(settings, image_edit_anchor_mode="first-shot")
+    repository = StudioRepository(configured.database_path)
+    first = ShotSpec(
+        index=0,
+        title="Scene one",
+        purpose="Open the story",
+        prompt="A detective enters a rain-soaked alley.",
+        anchor_prompt="A detective at the entrance to a rain-soaked alley, cinematic 16:9.",
+        duration_seconds=4,
+        task=ShotTask.FL2VA,
+    )
+    second = ShotSpec(
+        index=1,
+        title="Scene two",
+        purpose="Reveal the suspect",
+        prompt="Inside a bright cafe, the suspect opens a sealed letter.",
+        anchor_prompt="A bright cafe interior; the suspect opens a sealed letter, cinematic 16:9.",
+        duration_seconds=4,
+        task=ShotTask.FL2VA,
+        continuity_from_shot_id=first.id,
+    )
+    project = repository.save_project(
+        FilmProject(
+            brief=ProjectBrief(
+                prompt="A detective short drama.",
+                duration_seconds=15,
+                continuation_mode=ContinuationMode.ULTRA_FAST,
+            ),
+            world_bible=WorldBible(logline="A sealed letter", visual_style="cinematic"),
+            shots=[first, second],
+        )
+    )
+    previous_boundary = tmp_path / "previous-boundary.png"
+    previous_boundary.write_bytes(png_bytes("green").getvalue())
+    image_edit = FakeImageEditProvider()
+    text_to_image = FakeTextToImageProvider()
+    manager = RenderManager(configured, repository)
+    manager.image_edit_provider = image_edit
+    manager.text_to_image_provider = text_to_image
+    output_dir = configured.output_dir / project.id
+    output_dir.mkdir(parents=True)
+
+    anchor = asyncio.run(
+        manager._maybe_make_anchor(
+            project,
+            second,
+            1,
+            {first.id: previous_boundary},
+            output_dir,
+        )
+    )
+
+    assert anchor == output_dir / "shot-002-anchor.png"
+    assert image_edit.request is not None
+    assert [reference.path for reference in image_edit.request.references] == [
+        previous_boundary
+    ]
+    assert image_edit.request.prompt == second.anchor_prompt
+    assert text_to_image.request is None
 
 
 def test_explicit_start_frame_bypasses_image_edit(settings):

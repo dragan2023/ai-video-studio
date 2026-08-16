@@ -327,9 +327,12 @@ model endpoint and must include the exact model revision and artifacts.
 Creator projects expose three continuation modes without surfacing provider
 internals:
 
-- `ultra_fast`: extract the previous clip's final boundary frame and send it
-  to FL2VA for the next shot. This is the fastest path and deliberately uses
-  less temporal context;
+- `ultra_fast`: generate a storyboard-specific opening frame for every FL2VA
+  shot. Shot 1 uses selected materials through Image Edit, or T2I with no
+  materials; later shots use the previous final frame as Image Edit reference
+  1, followed by selected creator images. The editor then joins shots with a
+  fixed or deterministic-random transition. A legacy direct boundary-frame
+  strategy remains selectable;
 - `fast` (legacy API compatibility default; the UI defaults to `quality`):
   send the previous clip's final five seconds to Ref2VA;
 - `quality`: send the complete previous clip to Ref2VA.
@@ -338,6 +341,10 @@ The two Ref2VA modes append an ephemeral "continue after the final moment; do
 not replay" constraint to clip 1 and later. The constraint is never persisted
 into the editable storyboard prompt. An explicit start frame still wins and
 uses the FL2VA path.
+
+Ultra-fast therefore needs only Qwen Image, Qwen Image Edit, and MiniMax-H3
+FL2VA. Its default `fade_black` edit can be changed to `dissolve`, `hard_cut`,
+or deterministic `random`; the default transition duration is 0.6 seconds.
 
 To compare a boundary-frame FL2VA candidate with full-reference and tail-
 reference Ref2VA candidates, preserve the three source files and build one

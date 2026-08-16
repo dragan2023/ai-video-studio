@@ -19,6 +19,7 @@ from long_video_studio.domain import (
     AssetKind,
     AssetRecord,
     AssetRole,
+    ContinuationMode,
     ContinuityState,
     DialogueLine,
     FilmProject,
@@ -29,6 +30,7 @@ from long_video_studio.domain import (
     StoryboardBeat,
     SubjectCard,
     TransitionKind,
+    UltraFastAnchorStrategy,
     WorldBible,
 )
 from long_video_studio.h3_context import sanitize_audio_prompt
@@ -585,6 +587,28 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             f"\n\nSelected directing preset / global style contract:\n"
             f"{style_prompt(brief.style_preset, brief.style_instructions)}"
         )
+        if (
+            brief.continuation_mode == ContinuationMode.ULTRA_FAST
+            and brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
+        ):
+            system_prompt += """
+
+Ultra-fast short-drama anchor policy:
+- Every shot is FL2VA and receives a newly generated opening image.
+- Shot 1 uses selected image materials through Image Edit; with no selected
+  images it uses a complete standalone T2I anchor_prompt.
+- Shot 2 and later always use Image Edit. Reference image 1 is the previous
+  shot's final frame. Selected creator images follow as Reference 2, Reference
+  3, and so on in request order.
+- Later anchor_prompt text must preserve recurring face identity, hairstyle,
+  wardrobe, props, and world details from the references while explicitly
+  changing only the new shot's setting, composition, pose, expression, and
+  zero-second action state.
+- reference_asset_ids contains only creator assets; do not add a synthetic ID
+  for the previous final frame. Still mention it as 参考图1 上一镜末帧 in the
+  anchor_prompt. If there are no creator assets, later shots still use 参考图1
+  and must not be written as standalone T2I prompts.
+""".strip()
         custom_style = brief.style.strip()
         if custom_style and custom_style.casefold() not in {
             brief.style_preset.casefold(),
@@ -906,12 +930,22 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
 
     @staticmethod
     def _director_system_prompt(brief: ProjectBrief, style_contract: str) -> str:
+        continuity_contract = (
+            "Plan each shot as a self-contained short-drama scene with its own explicit zero-second composition; "
+            "preserve identity and story causality across cuts, but do not require the next opening pose or camera "
+            "layout to match the previous final frame."
+            if (
+                brief.continuation_mode == ContinuationMode.ULTRA_FAST
+                and brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
+            )
+            else "Define the exact ending state that each next shot must inherit."
+        )
         return (
             "You are the Creative Director for a creator-facing long-video studio. This is stage 1 of 3. "
             "Turn the user's premise into a causal visual spine and a canonical World Bible. Establish stable "
             "character identities, stable subject IDs/aliases, wardrobe, props, locations, fixed landmarks, lighting, "
-            "camera axis, "
-            "audio bed, and the exact ending state that each next shot must inherit. Plan 4-14 second shots; "
+            "camera axis, audio bed. "
+            f"{continuity_contract} Plan 4-14 second shots; "
             "never plan 15 seconds. Do not write final model prompts yet: make each shot's title, purpose, active "
             "subjects, opening/ending state, incoming/outgoing handoff, audio phase, transition kind, and one hook "
             "unambiguous. Bind each SubjectCard to the relevant reference_asset_ids and speaker_id when known; "
@@ -934,13 +968,37 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         needs_generated_anchor: bool,
         has_reference_images: bool = False,
     ) -> str:
-        mode = (
-            "This is the opening shot: begin exactly from the supplied/generated first-frame composition and "
-            "make the first 0.5-1.0 seconds readable."
-            if is_first
-            else "This is a continuation shot: begin after the prior clip's settled final moment, hold that state "
-            "for 0.5-1.0 seconds, then advance one new action; never replay or summarize the prior action."
+        ultra_independent = (
+            brief.continuation_mode == ContinuationMode.ULTRA_FAST
+            and brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
         )
+        if ultra_independent:
+            if is_first:
+                mode = (
+                    "This is the first independent short-drama shot. Its opening image comes from selected creator "
+                    "materials via Image Edit, or from text-to-image when no materials are selected. Write a complete "
+                    "zero-second anchor_prompt that establishes every recurring character, wardrobe, location, "
+                    "lighting, and camera composition."
+                )
+            else:
+                mode = (
+                    "This is a later independent short-drama shot. Its opening image is created with Image Edit: "
+                    "reference image 1 is the previous shot's final frame, followed by any selected character/scene "
+                    "materials. The anchor_prompt must explicitly preserve recurring identities, faces, wardrobe, "
+                    "and world details from the references while transforming camera, setting, pose, and action into "
+                    "this shot's new zero-second composition. Do not ask for a literal copy of the previous frame; "
+                    "the edit transition will bridge the two shots."
+                )
+        elif is_first:
+            mode = (
+                "This is the opening shot: begin exactly from the supplied/generated first-frame composition and "
+                "make the first 0.5-1.0 seconds readable."
+            )
+        else:
+            mode = (
+                "This is a continuation shot: begin after the prior clip's settled final moment, hold that state "
+                "for 0.5-1.0 seconds, then advance one new action; never replay or summarize the prior action."
+            )
         if needs_generated_anchor and has_reference_images:
             anchor_instruction = (
                 "No explicit start-frame asset is selected for this shot. You MUST populate anchor_prompt with a "
@@ -979,14 +1037,27 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
 
     @staticmethod
     def _continuity_critic_system_prompt(brief: ProjectBrief, style_contract: str, h3_rules: str) -> str:
+        continuity_contract = (
+            "For ultra-fast independent shots, preserve identity, wardrobe, story causality, and world details, "
+            "but allow a new camera composition and opening pose at each cut. Require a complete self-contained "
+            "anchor_prompt for every shot without an explicit creator start frame. The first shot may use selected "
+            "materials or text-to-image; every later shot must treat the previous final frame as reference image 1 "
+            "and describe an identity-preserving edit into the next scene."
+            if (
+                brief.continuation_mode == ContinuationMode.ULTRA_FAST
+                and brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
+            )
+            else "A continuation opening must match the previous ending, hold briefly, and move into a new action "
+            "without replaying the preceding beat."
+        )
         return (
             "You are the Continuity Director and final H3 storyboard editor. This is stage 3 of 3. Review every "
             "shot as an adjacent pair, then return the complete PlannerOutput JSON. Preserve each shot's strongest "
             "creative detail while repairing only continuity: stable identity/aliases, wardrobe, fixed landmarks, "
             "screen positions, eyelines, props/contact, lighting direction, camera axis, motion direction, action "
             "phase, audio bed, and dialogue speaker binding. A subject that exits must stay off screen until a "
-            "planned re-entry. A continuation opening must match the previous ending, hold briefly, and move into a "
-            "new action without replaying the preceding beat. Keep each shot 4-14 seconds, preserve complete visual "
+            "planned re-entry. "
+            f"{continuity_contract} Keep each shot 4-14 seconds, preserve complete visual "
             "beat coverage, and keep visual/audio/dialogue fields separate. Do not shorten rich prompts merely to "
             "make them uniform. All model-facing prose remains English.\n\n"
             f"Immutable global style contract:\n{style_contract}\n\n"
@@ -1654,6 +1725,10 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         prompts: set[str] = set()
         previous: ShotSpec | None = None
         normalized: list[ShotSpec] = []
+        ultra_independent_project = (
+            brief.continuation_mode == ContinuationMode.ULTRA_FAST
+            and brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
+        )
         for index, original in enumerate(output.shots):
             shot = original.model_copy(deep=True)
             shot.index = index
@@ -1677,6 +1752,31 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             self._validate_h3_language_contract(shot, output.world_bible)
             if shot.task == ShotTask.REF2VA and not (image_ids and media_ids):
                 shot.task = ShotTask.FL2VA
+            if ultra_independent_project and not shot.start_frame_asset_id:
+                # 极速短剧 shots are intentionally self-contained FL2VA
+                # scenes.  Narrative continuity remains in the storyboard,
+                # while visual continuity is handled by the edit transition.
+                shot.task = ShotTask.FL2VA
+                shot.continuation_mode = ContinuationMode.ULTRA_FAST
+                shot.continuity_from_shot_id = previous.id if previous else None
+                shot.transition_kind = (
+                    TransitionKind.ANCHOR if index == 0 else TransitionKind.HARD_CUT
+                )
+                image_budget = max(
+                    0,
+                    self.settings.image_edit_max_references
+                    - (1 if shot.continuity_from_shot_id else 0),
+                )
+                kept_image_ids: list[str] = []
+                bounded_references: list[str] = []
+                for asset_id in shot.reference_asset_ids:
+                    asset = valid_assets[asset_id]
+                    if asset.kind != AssetKind.IMAGE:
+                        bounded_references.append(asset_id)
+                    elif len(kept_image_ids) < image_budget:
+                        kept_image_ids.append(asset_id)
+                        bounded_references.append(asset_id)
+                shot.reference_asset_ids = bounded_references
             if (
                 index > 0
                 and not shot.start_frame_asset_id
@@ -1689,12 +1789,18 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                 # shot was overwritten into Ref2VA, which made scene-cuts
                 # anchors unreachable and caused avoidable identity jumps.
                 shot.continuity_from_shot_id = previous.id
-            if self._is_explicit_scene_cut(shot) and not shot.start_frame_asset_id:
+            if (
+                self._is_explicit_scene_cut(shot)
+                and not shot.start_frame_asset_id
+                and not ultra_independent_project
+            ):
                 # A deliberate cut must remain independent.  The optional
                 # Image Edit stage can provide its anchor; without it the
                 # compiler will surface the missing capability explicitly.
                 shot.continuity_from_shot_id = None
-            needs_anchor = anchor_selected(
+            needs_anchor = (
+                ultra_independent_project and not shot.start_frame_asset_id
+            ) or anchor_selected(
                 shot,
                 index,
                 self.settings.image_edit_anchor_mode,
@@ -1703,7 +1809,9 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                 asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
                 for asset_id in shot.reference_asset_ids
             )
-            uses_image_edit = has_image_references or bool(shot.continuity_from_shot_id)
+            uses_image_edit = has_image_references or bool(
+                shot.continuity_from_shot_id
+            )
             anchor_provider_configured = (
                 image_edit_configured if uses_image_edit else text_to_image_configured
             )
@@ -1718,7 +1826,7 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                     shot=shot,
                     assets=assets,
                 )
-            if needs_anchor and image_edit_configured and has_image_references:
+            if needs_anchor and uses_image_edit:
                 # The model may describe references using the global asset
                 # order (for example, "the third reference") and the
                 # continuity critic may then drop unrelated assets.  At this
@@ -1726,8 +1834,17 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
                 # sent to Image Edit, so repair the human-readable manifest
                 # against that final order instead of rejecting an otherwise
                 # useful storyboard after all planner stages have completed.
-                shot.anchor_prompt = self._ensure_anchor_bindings(shot, valid_assets)
-                self._validate_anchor_bindings(shot, valid_assets)
+                continuity_reference = bool(shot.continuity_from_shot_id)
+                shot.anchor_prompt = self._ensure_anchor_bindings(
+                    shot,
+                    valid_assets,
+                    continuity_reference=continuity_reference,
+                )
+                self._validate_anchor_bindings(
+                    shot,
+                    valid_assets,
+                    continuity_reference=continuity_reference,
+                )
             elif needs_anchor:
                 shot.anchor_prompt = self._limit_anchor_prompt(shot.anchor_prompt)
             if not needs_anchor:
@@ -1982,14 +2099,24 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
     def _anchor_binding_manifest(
         shot: ShotSpec,
         valid_assets: dict[str, AssetRecord],
+        *,
+        continuity_reference: bool = False,
     ) -> tuple[list[AssetRecord], str]:
         image_assets = [
             valid_assets[asset_id]
             for asset_id in shot.reference_asset_ids
             if asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
         ]
-        bindings = []
-        for reference_index, asset in enumerate(image_assets, start=1):
+        bindings = (
+            ["参考图1 上一镜末帧 (continuity)"]
+            if continuity_reference
+            else []
+        )
+        first_asset_index = 2 if continuity_reference else 1
+        for reference_index, asset in enumerate(
+            image_assets,
+            start=first_asset_index,
+        ):
             label = (asset.display_name or asset.original_name).strip()
             roles = ", ".join(role.value for role in asset.roles) or "reference"
             bindings.append(f"参考图{reference_index} {label} ({roles})")
@@ -2000,6 +2127,8 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         cls,
         shot: ShotSpec,
         valid_assets: dict[str, AssetRecord],
+        *,
+        continuity_reference: bool = False,
     ) -> str:
         """Repair reference labels after the agent changes the asset subset.
 
@@ -2015,12 +2144,25 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             cls._clean_generation_prompt(shot.anchor_prompt),
             shot,
             valid_assets,
+            reference_offset=1 if continuity_reference else 0,
         )
-        image_assets, manifest = cls._anchor_binding_manifest(shot, valid_assets)
-        if not image_assets:
+        image_assets, manifest = cls._anchor_binding_manifest(
+            shot,
+            valid_assets,
+            continuity_reference=continuity_reference,
+        )
+        if not image_assets and not continuity_reference:
             return cls._limit_anchor_prompt(prompt)
         missing = []
-        for reference_index, asset in enumerate(image_assets, start=1):
+        if continuity_reference and (
+            "参考图1" not in prompt or "上一镜末帧" not in prompt
+        ):
+            missing.append((1, "上一镜末帧"))
+        first_asset_index = 2 if continuity_reference else 1
+        for reference_index, asset in enumerate(
+            image_assets,
+            start=first_asset_index,
+        ):
             label = (asset.display_name or asset.original_name).strip()
             if f"参考图{reference_index}" not in prompt or label not in prompt:
                 missing.append((reference_index, label))
@@ -2033,6 +2175,8 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
         prompt: str,
         shot: ShotSpec,
         valid_assets: dict[str, AssetRecord],
+        *,
+        reference_offset: int = 0,
     ) -> str:
         """Replace internal asset IDs with readable reference labels.
 
@@ -2049,7 +2193,10 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
             if asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
         ]
         replacements: dict[str, str] = {}
-        for reference_index, asset in enumerate(selected_images, start=1):
+        for reference_index, asset in enumerate(
+            selected_images,
+            start=1 + reference_offset,
+        ):
             label = (asset.display_name or asset.original_name).strip()
             replacements[asset.id] = f"参考图{reference_index} {label}"
         for asset_id, asset in valid_assets.items():
@@ -2064,13 +2211,27 @@ they are not an opening frame and must not be promoted to start_frame_asset_id.
     def _validate_anchor_bindings(
         shot: ShotSpec,
         valid_assets: dict[str, AssetRecord],
+        *,
+        continuity_reference: bool = False,
     ) -> None:
         image_assets = [
             valid_assets[asset_id]
             for asset_id in shot.reference_asset_ids
             if asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
         ]
-        for reference_index, asset in enumerate(image_assets, start=1):
+        if continuity_reference:
+            required = ("参考图1", "上一镜末帧")
+            missing = [value for value in required if value not in shot.anchor_prompt]
+            if missing:
+                raise ValueError(
+                    f"AI planner anchor_prompt for shot {shot.index + 1} omitted "
+                    f"continuity reference binding: {', '.join(missing)}"
+                )
+        first_asset_index = 2 if continuity_reference else 1
+        for reference_index, asset in enumerate(
+            image_assets,
+            start=first_asset_index,
+        ):
             label = (asset.display_name or asset.original_name).strip()
             required = (f"参考图{reference_index}", label)
             missing = [value for value in required if value not in shot.anchor_prompt]

@@ -20,6 +20,7 @@ from long_video_studio.domain import (
     ShotSpec,
     ShotTask,
     TransitionKind,
+    UltraFastAnchorStrategy,
     WorldBible,
 )
 from long_video_studio.planner import DirectorPlan, PlannerOutput, PlannerService, ShotBlueprint
@@ -625,6 +626,7 @@ def test_compiler_quality_continuation_uses_full_clip_ref2va(settings):
 def test_compiler_ultra_fast_continuation_routes_boundary_frame_to_fl2va(settings):
     project = _anchor_mode_project()
     project.brief.continuation_mode = ContinuationMode.ULTRA_FAST
+    project.brief.ultra_fast_anchor_strategy = UltraFastAnchorStrategy.BOUNDARY
 
     plan = FilmCompiler(_configured_image_edit(settings, "every-shot")).compile(project)
     stage = next(item for item in plan.stages if item.kind == "video" and item.shot_id == project.shots[1].id)
@@ -636,6 +638,25 @@ def test_compiler_ultra_fast_continuation_routes_boundary_frame_to_fl2va(setting
     ]
     assert not any(item.kind == "keyframe" and item.shot_id == project.shots[1].id for item in plan.stages)
     assert any("极速续写" in warning for warning in plan.warnings)
+
+
+def test_compiler_ultra_fast_defaults_to_independent_fl2va_anchors(settings):
+    project = _anchor_mode_project()
+    project.brief.continuation_mode = ContinuationMode.ULTRA_FAST
+    for shot in project.shots:
+        shot.anchor_prompt = f"Independent opening still for {shot.title}, cinematic 16:9."
+
+    plan = FilmCompiler(_configured_image_edit(settings, "first-shot")).compile(project)
+    keyframes = [stage for stage in plan.stages if stage.kind == "keyframe"]
+    videos = [stage for stage in plan.stages if stage.kind == "video"]
+
+    assert {stage.shot_id for stage in keyframes} == {shot.id for shot in project.shots}
+    assert all(stage.capability_id == "minimax-h3-fl2va" for stage in videos)
+    second_keyframe = next(stage for stage in keyframes if stage.shot_id == project.shots[1].id)
+    first_video = next(stage for stage in videos if stage.shot_id == project.shots[0].id)
+    assert second_keyframe.depends_on == [first_video.id]
+    assert second_keyframe.capability_id == "qwen-image-edit"
+    assert any("fresh opening frame" in warning for warning in plan.warnings)
 
 
 def test_compiler_keeps_fl2va_as_unconfigured_ref2va_fallback(settings):
@@ -1117,6 +1138,67 @@ def test_planner_repairs_anchor_bindings_using_final_reference_order(settings):
     assert prompt.index("参考图1 第二角色") < prompt.index("参考图2 第一角色")
     assert second.id not in prompt
     assert first.id not in prompt
+
+
+def test_ultra_fast_later_shot_binds_previous_boundary_before_assets(settings):
+    configured = replace(
+        settings,
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://image-edit.test",
+        image_edit_model="Qwen-Image-Edit-2511",
+    )
+    repository = StudioRepository(configured.database_path)
+    assets = AssetService(configured, repository)
+    actor = assets.ingest_stream(
+        png_bytes("blue"),
+        "actor.png",
+        "image/png",
+        roles=[AssetRole.CHARACTER],
+    )
+    actor = assets.update(actor.id, AssetUpdate(display_name="女主角"))
+    planner = PlannerService(configured, repository)
+    brief = ProjectBrief(
+        prompt="女主角从街道进入咖啡馆。",
+        duration_seconds=28,
+        reference_asset_ids=[actor.id],
+        continuation_mode=ContinuationMode.ULTRA_FAST,
+    )
+    output = planner._plan_heuristically(brief, [actor])
+    for index, shot in enumerate(output.shots):
+        shot.anchor_prompt = (
+            f"保留女主角身份，为第 {index + 1} 镜建立新的电影中景构图。"
+        )
+
+    normalized = planner._normalize_agent_output(output, brief, [actor])
+    second = normalized.shots[1]
+
+    assert second.continuity_from_shot_id == normalized.shots[0].id
+    assert "参考图1 上一镜末帧" in second.anchor_prompt
+    assert "参考图2 女主角" in second.anchor_prompt
+    assert second.anchor_prompt.index("参考图1") < second.anchor_prompt.index("参考图2")
+
+
+def test_ultra_fast_without_materials_uses_t2i_then_previous_boundary_edit(settings):
+    planner = PlannerService(settings, StudioRepository(settings.database_path))
+    brief = ProjectBrief(
+        prompt="一名侦探从雨夜街道走进明亮咖啡馆。",
+        duration_seconds=28,
+        continuation_mode=ContinuationMode.ULTRA_FAST,
+    )
+    output = planner._plan_heuristically(brief, [])
+    for index, shot in enumerate(output.shots):
+        shot.anchor_prompt = f"第 {index + 1} 镜的完整零秒构图。"
+
+    normalized = planner._normalize_agent_output(output, brief, [])
+    first, second = normalized.shots[:2]
+
+    assert first.continuity_from_shot_id is None
+    assert "参考图1" not in first.anchor_prompt
+    assert second.continuity_from_shot_id == first.id
+    assert "参考图1 上一镜末帧" in second.anchor_prompt
+    assert "参考图2" not in second.anchor_prompt
+    assert first.task == ShotTask.FL2VA
+    assert second.task == ShotTask.FL2VA
 
 
 def test_planner_anchor_binding_repair_preserves_budget_and_is_idempotent(settings):

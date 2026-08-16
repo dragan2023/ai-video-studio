@@ -37,12 +37,28 @@ class AssetRole(str, Enum):
 class ContinuationMode(str, Enum):
     """Creator-facing trade-off for extending an already rendered clip."""
 
-    # Boundary-frame FL2VA is intentionally separate from the two Ref2VA
-    # policies.  Keep the stable value explicit so persisted projects can
-    # select this path without depending on endpoint availability.
+    # FL2VA-only generation is intentionally separate from the two Ref2VA
+    # policies.  The project may either generate a fresh shot anchor (default)
+    # or reuse the previous boundary frame for compatibility.
     ULTRA_FAST = "ultra_fast"
     FAST = "fast"
     QUALITY = "quality"
+
+
+class UltraFastAnchorStrategy(str, Enum):
+    """How an ultra-fast FL2VA shot obtains its opening frame."""
+
+    INDEPENDENT = "independent"
+    BOUNDARY = "boundary"
+
+
+class UltraFastTransition(str, Enum):
+    """Project-level edit applied between independent ultra-fast shots."""
+
+    FADE_BLACK = "fade_black"
+    DISSOLVE = "dissolve"
+    HARD_CUT = "hard_cut"
+    RANDOM = "random"
 
 
 class AssetRecord(BaseModel):
@@ -139,6 +155,9 @@ class ProjectBrief(BaseModel):
     quality: Literal["draft", "final"] = "draft"
     subtitle_mode: Literal["none", "sidecar"] = "none"
     continuation_mode: ContinuationMode = ContinuationMode.FAST
+    ultra_fast_anchor_strategy: UltraFastAnchorStrategy = UltraFastAnchorStrategy.INDEPENDENT
+    ultra_fast_transition: UltraFastTransition = UltraFastTransition.FADE_BLACK
+    ultra_fast_transition_seconds: float = Field(default=0.6, ge=0.1, le=2.0)
 
 
 class ContinuityState(BaseModel):
@@ -347,6 +366,16 @@ def resolved_continuation_mode(project: FilmProject, shot: ShotSpec) -> Continua
     return shot.continuation_mode or project.brief.continuation_mode
 
 
+def uses_independent_ultra_fast_anchor(project: FilmProject, shot: ShotSpec) -> bool:
+    """Return whether this shot should receive a fresh FL2VA opening frame."""
+
+    return (
+        resolved_continuation_mode(project, shot) == ContinuationMode.ULTRA_FAST
+        and project.brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
+        and not shot.start_frame_asset_id
+    )
+
+
 def effective_video_task(
     shot: ShotSpec,
     *,
@@ -364,14 +393,13 @@ def effective_video_task(
 
     if shot.start_frame_asset_id:
         return ShotTask.FL2VA
+    if continuation_mode == ContinuationMode.ULTRA_FAST:
+        # Both ultra-fast strategies are FL2VA-only.  Independent shots may
+        # intentionally have no continuity_from_shot_id at all.
+        return ShotTask.FL2VA
     is_generated_clip_continuation = bool(shot.continuity_from_shot_id)
     if not is_generated_clip_continuation:
         return shot.task
-    if continuation_mode == ContinuationMode.ULTRA_FAST:
-        # This mode deliberately uses the previous shot's extracted boundary
-        # frame as FL2VA's start frame.  Do not promote it to Ref2VA merely
-        # because a Ref2VA endpoint happens to be configured.
-        return ShotTask.FL2VA
     if shot.task == ShotTask.REF2VA or ref2va_configured:
         return ShotTask.REF2VA
     if fl2va_configured:

@@ -540,6 +540,9 @@ def test_project_and_shot_dialog_updates_persist_and_invalidate_old_take(setting
                 "style_preset": "custom",
                 "style_instructions": "Soft tungsten pools, patient camera, tactile grain.",
                 "continuation_mode": "quality",
+                "ultra_fast_anchor_strategy": "boundary",
+                "ultra_fast_transition": "dissolve",
+                "ultra_fast_transition_seconds": 0.8,
             },
             "world_bible": {
                 "logline": "The glowing prop changes the room's mood.",
@@ -554,6 +557,9 @@ def test_project_and_shot_dialog_updates_persist_and_invalidate_old_take(setting
     assert updated["brief"]["title"] == "Edited title"
     assert updated["brief"]["style_instructions"].startswith("Soft tungsten")
     assert updated["brief"]["continuation_mode"] == "quality"
+    assert updated["brief"]["ultra_fast_anchor_strategy"] == "boundary"
+    assert updated["brief"]["ultra_fast_transition"] == "dissolve"
+    assert updated["brief"]["ultra_fast_transition_seconds"] == 0.8
     assert updated["world_bible"]["character_notes"] == ["The creator wears a blue jacket."]
 
     shot_update = client.patch(

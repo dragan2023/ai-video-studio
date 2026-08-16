@@ -127,8 +127,8 @@ const continuationModeOptions = [
   {
     id: "ultra_fast",
     label: "极速续写",
-    hint: "只取上一镜最后一帧 · FL2VA · 最快，连续性较弱",
-    dialogHint: "只取上一镜最后一帧（连续性较弱）",
+    hint: "每镜生成分镜首帧 · FL2VA · 适合约 15 秒短剧分镜",
+    dialogHint: "末帧 Image Edit 成新首帧 + 剪辑转场",
   },
   {
     id: "fast",
@@ -142,6 +142,26 @@ const continuationModeOptions = [
     hint: "参考完整上一镜 · Ref2VA · 上下文最完整",
     dialogHint: "参考完整上一镜",
   },
+];
+
+const ultraFastAnchorOptions = [
+  {
+    id: "independent",
+    label: "分镜首帧",
+    hint: "默认 · 首镜按素材/T2I，后续以上一镜末帧 Image Edit 成新场景",
+  },
+  {
+    id: "boundary",
+    label: "末帧承接",
+    hint: "兼容模式 · 上一镜末帧直接作为下一镜首帧",
+  },
+];
+
+const ultraFastTransitionOptions = [
+  { id: "fade_black", label: "黑场淡入淡出" },
+  { id: "dissolve", label: "溶解" },
+  { id: "hard_cut", label: "硬切" },
+  { id: "random", label: "随机" },
 ];
 
 const continuationModeMeta = (mode) =>
@@ -205,8 +225,13 @@ function resolvedContinuationMode(project, shot) {
   );
 }
 
+function ultraFastAnchorStrategy(project) {
+  return project?.brief?.ultra_fast_anchor_strategy || "independent";
+}
+
 function runtimeShotTask(project, shot) {
   if (shot?.start_frame_asset_id) return "fl2va";
+  if (resolvedContinuationMode(project, shot) === "ultra_fast") return "fl2va";
   if (shot?.continuity_from_shot_id) {
     const mode = resolvedContinuationMode(project, shot);
     return mode === "ultra_fast" ? "fl2va" : "ref2va";
@@ -217,17 +242,30 @@ function runtimeShotTask(project, shot) {
 function runtimeShotLabel(project, shot) {
   if (shot.start_frame_asset_id) return "FL2VA · 显式首帧";
   const task = runtimeShotTask(project, shot);
+  const mode = resolvedContinuationMode(project, shot);
+  if (mode === "ultra_fast") {
+    return ultraFastAnchorStrategy(project) === "independent"
+      ? "FL2VA · 极速短剧"
+      : "FL2VA · 极速承接";
+  }
   if (shot.continuity_from_shot_id) {
-    const mode = resolvedContinuationMode(project, shot);
-    if (mode === "ultra_fast") return "FL2VA · 极速续写";
     return `REF2VA · ${continuationModeMeta(mode).label}`;
   }
   return String(task).toUpperCase();
 }
 
 function runtimeShotHint(project, shot) {
+  const mode = resolvedContinuationMode(project, shot);
+  if (mode === "ultra_fast") {
+    if (ultraFastAnchorStrategy(project) === "independent") {
+      return shot?.index === 0
+        ? "素材 Image Edit / 无素材 T2I → FL2VA"
+        : "上一镜末帧 Image Edit → 本镜首帧 → FL2VA";
+    }
+    return "上一镜末帧 → FL2VA";
+  }
   if (!shot?.continuity_from_shot_id) return "";
-  return continuationModeMeta(resolvedContinuationMode(project, shot)).hint;
+  return continuationModeMeta(mode).hint;
 }
 
 function openingFrameSourceLabel(project, shot, assets) {
@@ -599,6 +637,8 @@ function App() {
   const [aspect, setAspect] = useState("16:9");
   const [quality, setQuality] = useState("final");
   const [continuationMode, setContinuationMode] = useState("quality");
+  const [ultraFastAnchor, setUltraFastAnchor] = useState("independent");
+  const [ultraFastTransition, setUltraFastTransition] = useState("fade_black");
   const [style, setStyle] = useState("cinematic");
   const [styleName, setStyleName] = useState(stylePresets[0].label);
   const [styleInstructions, setStyleInstructions] = useState(
@@ -777,6 +817,12 @@ function App() {
       setAspect(value.brief.aspect_ratio);
       setQuality(value.brief.quality || "final");
       setContinuationMode(value.brief.continuation_mode || "quality");
+      setUltraFastAnchor(
+        value.brief.ultra_fast_anchor_strategy || "independent",
+      );
+      setUltraFastTransition(
+        value.brief.ultra_fast_transition || "fade_black",
+      );
       setStyle(value.brief.style_preset || "cinematic");
       const loadedStyle = [...styleRegistryRef.current, ...customStyles].find(
         (item) => item.id === (value.brief.style_preset || "cinematic"),
@@ -1037,6 +1083,8 @@ function App() {
     setAspect("16:9");
     setQuality("final");
     setContinuationMode("quality");
+    setUltraFastAnchor("independent");
+    setUltraFastTransition("fade_black");
     setStyle("cinematic");
     setStyleName(stylePresets[0].label);
     setStyleInstructions(stylePresets[0].instructions);
@@ -1106,6 +1154,8 @@ function App() {
     style_instructions: styleInstructions,
     quality,
     continuation_mode: continuationMode,
+    ultra_fast_anchor_strategy: ultraFastAnchor,
+    ultra_fast_transition: ultraFastTransition,
     language: "zh-CN",
     audience: "general",
     reference_asset_ids: [...selected],
@@ -1163,6 +1213,10 @@ function App() {
         aspect_ratio: project.brief.aspect_ratio,
         quality: project.brief.quality,
         continuation_mode: project.brief.continuation_mode || "quality",
+        ultra_fast_anchor_strategy:
+          project.brief.ultra_fast_anchor_strategy || "independent",
+        ultra_fast_transition:
+          project.brief.ultra_fast_transition || "fade_black",
         subtitle_mode: project.brief.subtitle_mode || "none",
       },
       world_bible: {
@@ -1221,6 +1275,12 @@ function App() {
       setAspect(value.brief.aspect_ratio);
       setQuality(value.brief.quality || "final");
       setContinuationMode(value.brief.continuation_mode || "quality");
+      setUltraFastAnchor(
+        value.brief.ultra_fast_anchor_strategy || "independent",
+      );
+      setUltraFastTransition(
+        value.brief.ultra_fast_transition || "fade_black",
+      );
       await loadProjects();
       setProjectDialog(false);
       setNotice("整体设定已保存，旧镜头输出已标记为待重新制作");
@@ -1247,6 +1307,25 @@ function App() {
       setNotice(`已切换为${selectedMode.label}：${selectedMode.hint}`);
     } catch (error) {
       setNotice(`续写模式保存失败：${error.message}`);
+    }
+  };
+
+  const changeUltraFastSetting = async (field, value) => {
+    if (field === "ultra_fast_anchor_strategy") setUltraFastAnchor(value);
+    if (field === "ultra_fast_transition") setUltraFastTransition(value);
+    if (!project) return;
+    try {
+      const updated = await api(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brief: { [field]: value } }),
+      });
+      setProject(updated);
+      setJob(null);
+      await loadProjects();
+      setNotice("极速分镜设置已保存");
+    } catch (error) {
+      setNotice(`极速分镜设置保存失败：${error.message}`);
     }
   };
 
@@ -1900,6 +1979,59 @@ function App() {
                 {continuationModeMeta(continuationMode).hint}
               </small>
             </div>
+            {continuationMode === "ultra_fast" && (
+              <div className="ultra-fast-settings">
+                <div className="ultra-fast-setting-row">
+                  <span>首帧策略</span>
+                  <div className="segmented-options">
+                    {ultraFastAnchorOptions.map((item) => (
+                      <button
+                        key={item.id}
+                        className={ultraFastAnchor === item.id ? "active" : ""}
+                        onClick={() =>
+                          changeUltraFastSetting(
+                            "ultra_fast_anchor_strategy",
+                            item.id,
+                          )
+                        }
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                  <small>
+                    {
+                      ultraFastAnchorOptions.find(
+                        (item) => item.id === ultraFastAnchor,
+                      )?.hint
+                    }
+                  </small>
+                </div>
+                {ultraFastAnchor === "independent" && (
+                  <div className="ultra-fast-setting-row">
+                    <span>镜间转场</span>
+                    <div className="segmented-options transition-options">
+                      {ultraFastTransitionOptions.map((item) => (
+                        <button
+                          key={item.id}
+                          className={
+                            ultraFastTransition === item.id ? "active" : ""
+                          }
+                          onClick={() =>
+                            changeUltraFastSetting(
+                              "ultra_fast_transition",
+                              item.id,
+                            )
+                          }
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         </div>
 
@@ -2383,9 +2515,60 @@ function App() {
                       ))}
                     </select>
                     <small className="field-hint">
-                      仅影响 clip1 及后续的镜头承接；首镜和显式首帧不受影响。
+                      极速模式会影响每个没有显式首帧的镜头；显式首帧始终优先。
                     </small>
                   </label>
+                  {projectDraft.brief.continuation_mode === "ultra_fast" && (
+                    <>
+                      <label className="dialog-field">
+                        <span>极速首帧策略</span>
+                        <select
+                          value={
+                            projectDraft.brief.ultra_fast_anchor_strategy ||
+                            "independent"
+                          }
+                          onChange={(event) =>
+                            updateProjectDraft(
+                              "brief",
+                              "ultra_fast_anchor_strategy",
+                              event.target.value,
+                            )
+                          }
+                        >
+                          {ultraFastAnchorOptions.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.label}（{item.hint}）
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {(projectDraft.brief.ultra_fast_anchor_strategy ||
+                        "independent") === "independent" && (
+                        <label className="dialog-field">
+                          <span>镜间转场</span>
+                          <select
+                            value={
+                              projectDraft.brief.ultra_fast_transition ||
+                              "fade_black"
+                            }
+                            onChange={(event) =>
+                              updateProjectDraft(
+                                "brief",
+                                "ultra_fast_transition",
+                                event.target.value,
+                              )
+                            }
+                          >
+                            {ultraFastTransitionOptions.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </>
+                  )}
                 </div>
                 <div>
                   <label className="dialog-field">

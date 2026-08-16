@@ -17,6 +17,7 @@ from long_video_studio.domain import (
     ShotTask,
     effective_video_task,
     resolved_continuation_mode,
+    uses_independent_ultra_fast_anchor,
 )
 
 if TYPE_CHECKING:
@@ -147,15 +148,21 @@ class FilmCompiler:
             warnings.append(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {anchor_mode}")
 
         for position, shot in enumerate(sorted(project.shots, key=lambda value: value.index)):
+            is_ultra_independent = uses_independent_ultra_fast_anchor(project, shot)
             dependencies: list[str] = []
             if shot.continuity_from_shot_id and not shot.start_frame_asset_id:
                 previous_stage = video_stage_by_shot.get(shot.continuity_from_shot_id)
                 if previous_stage:
                     dependencies.append(previous_stage)
 
+            resolved_mode = resolved_continuation_mode(project, shot)
             continuation_mode = (
-                resolved_continuation_mode(project, shot)
-                if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+                resolved_mode
+                if not shot.start_frame_asset_id
+                and (
+                    shot.continuity_from_shot_id
+                    or resolved_mode == ContinuationMode.ULTRA_FAST
+                )
                 else None
             )
             runtime_task = effective_video_task(
@@ -165,13 +172,21 @@ class FilmCompiler:
                 continuation_mode=continuation_mode,
             )
             is_fl2va = runtime_task == ShotTask.FL2VA
-            is_boundary_frame_continuation = continuation_mode == ContinuationMode.ULTRA_FAST
+            is_boundary_frame_continuation = (
+                bool(shot.continuity_from_shot_id)
+                and continuation_mode == ContinuationMode.ULTRA_FAST
+                and not is_ultra_independent
+            )
             has_explicit_start = bool(shot.start_frame_asset_id)
             has_image_references = self._has_image_references(shot)
             has_start_reference = has_explicit_start or has_image_references
             missing_non_continuity_start = is_fl2va and not shot.continuity_from_shot_id and not has_start_reference
-            selected_by_mode = (
-                is_fl2va and not is_boundary_frame_continuation and anchor_selected(shot, position, anchor_mode)
+            selected_by_mode = is_fl2va and (
+                is_ultra_independent
+                or (
+                    not is_boundary_frame_continuation
+                    and anchor_selected(shot, position, anchor_mode)
+                )
             )
             if selected_by_mode and not shot.anchor_prompt:
                 raise ValueError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
@@ -181,7 +196,9 @@ class FilmCompiler:
             # Edit and zero-image shots to the dedicated T2I provider.
             needs_keyframe = selected_by_mode or missing_non_continuity_start
             if needs_keyframe:
-                uses_image_edit = has_image_references or bool(shot.continuity_from_shot_id)
+                uses_image_edit = has_image_references or bool(
+                    shot.continuity_from_shot_id
+                )
                 keyframe_capability = image_edit if uses_image_edit else text_to_image
                 keyframe_stage = ExecutionStage(
                     shot_id=shot.id,
@@ -231,6 +248,10 @@ class FilmCompiler:
                 )
             if is_boundary_frame_continuation:
                 warnings.append(f"Shot {position + 1} uses 极速续写: the previous boundary frame is sent to FL2VA.")
+            elif is_ultra_independent:
+                warnings.append(
+                    f"Shot {position + 1} uses 极速续写: a fresh opening frame is generated for FL2VA."
+                )
             stage_continuation_mode = (
                 continuation_mode
                 if continuation_mode == ContinuationMode.ULTRA_FAST or runtime_task == ShotTask.REF2VA

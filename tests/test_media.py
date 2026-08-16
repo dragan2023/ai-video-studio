@@ -101,6 +101,46 @@ def test_continuous_concatenation_drops_repeated_anchor_and_joins_streams(tmp_pa
     assert command[command.index("-map") + 1] == "[vout]"
 
 
+def test_independent_scene_transitions_apply_video_and_audio_fades(tmp_path, monkeypatch):
+    videos = []
+    for index in range(3):
+        video = tmp_path / f"scene-{index}.mp4"
+        video.write_bytes(b"video")
+        videos.append(video)
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "ffprobe":
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "format": {"duration": "10.0"},
+                        "streams": [
+                            {"codec_type": "video"},
+                            {"codec_type": "audio"},
+                        ],
+                    }
+                )
+            )
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    MediaTools("ffmpeg", "ffprobe").concatenate(
+        videos,
+        tmp_path / "final.mp4",
+        transition_seconds=0.6,
+        continuous_boundaries=[False, False],
+        scene_transitions=["fade_black", "dissolve"],
+    )
+
+    ffmpeg_command = next(command for command in commands if command[0] == "ffmpeg")
+    filters = ffmpeg_command[ffmpeg_command.index("-filter_complex") + 1]
+    assert "xfade=transition=fadeblack:duration=0.600000:offset=9.400000" in filters
+    assert "xfade=transition=dissolve:duration=0.600000:offset=18.800000" in filters
+    assert filters.count("acrossfade=d=0.600000") == 2
+
+
 def test_continuous_concatenation_keeps_motion_through_every_clip(tmp_path):
     """A multi-clip assembly must not repeat a frozen intermediate clip."""
     import shutil

@@ -1137,6 +1137,54 @@ select {
   font-size: 8px;
 }
 
+.ultra-fast-settings {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid rgba(255, 179, 0, 0.22);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(255, 179, 0, 0.08), rgba(10, 10, 10, 0.15));
+}
+.ultra-fast-setting-row + .ultra-fast-setting-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.ultra-fast-setting-row > span,
+.ultra-fast-setting-row > small {
+  display: block;
+}
+.ultra-fast-setting-row > span {
+  margin-bottom: 8px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.ultra-fast-setting-row > small {
+  margin-top: 7px;
+  color: rgba(255, 255, 255, 0.46);
+  font-family: "DM Mono", monospace;
+  font-size: 8px;
+}
+.segmented-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.segmented-options button {
+  padding: 7px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.66);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 9px;
+}
+.segmented-options button.active {
+  border-color: rgba(255, 179, 0, 0.55);
+  color: #ffd36a;
+  background: rgba(255, 179, 0, 0.16);
+}
+
 .library-section,
 .project-section,
 .render-section {

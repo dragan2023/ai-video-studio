@@ -33,9 +33,12 @@ from long_video_studio.domain import (
     StoryboardBeat,
     SubjectCard,
     TransitionKind,
+    UltraFastAnchorStrategy,
+    UltraFastTransition,
     WorldBible,
     effective_video_task,
     resolved_continuation_mode,
+    uses_independent_ultra_fast_anchor,
     utc_now,
 )
 from long_video_studio.planner import PlannerError
@@ -100,6 +103,9 @@ class ProjectBriefUpdate(BaseModel):
     quality: Literal["draft", "final"] | None = None
     subtitle_mode: Literal["none", "sidecar"] | None = None
     continuation_mode: ContinuationMode | None = None
+    ultra_fast_anchor_strategy: UltraFastAnchorStrategy | None = None
+    ultra_fast_transition: UltraFastTransition | None = None
+    ultra_fast_transition_seconds: float | None = Field(default=None, ge=0.1, le=2.0)
 
 
 class WorldBibleUpdate(BaseModel):
@@ -542,10 +548,19 @@ def create_api_router() -> APIRouter:
             if force
             else [shot for shot in ordered_shots if RenderManager.reusable_take_path(shot) is None]
         )
+        ultra_independent = {
+            shot.id: uses_independent_ultra_fast_anchor(project, shot)
+            for shot in pending_shots
+        }
         continuation_modes = {
             shot.id: (
                 resolved_continuation_mode(project, shot)
-                if shot.continuity_from_shot_id and not shot.start_frame_asset_id
+                if not shot.start_frame_asset_id
+                and (
+                    shot.continuity_from_shot_id
+                    or resolved_continuation_mode(project, shot)
+                    == ContinuationMode.ULTRA_FAST
+                )
                 else None
             )
             for shot in pending_shots
@@ -582,13 +597,18 @@ def create_api_router() -> APIRouter:
                 missing.append(f"earlier continuation source for shot {shot.index + 1}")
             if runtime_task == ShotTask.FL2VA:
                 image_references = [asset for asset in assets if asset.kind == AssetKind.IMAGE]
-                needs_anchor = continuation_modes[shot.id] != ContinuationMode.ULTRA_FAST and anchor_selected(
-                    shot,
-                    position,
-                    services.settings.image_edit_anchor_mode,
+                needs_anchor = ultra_independent[shot.id] or (
+                    continuation_modes[shot.id] != ContinuationMode.ULTRA_FAST
+                    and anchor_selected(
+                        shot,
+                        position,
+                        services.settings.image_edit_anchor_mode,
+                    )
                 )
                 if needs_anchor:
-                    uses_image_edit = bool(image_references or shot.continuity_from_shot_id)
+                    uses_image_edit = bool(
+                        image_references or shot.continuity_from_shot_id
+                    )
                     if uses_image_edit:
                         image_edit_configured = bool(
                             services.settings.image_edit_provider not in {"", "disabled", "none"}

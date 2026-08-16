@@ -18,6 +18,8 @@ from long_video_studio.domain import (
     ShotSpec,
     ShotStatus,
     ShotTask,
+    UltraFastAnchorStrategy,
+    UltraFastTransition,
     WorldBible,
     effective_video_task,
 )
@@ -91,7 +93,6 @@ def test_ultra_fast_continuation_forces_boundary_frame_fl2va_even_when_ref2va_is
         continuation_mode=ContinuationMode.ULTRA_FAST,
         task=ShotTask.REF2VA,
     )
-
     assert (
         effective_video_task(
             continuation,
@@ -102,6 +103,26 @@ def test_ultra_fast_continuation_forces_boundary_frame_fl2va_even_when_ref2va_is
         == ShotTask.FL2VA
     )
 
+
+def test_ultra_fast_scene_transition_choice_is_stable():
+    shots = [_shot(index) for index in range(4)]
+    project = FilmProject(
+        id="project_transition_seed",
+        brief=ProjectBrief(
+            prompt="A short drama.",
+            continuation_mode=ContinuationMode.ULTRA_FAST,
+            ultra_fast_transition=UltraFastTransition.RANDOM,
+        ),
+        world_bible=WorldBible(logline="A short drama", visual_style="cinematic"),
+        shots=shots,
+    )
+
+    first = RenderManager._ultra_fast_scene_transitions(project)
+    second = RenderManager._ultra_fast_scene_transitions(project)
+
+    assert first == second
+    assert len(first) == 3
+    assert set(first) <= {"fade_black", "dissolve", "fade"}
 
 def test_continuation_rule_is_ephemeral_and_idempotent():
     original = _shot(1, continuity_from_shot_id="shot_previous")
@@ -299,6 +320,7 @@ def test_ultra_fast_render_uses_only_previous_boundary_with_no_anchor_provider(
                 prompt="A creator makes a boundary-frame continuation.",
                 duration_seconds=15,
                 continuation_mode=ContinuationMode.ULTRA_FAST,
+                ultra_fast_anchor_strategy=UltraFastAnchorStrategy.BOUNDARY,
             ),
             world_bible=WorldBible(logline="A short film", visual_style="cinematic"),
             shots=[first, continuation],
