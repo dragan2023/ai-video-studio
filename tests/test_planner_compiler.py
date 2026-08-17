@@ -334,6 +334,7 @@ def test_planner_retries_transient_provider_overload(settings, monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(planner, "_request_json_wire", fake_wire)
+
     async def request():
         async with httpx.AsyncClient() as client:
             return await planner._request_json(
@@ -1165,9 +1166,7 @@ def test_ultra_fast_later_shot_binds_previous_boundary_before_assets(settings):
     )
     output = planner._plan_heuristically(brief, [actor])
     for index, shot in enumerate(output.shots):
-        shot.anchor_prompt = (
-            f"保留女主角身份，为第 {index + 1} 镜建立新的电影中景构图。"
-        )
+        shot.anchor_prompt = f"保留女主角身份，为第 {index + 1} 镜建立新的电影中景构图。"
 
     normalized = planner._normalize_agent_output(output, brief, [actor])
     second = normalized.shots[1]

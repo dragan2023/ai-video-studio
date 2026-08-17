@@ -124,6 +124,7 @@ def test_ultra_fast_scene_transition_choice_is_stable():
     assert len(first) == 3
     assert set(first) <= {"fade_black", "dissolve", "fade"}
 
+
 def test_continuation_rule_is_ephemeral_and_idempotent():
     original = _shot(1, continuity_from_shot_id="shot_previous")
 

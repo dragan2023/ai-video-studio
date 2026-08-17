@@ -965,7 +965,11 @@ select:focus {
   background: rgba(0, 0, 0, 0.25);
   border-radius: 8px;
   color: #d9e1f2;
-  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font:
+    11px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
   margin: 7px 0 0;
   max-height: 260px;
   overflow: auto;
@@ -1142,7 +1146,11 @@ select {
   padding: 14px;
   border: 1px solid rgba(255, 179, 0, 0.22);
   border-radius: 14px;
-  background: linear-gradient(135deg, rgba(255, 179, 0, 0.08), rgba(10, 10, 10, 0.15));
+  background: linear-gradient(
+    135deg,
+    rgba(255, 179, 0, 0.08),
+    rgba(10, 10, 10, 0.15)
+  );
 }
 .ultra-fast-setting-row + .ultra-fast-setting-row {
   margin-top: 12px;

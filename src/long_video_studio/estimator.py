@@ -184,10 +184,7 @@ class RenderEstimator:
         continuation_mode = (
             resolved_mode
             if not shot.start_frame_asset_id
-            and (
-                shot.continuity_from_shot_id
-                or resolved_mode == ContinuationMode.ULTRA_FAST
-            )
+            and (shot.continuity_from_shot_id or resolved_mode == ContinuationMode.ULTRA_FAST)
             else None
         )
         return effective_video_task(

@@ -174,10 +174,7 @@ class RenderManager:
                 continuation_mode = (
                     resolved_mode
                     if not shot.start_frame_asset_id
-                    and (
-                        shot.continuity_from_shot_id
-                        or resolved_mode == ContinuationMode.ULTRA_FAST
-                    )
+                    and (shot.continuity_from_shot_id or resolved_mode == ContinuationMode.ULTRA_FAST)
                     else None
                 )
                 runtime_task = effective_video_task(
@@ -300,8 +297,7 @@ class RenderManager:
                 [False] * max(0, len(project.shots) - 1)
                 if scene_transitions is not None
                 else [
-                    bool(shot.continuity_from_shot_id and not shot.start_frame_asset_id)
-                    for shot in project.shots[1:]
+                    bool(shot.continuity_from_shot_id and not shot.start_frame_asset_id) for shot in project.shots[1:]
                 ]
             )
             await asyncio.to_thread(
@@ -375,10 +371,7 @@ class RenderManager:
         if brief.ultra_fast_transition == UltraFastTransition.DISSOLVE:
             return ["dissolve"] * boundary_count
         rng = random.Random(f"{project.id}:ultra-fast-transitions")
-        return [
-            rng.choice(("fade_black", "dissolve", "fade"))
-            for _ in range(boundary_count)
-        ]
+        return [rng.choice(("fade_black", "dissolve", "fade")) for _ in range(boundary_count)]
 
     async def shutdown(self) -> None:
         active = [(job_id, task) for job_id, task in self._tasks.items() if not task.done()]
@@ -561,9 +554,7 @@ class RenderManager:
                 raise RuntimeError(self.text_to_image_provider_error)
             provider = self.text_to_image_provider
             if provider is None or not provider.configured:
-                raise RuntimeError(
-                    "T2I anchor requested but provider is not configured; set STUDIO_T2I_BASE_URL"
-                )
+                raise RuntimeError("T2I anchor requested but provider is not configured; set STUDIO_T2I_BASE_URL")
             await provider.generate(
                 TextToImageRequest(
                     prompt=shot.anchor_prompt,
@@ -595,11 +586,7 @@ class RenderManager:
             seen.add(resolved)
             references.append(ImageEditReference(path, label, role, tags, caption))
 
-        if (
-            include_boundary
-            and shot.continuity_from_shot_id
-            and shot.continuity_from_shot_id in boundary_frames
-        ):
+        if include_boundary and shot.continuity_from_shot_id and shot.continuity_from_shot_id in boundary_frames:
             add(boundary_frames[shot.continuity_from_shot_id], "previous shot boundary", "continuity")
         if shot.start_frame_asset_id:
             asset = self.repository.get_asset(shot.start_frame_asset_id)

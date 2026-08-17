@@ -159,10 +159,7 @@ class FilmCompiler:
             continuation_mode = (
                 resolved_mode
                 if not shot.start_frame_asset_id
-                and (
-                    shot.continuity_from_shot_id
-                    or resolved_mode == ContinuationMode.ULTRA_FAST
-                )
+                and (shot.continuity_from_shot_id or resolved_mode == ContinuationMode.ULTRA_FAST)
                 else None
             )
             runtime_task = effective_video_task(
@@ -183,10 +180,7 @@ class FilmCompiler:
             missing_non_continuity_start = is_fl2va and not shot.continuity_from_shot_id and not has_start_reference
             selected_by_mode = is_fl2va and (
                 is_ultra_independent
-                or (
-                    not is_boundary_frame_continuation
-                    and anchor_selected(shot, position, anchor_mode)
-                )
+                or (not is_boundary_frame_continuation and anchor_selected(shot, position, anchor_mode))
             )
             if selected_by_mode and not shot.anchor_prompt:
                 raise ValueError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
@@ -196,9 +190,7 @@ class FilmCompiler:
             # Edit and zero-image shots to the dedicated T2I provider.
             needs_keyframe = selected_by_mode or missing_non_continuity_start
             if needs_keyframe:
-                uses_image_edit = has_image_references or bool(
-                    shot.continuity_from_shot_id
-                )
+                uses_image_edit = has_image_references or bool(shot.continuity_from_shot_id)
                 keyframe_capability = image_edit if uses_image_edit else text_to_image
                 keyframe_stage = ExecutionStage(
                     shot_id=shot.id,
@@ -249,9 +241,7 @@ class FilmCompiler:
             if is_boundary_frame_continuation:
                 warnings.append(f"Shot {position + 1} uses 极速续写: the previous boundary frame is sent to FL2VA.")
             elif is_ultra_independent:
-                warnings.append(
-                    f"Shot {position + 1} uses 极速续写: a fresh opening frame is generated for FL2VA."
-                )
+                warnings.append(f"Shot {position + 1} uses 极速续写: a fresh opening frame is generated for FL2VA.")
             stage_continuation_mode = (
                 continuation_mode
                 if continuation_mode == ContinuationMode.ULTRA_FAST or runtime_task == ShotTask.REF2VA
@@ -331,9 +321,7 @@ class FilmCompiler:
                 shot_ids = [
                     stage.shot_id
                     for stage in stages
-                    if stage.kind == "keyframe"
-                    and stage.capability_id == capability_id
-                    and stage.shot_id
+                    if stage.kind == "keyframe" and stage.capability_id == capability_id and stage.shot_id
                 ]
             if not shot_ids:
                 continue

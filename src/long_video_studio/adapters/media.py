@@ -206,9 +206,7 @@ class MediaTools:
             if duration <= transition_seconds:
                 raise ValueError("clip is shorter than transition duration")
             durations.append(duration)
-            filters.append(
-                f"[{index}:v]fps=24,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[v{index}]"
-            )
+            filters.append(f"[{index}:v]fps=24,format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS[v{index}]")
             filters.append(
                 f"[{index}:a]asetpts=PTS-STARTPTS,aresample=async=1,"
                 f"aformat=sample_rates=32000:channel_layouts=stereo[a{index}]"
@@ -226,8 +224,7 @@ class MediaTools:
                 f"duration={transition_seconds:.6f}:offset={offset:.6f}[{next_video}]"
             )
             filters.append(
-                f"[{audio_label}][a{boundary}]acrossfade=d={transition_seconds:.6f}:"
-                f"c1=tri:c2=tri[{next_audio}]"
+                f"[{audio_label}][a{boundary}]acrossfade=d={transition_seconds:.6f}:c1=tri:c2=tri[{next_audio}]"
             )
             video_label = next_video
             audio_label = next_audio

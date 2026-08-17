@@ -256,9 +256,7 @@ def test_ultra_fast_edits_previous_boundary_into_a_fresh_anchor(settings, tmp_pa
 
     assert anchor == output_dir / "shot-002-anchor.png"
     assert image_edit.request is not None
-    assert [reference.path for reference in image_edit.request.references] == [
-        previous_boundary
-    ]
+    assert [reference.path for reference in image_edit.request.references] == [previous_boundary]
     assert image_edit.request.prompt == second.anchor_prompt
     assert text_to_image.request is None
 

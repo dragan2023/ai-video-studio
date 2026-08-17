@@ -189,9 +189,7 @@ def create_api_router() -> APIRouter:
         capabilities = {item.id: item for item in services.compiler.capabilities()}
         t2i_configured = capabilities["qwen-image-t2i"].available
         t2i_healthy = (
-            await _openai_compatible_health(services.settings.text_to_image_base_url)
-            if t2i_configured
-            else False
+            await _openai_compatible_health(services.settings.text_to_image_base_url) if t2i_configured else False
         )
         return {
             "status": "ok",
@@ -548,18 +546,14 @@ def create_api_router() -> APIRouter:
             if force
             else [shot for shot in ordered_shots if RenderManager.reusable_take_path(shot) is None]
         )
-        ultra_independent = {
-            shot.id: uses_independent_ultra_fast_anchor(project, shot)
-            for shot in pending_shots
-        }
+        ultra_independent = {shot.id: uses_independent_ultra_fast_anchor(project, shot) for shot in pending_shots}
         continuation_modes = {
             shot.id: (
                 resolved_continuation_mode(project, shot)
                 if not shot.start_frame_asset_id
                 and (
                     shot.continuity_from_shot_id
-                    or resolved_continuation_mode(project, shot)
-                    == ContinuationMode.ULTRA_FAST
+                    or resolved_continuation_mode(project, shot) == ContinuationMode.ULTRA_FAST
                 )
                 else None
             )
@@ -606,9 +600,7 @@ def create_api_router() -> APIRouter:
                     )
                 )
                 if needs_anchor:
-                    uses_image_edit = bool(
-                        image_references or shot.continuity_from_shot_id
-                    )
+                    uses_image_edit = bool(image_references or shot.continuity_from_shot_id)
                     if uses_image_edit:
                         image_edit_configured = bool(
                             services.settings.image_edit_provider not in {"", "disabled", "none"}
@@ -627,14 +619,9 @@ def create_api_router() -> APIRouter:
                         )
                         if not t2i_configured:
                             missing.append(
-                                f"T2I endpoint for zero-material shot {shot.index + 1} "
-                                "(set STUDIO_T2I_BASE_URL)"
+                                f"T2I endpoint for zero-material shot {shot.index + 1} (set STUDIO_T2I_BASE_URL)"
                             )
-                elif (
-                    not shot.start_frame_asset_id
-                    and not image_references
-                    and not shot.continuity_from_shot_id
-                ):
+                elif not shot.start_frame_asset_id and not image_references and not shot.continuity_from_shot_id:
                     missing.append(f"explicit start frame for shot {shot.index + 1}")
             if runtime_task == ShotTask.REF2VA and not is_clip_continuation:
                 has_image = any(asset.kind == AssetKind.IMAGE for asset in assets)

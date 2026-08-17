@@ -6,7 +6,7 @@ parallelism flags into a MUSA deployment without re-running the matrix below.
 
 ## Validated environment
 
-- image: `registry.mthreads.com/mcconline/inference/vllm-omni:minimax-h3-20260815`
+- image: private MiniMax-H3 MUSA validation image, supplied as `H3_MUSA_IMAGE`
 - digest: `sha256:23ae27867cd19ce848a27688dba262d0569c67ff3c3b599cc2a429f8ab184a8b`
 - vLLM-Omni revision: `45c33a4a776450a7ba7875992d417757364fef47`
 - accelerator: 4 x MTT S5000, 80 GiB each
@@ -18,6 +18,13 @@ The registry image may require Moore Threads network credentials. External
 deployments can substitute an equivalent image built from the recorded
 vLLM-Omni revision and dependency stack; re-run the smoke and performance gates
 before reusing the timing claims.
+
+Set the image reference through the environment instead of recording private
+registry topology in deployment scripts:
+
+```bash
+export H3_MUSA_IMAGE='<registry>/<namespace>/vllm-omni:<tag>'
+```
 
 The primary Ref2VA benchmark uses the same first clip, prompt, references, and
 seed for every profile: `1280x704`, 10 seconds, 24 FPS, 50 inference steps, and
@@ -119,7 +126,7 @@ docker run -d \
   -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
   -e PYTHONUNBUFFERED=1 \
   -v /mnt/nfs/models:/home/dist/models:ro \
-  registry.mthreads.com/mcconline/inference/vllm-omni:minimax-h3-20260815 \
+  "$H3_MUSA_IMAGE" \
   bash -lc 'exec vllm serve \
     /home/dist/models/MiniMax/MiniMax-H3/Ref2VA \
     --omni --host 0.0.0.0 --port 8092 --trust-remote-code \

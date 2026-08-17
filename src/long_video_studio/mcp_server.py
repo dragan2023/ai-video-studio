@@ -24,7 +24,7 @@ from .domain import (
     UltraFastTransition,
 )
 
-# MCP 1.27 exposes a generic FastMCP settings model whose lifespan annotation
+# The MCP SDK exposes a generic FastMCP settings model whose lifespan annotation
 # is unresolved until the module is imported.  Rebuilding it here prevents
 # pydantic-settings from warning (or ignoring the field) when Studio loads
 # environment configuration.
@@ -238,15 +238,9 @@ def create_mcp_server(services: Any, planning_manager: Any, render_manager: Any)
         if project is None:
             raise ValueError(f"project not found: {project_id}")
         plan = services.compiler.compile(project)
-        unconfigured = [
-            deployment.capability_id
-            for deployment in plan.deployments
-            if deployment.status != "ready"
-        ]
+        unconfigured = [deployment.capability_id for deployment in plan.deployments if deployment.status != "ready"]
         if unconfigured:
-            raise ValueError(
-                "render requires configured endpoint(s): " + ", ".join(unconfigured)
-            )
+            raise ValueError("render requires configured endpoint(s): " + ", ".join(unconfigured))
         job = render_manager.submit(project_id, force=force)
         return {
             "job": _dump(job),

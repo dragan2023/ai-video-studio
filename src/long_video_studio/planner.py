@@ -171,9 +171,7 @@ class PlannerService:
         except ValueError as error:
             raise PlannerError(f"H3 storyboard fallback failed: {error}") from error
         if project_id:
-            project = project.model_copy(
-                update={"id": project_id, "planner_trace": self._trace_snapshot(project_id)}
-            )
+            project = project.model_copy(update={"id": project_id, "planner_trace": self._trace_snapshot(project_id)})
         return self.repository.save_project(project)
 
     def _trace_snapshot(self, project_id: str | None) -> list[PlannerTraceEvent]:
@@ -748,9 +746,7 @@ Ultra-fast short-drama anchor policy:
                                     TransitionKind.OCCLUSION_CUT,
                                 }
                             ),
-                            has_reference_images=any(
-                                asset.kind is AssetKind.IMAGE for asset in assets
-                            ),
+                            has_reference_images=any(asset.kind is AssetKind.IMAGE for asset in assets),
                         ),
                         {
                             "stage": "shot_director",
@@ -759,13 +755,9 @@ Ultra-fast short-drama anchor policy:
                             "assets": asset_context,
                             "shot_index": index,
                             "shot_blueprint": blueprint.model_dump(mode="json"),
-                            "previous_blueprint": (
-                                blueprints[index - 1].model_dump(mode="json") if index else None
-                            ),
+                            "previous_blueprint": (blueprints[index - 1].model_dump(mode="json") if index else None),
                             "next_blueprint": (
-                                blueprints[index + 1].model_dump(mode="json")
-                                if index + 1 < len(blueprints)
-                                else None
+                                blueprints[index + 1].model_dump(mode="json") if index + 1 < len(blueprints) else None
                             ),
                         },
                         schema=self._shot_json_schema(),
@@ -774,9 +766,7 @@ Ultra-fast short-drama anchor policy:
                     return self._coerce_shot_payload(raw, index, blueprint)
 
             shots = list(
-                await asyncio.gather(
-                    *(direct_one(index, blueprint) for index, blueprint in enumerate(blueprints))
-                )
+                await asyncio.gather(*(direct_one(index, blueprint) for index, blueprint in enumerate(blueprints)))
             )
             draft = PlannerOutput(world_bible=director_output.world_bible, shots=shots)
 
@@ -923,8 +913,7 @@ Ultra-fast short-drama anchor policy:
         if excerpt:
             contract += (
                 "\n\nSelected local director-pack excerpts (apply only the relevant production rules; "
-                "do not copy workflow UI instructions):\n"
-                + excerpt
+                "do not copy workflow UI instructions):\n" + excerpt
             )
         return contract
 
@@ -1104,8 +1093,7 @@ Ultra-fast short-drama anchor policy:
                     await self._record_trace(
                         schema_name,
                         "client",
-                        message=f"transient planner provider error; retrying in {delay:g}s "
-                        f"({attempt + 2}/{attempts})",
+                        message=f"transient planner provider error; retrying in {delay:g}s ({attempt + 2}/{attempts})",
                         error=str(error),
                         duration_ms=(time.perf_counter() - started) * 1000,
                     )
@@ -1132,7 +1120,7 @@ Ultra-fast short-drama anchor policy:
 
     @staticmethod
     def _is_retryable_planner_error(error: Exception) -> bool:
-        if isinstance(error, (httpx.TimeoutException, httpx.NetworkError, json.JSONDecodeError)):
+        if isinstance(error, httpx.TimeoutException | httpx.NetworkError | json.JSONDecodeError):
             return True
         if isinstance(error, httpx.HTTPStatusError):
             return error.response.status_code in {408, 425, 429, 500, 502, 503, 504}
@@ -1234,11 +1222,7 @@ Ultra-fast short-drama anchor policy:
             duration_seconds=shot.duration_seconds,
             active_subjects=list(shot.continuity_in.characters),
             scene_and_landmarks="; ".join(
-                [
-                    value
-                    for value in [shot.continuity_in.location, *shot.continuity_in.fixed_landmarks]
-                    if value
-                ]
+                [value for value in [shot.continuity_in.location, *shot.continuity_in.fixed_landmarks] if value]
             ),
             opening_state=shot.opening_state or shot.continuity_in.action,
             ending_state=shot.ending_state or shot.continuity_out.action,
@@ -1759,13 +1743,10 @@ Ultra-fast short-drama anchor policy:
                 shot.task = ShotTask.FL2VA
                 shot.continuation_mode = ContinuationMode.ULTRA_FAST
                 shot.continuity_from_shot_id = previous.id if previous else None
-                shot.transition_kind = (
-                    TransitionKind.ANCHOR if index == 0 else TransitionKind.HARD_CUT
-                )
+                shot.transition_kind = TransitionKind.ANCHOR if index == 0 else TransitionKind.HARD_CUT
                 image_budget = max(
                     0,
-                    self.settings.image_edit_max_references
-                    - (1 if shot.continuity_from_shot_id else 0),
+                    self.settings.image_edit_max_references - (1 if shot.continuity_from_shot_id else 0),
                 )
                 kept_image_ids: list[str] = []
                 bounded_references: list[str] = []
@@ -1789,18 +1770,12 @@ Ultra-fast short-drama anchor policy:
                 # shot was overwritten into Ref2VA, which made scene-cuts
                 # anchors unreachable and caused avoidable identity jumps.
                 shot.continuity_from_shot_id = previous.id
-            if (
-                self._is_explicit_scene_cut(shot)
-                and not shot.start_frame_asset_id
-                and not ultra_independent_project
-            ):
+            if self._is_explicit_scene_cut(shot) and not shot.start_frame_asset_id and not ultra_independent_project:
                 # A deliberate cut must remain independent.  The optional
                 # Image Edit stage can provide its anchor; without it the
                 # compiler will surface the missing capability explicitly.
                 shot.continuity_from_shot_id = None
-            needs_anchor = (
-                ultra_independent_project and not shot.start_frame_asset_id
-            ) or anchor_selected(
+            needs_anchor = (ultra_independent_project and not shot.start_frame_asset_id) or anchor_selected(
                 shot,
                 index,
                 self.settings.image_edit_anchor_mode,
@@ -1809,12 +1784,8 @@ Ultra-fast short-drama anchor policy:
                 asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
                 for asset_id in shot.reference_asset_ids
             )
-            uses_image_edit = has_image_references or bool(
-                shot.continuity_from_shot_id
-            )
-            anchor_provider_configured = (
-                image_edit_configured if uses_image_edit else text_to_image_configured
-            )
+            uses_image_edit = has_image_references or bool(shot.continuity_from_shot_id)
+            anchor_provider_configured = image_edit_configured if uses_image_edit else text_to_image_configured
             if needs_anchor and not shot.anchor_prompt:
                 if anchor_provider_configured:
                     raise ValueError(f"AI planner omitted anchor_prompt for shot {index + 1}")
@@ -2107,11 +2078,7 @@ Ultra-fast short-drama anchor policy:
             for asset_id in shot.reference_asset_ids
             if asset_id in valid_assets and valid_assets[asset_id].kind is AssetKind.IMAGE
         ]
-        bindings = (
-            ["参考图1 上一镜末帧 (continuity)"]
-            if continuity_reference
-            else []
-        )
+        bindings = ["参考图1 上一镜末帧 (continuity)"] if continuity_reference else []
         first_asset_index = 2 if continuity_reference else 1
         for reference_index, asset in enumerate(
             image_assets,
@@ -2154,9 +2121,7 @@ Ultra-fast short-drama anchor policy:
         if not image_assets and not continuity_reference:
             return cls._limit_anchor_prompt(prompt)
         missing = []
-        if continuity_reference and (
-            "参考图1" not in prompt or "上一镜末帧" not in prompt
-        ):
+        if continuity_reference and ("参考图1" not in prompt or "上一镜末帧" not in prompt):
             missing.append((1, "上一镜末帧"))
         first_asset_index = 2 if continuity_reference else 1
         for reference_index, asset in enumerate(
@@ -2284,8 +2249,7 @@ Ultra-fast short-drama anchor policy:
             else "No source image or visual reference is supplied; compose this frame from the World Bible only. "
         )
         preservation_clause = (
-            "Preserve every referenced character's identity and every referenced location/prop's defining "
-            "appearance. "
+            "Preserve every referenced character's identity and every referenced location/prop's defining appearance. "
             if references
             else "Keep the named subjects consistent with the World Bible and do not invent source-image claims. "
         )

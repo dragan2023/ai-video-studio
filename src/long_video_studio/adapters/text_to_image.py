@@ -113,8 +113,7 @@ class VllmOmniTextToImageProvider:
             # stalled upstream apart from a refused connection.
             detail = str(error).strip() or repr(error)
             raise RuntimeError(
-                f"text-to-image request failed at {self._endpoint()}: "
-                f"{type(error).__name__}: {detail}"
+                f"text-to-image request failed at {self._endpoint()}: {type(error).__name__}: {detail}"
             ) from error
         temporary = request.output_path.with_suffix(f"{request.output_path.suffix}.tmp")
         temporary.write_bytes(image)

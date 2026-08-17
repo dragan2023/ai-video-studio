@@ -274,7 +274,11 @@ function openingFrameSourceLabel(project, shot, assets) {
   const imageAssetIds = new Set(
     assets.filter((asset) => asset.kind === "image").map((asset) => asset.id),
   );
-  if ((shot.reference_asset_ids || []).some((assetId) => imageAssetIds.has(assetId))) {
+  if (
+    (shot.reference_asset_ids || []).some((assetId) =>
+      imageAssetIds.has(assetId),
+    )
+  ) {
     return "Image Edit 首帧";
   }
   return "T2I 首帧";
@@ -515,7 +519,9 @@ function RuntimeStatus({ status, job, open, onToggle, onClose }) {
                   : "正在读取服务状态…"}
               </p>
             </div>
-            <div className={`runtime-overall ${status ? (degraded ? "degraded" : "ready") : "checking"}`}>
+            <div
+              className={`runtime-overall ${status ? (degraded ? "degraded" : "ready") : "checking"}`}
+            >
               <Activity size={14} />
               {status ? (degraded ? "部分异常" : "系统就绪") : "检查中"}
             </div>
@@ -573,7 +579,8 @@ function PlannerDebugConsole({ events, open, onToggle, onClear }) {
     <section className={`planner-debug ${open ? "is-open" : ""}`}>
       <div className="planner-debug-bar">
         <button type="button" className="text-button" onClick={onToggle}>
-          {open ? "收起 Debug Console" : "打开 Debug Console"} · {events.length} events
+          {open ? "收起 Debug Console" : "打开 Debug Console"} · {events.length}{" "}
+          events
         </button>
         {events.length > 0 && (
           <button type="button" className="text-button muted" onClick={onClear}>
@@ -584,21 +591,33 @@ function PlannerDebugConsole({ events, open, onToggle, onClear }) {
       {open && (
         <div className="planner-debug-body">
           <p className="planner-debug-hint">
-            这里显示浏览器点击、planner 各阶段请求/响应和异常。payload 已做长度限制，不包含认证 header。
+            这里显示浏览器点击、planner 各阶段请求/响应和异常。payload
+            已做长度限制，不包含认证 header。
           </p>
           {events.length === 0 ? (
-            <div className="empty-state">还没有 planner 事件。点击“开始构思”后这里会实时更新。</div>
+            <div className="empty-state">
+              还没有 planner 事件。点击“开始构思”后这里会实时更新。
+            </div>
           ) : (
             [...events].reverse().map((event) => (
-              <details className={`planner-debug-event status-${event.status}`} key={event.id}>
+              <details
+                className={`planner-debug-event status-${event.status}`}
+                key={event.id}
+              >
                 <summary>
                   <span>{event.stage}</span>
                   <span>{event.status}</span>
-                  <span>{event.created_at ? new Date(event.created_at).toLocaleTimeString() : ""}</span>
+                  <span>
+                    {event.created_at
+                      ? new Date(event.created_at).toLocaleTimeString()
+                      : ""}
+                  </span>
                   <strong>{event.message || event.error || ""}</strong>
                 </summary>
                 <div className="planner-debug-content">
-                  {event.error && <pre className="debug-error">{event.error}</pre>}
+                  {event.error && (
+                    <pre className="debug-error">{event.error}</pre>
+                  )}
                   {event.request_payload && (
                     <details>
                       <summary>raw input</summary>
@@ -682,17 +701,19 @@ function App() {
   const traceHiddenBefore = useRef(0);
 
   const addClientTrace = useCallback((status, message, payload = null) => {
-    setClientTrace((events) => [
-      ...events,
-      {
-        id: `client-${Date.now()}-${events.length}`,
-        created_at: new Date().toISOString(),
-        stage: "browser",
-        status: "client",
-        message: `${status}: ${message}`,
-        request_payload: payload ? JSON.stringify(payload, null, 2) : null,
-      },
-    ].slice(-40));
+    setClientTrace((events) =>
+      [
+        ...events,
+        {
+          id: `client-${Date.now()}-${events.length}`,
+          created_at: new Date().toISOString(),
+          stage: "browser",
+          status: "client",
+          message: `${status}: ${message}`,
+          request_payload: payload ? JSON.stringify(payload, null, 2) : null,
+        },
+      ].slice(-40),
+    );
   }, []);
 
   const refreshPlannerTrace = useCallback(async (id) => {
@@ -820,9 +841,7 @@ function App() {
       setUltraFastAnchor(
         value.brief.ultra_fast_anchor_strategy || "independent",
       );
-      setUltraFastTransition(
-        value.brief.ultra_fast_transition || "fade_black",
-      );
+      setUltraFastTransition(value.brief.ultra_fast_transition || "fade_black");
       setStyle(value.brief.style_preset || "cinematic");
       const loadedStyle = [...styleRegistryRef.current, ...customStyles].find(
         (item) => item.id === (value.brief.style_preset || "cinematic"),
@@ -945,7 +964,9 @@ function App() {
         if (next.status !== "planning") {
           await loadProjects();
           if (next.status === "failed") {
-            setPlanningError("这次构思没有完成。项目草稿已保留，可以重新构思。");
+            setPlanningError(
+              "这次构思没有完成。项目草稿已保留，可以重新构思。",
+            );
           } else {
             setPlanningError("");
             setNotice("故事板生成完成，可以逐镜头检查和编辑");
@@ -964,7 +985,8 @@ function App() {
   }, [project?.id, project?.status, refreshPlannerTrace, loadProjects]);
 
   useEffect(() => {
-    const refresh = () => Promise.all([loadProjects(), loadActiveJobs()]).catch(() => null);
+    const refresh = () =>
+      Promise.all([loadProjects(), loadActiveJobs()]).catch(() => null);
     const timer = window.setInterval(refresh, 3500);
     return () => window.clearInterval(timer);
   }, [loadProjects, loadActiveJobs]);
@@ -1104,7 +1126,11 @@ function App() {
       setNotice("这个项目正在渲染，完成或失败后才能删除");
       return;
     }
-    if (!window.confirm(`删除「${project.brief?.title || "未命名影片"}」及其生成视频？素材库不会被删除。`)) {
+    if (
+      !window.confirm(
+        `删除「${project.brief?.title || "未命名影片"}」及其生成视频？素材库不会被删除。`,
+      )
+    ) {
       return;
     }
     const deletedId = project.id;
@@ -1278,9 +1304,7 @@ function App() {
       setUltraFastAnchor(
         value.brief.ultra_fast_anchor_strategy || "independent",
       );
-      setUltraFastTransition(
-        value.brief.ultra_fast_transition || "fade_black",
-      );
+      setUltraFastTransition(value.brief.ultra_fast_transition || "fade_black");
       await loadProjects();
       setProjectDialog(false);
       setNotice("整体设定已保存，旧镜头输出已标记为待重新制作");
@@ -1492,7 +1516,9 @@ function App() {
   };
 
   const plan = async () => {
-    addClientTrace("click", "开始构思 clicked", { promptLength: prompt.trim().length });
+    addClientTrace("click", "开始构思 clicked", {
+      promptLength: prompt.trim().length,
+    });
     if (projectLoading) {
       addClientTrace("skipped", "project is still loading");
       setDebugOpen(true);
@@ -1583,9 +1609,9 @@ function App() {
           })),
         }));
       }
-      const estimate = await api(`/api/projects/${projectId}/render-estimate`).catch(
-        () => null,
-      );
+      const estimate = await api(
+        `/api/projects/${projectId}/render-estimate`,
+      ).catch(() => null);
       setRenderEstimate(estimate);
       void loadActiveJobs();
       setActiveTab("render");
@@ -1635,9 +1661,13 @@ function App() {
           1000,
       )
     : 0;
-  const remainingSeconds = renderEstimate?.remaining_seconds ?? estimatedSeconds;
+  const remainingSeconds =
+    renderEstimate?.remaining_seconds ?? estimatedSeconds;
   const estimatedProgress = estimatedSeconds
-    ? Math.min(0.99, Math.max(0, (estimatedSeconds - remainingSeconds) / estimatedSeconds))
+    ? Math.min(
+        0.99,
+        Math.max(0, (estimatedSeconds - remainingSeconds) / estimatedSeconds),
+      )
     : 0;
   const progress =
     job?.status === "complete"
@@ -1650,7 +1680,8 @@ function App() {
   );
   const jobActive = job && ["running", "queued"].includes(job.status);
   const debugEvents = [...plannerTrace, ...clientTrace].sort(
-    (left, right) => Date.parse(left.created_at || 0) - Date.parse(right.created_at || 0),
+    (left, right) =>
+      Date.parse(left.created_at || 0) - Date.parse(right.created_at || 0),
   );
   const h3Healthy = Boolean(health?.fl2va_healthy && health?.ref2va_healthy);
   const runtimeServices = serviceStatus?.services || [];
@@ -1742,7 +1773,9 @@ function App() {
             >
               <option value="">NEW FILM</option>
               {projects.map((item) => {
-                const active = activeJobs.find((jobItem) => jobItem.project_id === item.id);
+                const active = activeJobs.find(
+                  (jobItem) => jobItem.project_id === item.id,
+                );
                 const activity =
                   item.status === "planning"
                     ? " · 构思中"
@@ -1751,7 +1784,8 @@ function App() {
                       : "";
                 return (
                   <option key={item.id} value={item.id}>
-                    {item.brief.title}{activity}
+                    {item.brief.title}
+                    {activity}
                   </option>
                 );
               })}
@@ -1831,7 +1865,9 @@ function App() {
               <button
                 className="glow-button"
                 onClick={plan}
-                disabled={busy || projectLoading || project?.status === "planning"}
+                disabled={
+                  busy || projectLoading || project?.status === "planning"
+                }
               >
                 <span>
                   {projectLoading
@@ -2062,7 +2098,8 @@ function App() {
             </div>
           </div>
           <p className="library-permission-hint">
-            只有明确勾选的素材会进入本项目的 Agent 与模型请求；未勾选素材不会被自动检索或引用。
+            只有明确勾选的素材会进入本项目的 Agent
+            与模型请求；未勾选素材不会被自动检索或引用。
           </p>
           <div className="upload-meta">
             <label>
@@ -2144,12 +2181,15 @@ function App() {
               </button>
             </div>
             <div className="story-strip">
-              {project.status === "planning" && !(project.shots || []).length ? (
+              {project.status === "planning" &&
+              !(project.shots || []).length ? (
                 <div className="planning-placeholder">
                   <Sparkles size={20} />
                   <div>
                     <strong>导演组正在并行完善故事与分镜</strong>
-                    <small>这个任务会在后台继续；你可以切换项目或新建另一部影片。</small>
+                    <small>
+                      这个任务会在后台继续；你可以切换项目或新建另一部影片。
+                    </small>
                   </div>
                 </div>
               ) : null}
@@ -2315,7 +2355,9 @@ function App() {
                 </p>
                 {renderEstimate ? (
                   <small>
-                    当前预计总时长 {formatDuration(renderEstimate.total_seconds)} · {renderEstimate.sample_count
+                    当前预计总时长{" "}
+                    {formatDuration(renderEstimate.total_seconds)} ·{" "}
+                    {renderEstimate.sample_count
                       ? `${renderEstimate.sample_count} 个历史镜头校准`
                       : "部署基线"}
                   </small>
@@ -2996,7 +3038,11 @@ function App() {
                               rows="2"
                               value={beat.performance || ""}
                               onChange={(event) =>
-                                updateVisualBeat(index, "performance", event.target.value)
+                                updateVisualBeat(
+                                  index,
+                                  "performance",
+                                  event.target.value,
+                                )
                               }
                               placeholder="重心、眼神、面部微表情与动作阶段。"
                             />
@@ -3006,7 +3052,11 @@ function App() {
                             <input
                               value={beat.spatial_anchor || ""}
                               onChange={(event) =>
-                                updateVisualBeat(index, "spatial_anchor", event.target.value)
+                                updateVisualBeat(
+                                  index,
+                                  "spatial_anchor",
+                                  event.target.value,
+                                )
                               }
                               placeholder="左/右位置、固定地标、前中后景。"
                             />
@@ -3016,7 +3066,11 @@ function App() {
                             <input
                               value={beat.handoff || ""}
                               onChange={(event) =>
-                                updateVisualBeat(index, "handoff", event.target.value)
+                                updateVisualBeat(
+                                  index,
+                                  "handoff",
+                                  event.target.value,
+                                )
                               }
                               placeholder="下一拍继承的姿态或道具状态。"
                             />
@@ -3292,7 +3346,9 @@ function App() {
                         )
                       }
                     >
-                      <option value="">未指定：有图片走 Image Edit，无图片走 T2I</option>
+                      <option value="">
+                        未指定：有图片走 Image Edit，无图片走 T2I
+                      </option>
                       {assets
                         .filter((asset) => asset.kind === "image")
                         .map((asset) => (

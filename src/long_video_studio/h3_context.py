@@ -384,8 +384,7 @@ def _subject_definitions(
             grounding = f", grounded in {visual_sources}" if visual_sources else ""
             description = _prompt_text(text, limit=2400) if category == "character" else _limit_words(text, 36)
             entries.append(
-                f"<Subject {subject_number}>{speaker_suffix} is the {category} described as "
-                f"{description}{grounding}."
+                f"<Subject {subject_number}>{speaker_suffix} is the {category} described as {description}{grounding}."
             )
             subject_number += 1
 
@@ -614,9 +613,7 @@ def _detailed_description(
             f"{_prompt_text(previous_ending or 'the final visible and audible moment of the reference video')}."
         )
     first_frame_refs = [
-        reference
-        for reference in refs
-        if reference.kind == "picture" and reference.role in {"first_frame", "keyframe"}
+        reference for reference in refs if reference.kind == "picture" and reference.role in {"first_frame", "keyframe"}
     ]
     if first_frame_refs:
         first_frame_labels = ", ".join(f"<{reference.label}>" for reference in first_frame_refs)
@@ -631,11 +628,7 @@ def _detailed_description(
         f"The camera {_prompt_text(shot.camera)}."
         f"{prior} The visual direction is non-spoken and must not be vocalized or rendered as text."
     )
-    transition_kind = (
-        shot.transition_kind.value
-        if hasattr(shot.transition_kind, "value")
-        else shot.transition_kind
-    )
+    transition_kind = shot.transition_kind.value if hasattr(shot.transition_kind, "value") else shot.transition_kind
     visual += f" Boundary strategy: {transition_kind}."
     if any(reference.kind == "video" for reference in refs):
         visual += (
@@ -656,17 +649,23 @@ def _detailed_description(
         visible = ", ".join(f"<{label}>" for label in subject_labels)
         visual = f"The active visible subjects are {visible}. " + visual
     if shot.continuity_in.fixed_landmarks:
-        visual += " Fixed landmarks and screen-relative positions: " + _prompt_text(
-            "; ".join(shot.continuity_in.fixed_landmarks)
-        ) + "."
+        visual += (
+            " Fixed landmarks and screen-relative positions: "
+            + _prompt_text("; ".join(shot.continuity_in.fixed_landmarks))
+            + "."
+        )
     if shot.continuity_in.character_positions:
-        visual += " Character positions, facing, and initial poses: " + _prompt_text(
-            "; ".join(shot.continuity_in.character_positions)
-        ) + "."
+        visual += (
+            " Character positions, facing, and initial poses: "
+            + _prompt_text("; ".join(shot.continuity_in.character_positions))
+            + "."
+        )
     if shot.continuity_in.exited_characters:
-        visual += " These subjects remain off screen unless explicitly reintroduced: " + _prompt_text(
-            "; ".join(shot.continuity_in.exited_characters)
-        ) + "."
+        visual += (
+            " These subjects remain off screen unless explicitly reintroduced: "
+            + _prompt_text("; ".join(shot.continuity_in.exited_characters))
+            + "."
+        )
     timeline = _timeline(shot, speaker_ids=speaker_ids, subject_lookup=subject_lookup)
     return " ".join(value for value in (intro, visual, timeline) if value)
 
@@ -709,9 +708,7 @@ def _timeline(
     if opening:
         pieces.append(f"At the opening, {_prompt_text(opening)}.")
     for beat in shot.visual_beats:
-        beat_text = (
-            f"From {beat.start_seconds:.3f}s to {beat.end_seconds:.3f}s, {_prompt_text(beat.visual_action)}."
-        )
+        beat_text = f"From {beat.start_seconds:.3f}s to {beat.end_seconds:.3f}s, {_prompt_text(beat.visual_action)}."
         if beat.state_change:
             beat_text += f" The visible state changes so that {_prompt_text(beat.state_change)}."
         if beat.camera:

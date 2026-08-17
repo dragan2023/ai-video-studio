@@ -360,12 +360,8 @@ def test_context_ir_preserves_long_planner_fields_and_beat_details():
 
 
 def test_context_ir_emits_first_frame_lock_and_no_replay_boundary():
-    previous = _shot(1).model_copy(
-        update={"ending_state": "BOUNDARY_END_STATE_WITH_LOCKED_POSE_AND_PROP"}
-    )
-    shot = _shot(2).model_copy(
-        update={"opening_state": "BOUNDARY_OPEN_STATE_BEFORE_NEW_ACTION"}
-    )
+    previous = _shot(1).model_copy(update={"ending_state": "BOUNDARY_END_STATE_WITH_LOCKED_POSE_AND_PROP"})
+    shot = _shot(2).model_copy(update={"opening_state": "BOUNDARY_OPEN_STATE_BEFORE_NEW_ACTION"})
     prompt = compile_ref2va_context(
         shot,
         [
@@ -386,9 +382,7 @@ def test_context_ir_emits_first_frame_lock_and_no_replay_boundary():
         ],
         previous_shot=previous,
     ).render()
-    detailed = prompt.split("detailed_description:\n", 1)[1].split(
-        "\n\noverall_soundscape:", 1
-    )[0]
+    detailed = prompt.split("detailed_description:\n", 1)[1].split("\n\noverall_soundscape:", 1)[0]
     assert "first generated frame must match <Picture 1> exactly" in detailed
     assert "do not replay" in detailed
     assert "BOUNDARY_END_STATE_WITH_LOCKED_POSE_AND_PROP" in detailed
