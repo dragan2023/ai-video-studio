@@ -82,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 str(request.base_url),
                 mcp_enabled=resolved.mcp_enabled,
                 mcp_requires_token=bool(resolved.mcp_token),
+                mcp_path=resolved.mcp_path,
             ),
             headers={"Cache-Control": "public, max-age=300", "Vary": "Host"},
         )

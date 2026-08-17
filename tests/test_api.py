@@ -125,6 +125,16 @@ def test_llms_txt_does_not_advertise_disabled_mcp(settings):
     assert "claude mcp add" not in response.text
 
 
+def test_llms_txt_uses_the_configured_mcp_path(settings):
+    custom_path = replace(settings, mcp_path="/agent-mcp")
+
+    response = TestClient(create_app(custom_path)).get("/llms.txt")
+
+    assert response.status_code == 200
+    assert "http://testserver/agent-mcp/" in response.text
+    assert "http://testserver/mcp/" not in response.text
+
+
 def test_service_status_api_keeps_optional_services_explicit(settings):
     client = TestClient(create_app(settings))
 

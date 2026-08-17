@@ -3,7 +3,13 @@ from __future__ import annotations
 from textwrap import dedent, indent
 
 
-def _agent_connection(base: str, *, mcp_enabled: bool, mcp_requires_token: bool) -> str:
+def _agent_connection(
+    base: str,
+    mcp_url: str,
+    *,
+    mcp_enabled: bool,
+    mcp_requires_token: bool,
+) -> str:
     if not mcp_enabled:
         return dedent(
             f"""
@@ -16,7 +22,7 @@ def _agent_connection(base: str, *, mcp_enabled: bool, mcp_requires_token: bool)
         return dedent(
             f"""
             This deployment requires a bearer token. Obtain it through an approved
-            secret channel and expose it to Codex without putting it in a config file
+            secret channel and expose it to the agent without putting it in a config file
             or command argument:
 
             ```bash
@@ -24,12 +30,12 @@ def _agent_connection(base: str, *, mcp_enabled: bool, mcp_requires_token: bool)
 
             # Codex
             codex mcp add nautilus-studio \\
-              --url {base}/mcp/ \\
+              --url {mcp_url} \\
               --bearer-token-env-var NAUTILUS_STUDIO_MCP_TOKEN
             codex mcp get nautilus-studio
 
             # Claude Code (single quotes preserve runtime environment expansion)
-            claude mcp add --transport http nautilus-studio {base}/mcp/ \\
+            claude mcp add --transport http nautilus-studio {mcp_url} \\
               --header 'Authorization: Bearer ${{NAUTILUS_STUDIO_MCP_TOKEN}}'
             claude mcp get nautilus-studio
             ```
@@ -41,17 +47,19 @@ def _agent_connection(base: str, *, mcp_enabled: bool, mcp_requires_token: bool)
 
         ```bash
         # Codex
-        codex mcp add nautilus-studio --url {base}/mcp/
+        codex mcp add nautilus-studio --url {mcp_url}
         codex mcp get nautilus-studio
 
         # Claude Code
-        claude mcp add --transport http nautilus-studio {base}/mcp/
+        claude mcp add --transport http nautilus-studio {mcp_url}
         claude mcp get nautilus-studio
         ```
 
         If the operator later enables `STUDIO_MCP_TOKEN`, remove and re-add this MCP
-        server using `--bearer-token-env-var`; never put the token in a command
-        argument or config file.
+        server with a token-aware client configuration. Codex supports
+        `--bearer-token-env-var`; Claude Code supports a runtime-expanded
+        `Authorization` header. Never put the token value in a command argument or
+        config file.
         """
     ).strip()
 
@@ -61,19 +69,24 @@ def render_llms_txt(
     *,
     mcp_enabled: bool = True,
     mcp_requires_token: bool = False,
+    mcp_path: str = "/mcp",
 ) -> str:
     """Render the agent-facing discovery document for this Studio instance."""
 
     base = base_url.rstrip("/")
+    mounted_mcp_path = mcp_path.rstrip("/") or "/mcp"
+    normalized_mcp_path = "/" + mounted_mcp_path.strip("/")
+    mcp_url = f"{base}{normalized_mcp_path}/"
     mcp_connection = indent(
         _agent_connection(
             base,
+            mcp_url,
             mcp_enabled=mcp_enabled,
             mcp_requires_token=mcp_requires_token,
         ),
         "        ",
     ).removeprefix("        ")
-    mcp_discovery = f"{base}/mcp/" if mcp_enabled else "disabled in this deployment"
+    mcp_discovery = mcp_url if mcp_enabled else "disabled in this deployment"
     return dedent(
         f"""
         # Nautilus Studio
@@ -104,12 +117,12 @@ def render_llms_txt(
 
         ## Connect an agent
 
-        The MCP transport is Streamable HTTP and the trailing slash in `/mcp/` is
+        The MCP transport is Streamable HTTP and the trailing slash in its URL is
         required.
 
         {mcp_connection}
 
-        Other MCP clients should use the Streamable HTTP transport at `{base}/mcp/`.
+        Other MCP clients should use the Streamable HTTP transport at `{mcp_url}`.
         When bearer authentication is enabled, send
         `Authorization: Bearer <operator-provided-token>` on every MCP request.
 
