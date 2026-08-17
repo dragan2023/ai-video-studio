@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .domain import (
@@ -22,6 +23,12 @@ from .domain import (
     UltraFastAnchorStrategy,
     UltraFastTransition,
 )
+
+# MCP 1.27 exposes a generic FastMCP settings model whose lifespan annotation
+# is unresolved until the module is imported.  Rebuilding it here prevents
+# pydantic-settings from warning (or ignoring the field) when Studio loads
+# environment configuration.
+FastMCPSettings.model_rebuild()
 
 
 class BearerAuthASGI:
