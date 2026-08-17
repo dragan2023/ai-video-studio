@@ -268,8 +268,11 @@ def create_mcp_server(services: Any, planning_manager: Any, render_manager: Any)
         name="studio_cancel_planning",
         description="Cancel an in-progress storyboard planning task.",
     )
-    def studio_cancel_planning(project_id: str) -> dict[str, Any]:
-        return {"project_id": project_id, "cancelled": planning_manager.cancel(project_id)}
+    async def studio_cancel_planning(project_id: str) -> dict[str, Any]:
+        return {
+            "project_id": project_id,
+            "cancelled": await planning_manager.cancel(project_id),
+        }
 
     @mcp.resource("studio://projects")
     def projects_resource() -> str:

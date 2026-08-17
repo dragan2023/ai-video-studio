@@ -86,6 +86,16 @@ render; it does not expose shell or arbitrary filesystem operations. Set
 Codex with the endpoint and a Bearer token. Set `STUDIO_MCP_ENABLED=false` to
 disable MCP without changing the Studio API.
 
+Every running Studio also publishes an agent-facing discovery document at
+`/llms.txt`. It describes the instance's MCP tools and resources, Codex and
+Claude Code setup, recommended project workflow, model-service topology,
+operational safeguards, and REST/OpenAPI fallbacks using the host that served
+the request:
+
+```bash
+curl http://127.0.0.1:7860/llms.txt
+```
+
 ```bash
 # Local Studio without a token
 codex mcp add nautilus-studio --url http://127.0.0.1:7860/mcp/
@@ -97,6 +107,13 @@ codex mcp add nautilus-studio \
   --bearer-token-env-var NAUTILUS_STUDIO_MCP_TOKEN
 
 codex mcp list
+```
+
+Claude Code can connect to the same endpoint:
+
+```bash
+claude mcp add --transport http nautilus-studio http://127.0.0.1:7860/mcp/
+claude mcp get nautilus-studio
 ```
 
 ## Docker

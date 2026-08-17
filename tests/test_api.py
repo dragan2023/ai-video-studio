@@ -71,6 +71,60 @@ def test_creator_flow_upload_plan_edit_compile(settings):
     assert client.get("/").status_code == 200
 
 
+def test_llms_txt_documents_codex_mcp_and_service_workflow(settings):
+    response = TestClient(create_app(settings)).get(
+        "/llms.txt",
+        headers={"host": "studio.example:7860"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["cache-control"] == "public, max-age=300"
+    assert response.headers["vary"] == "Host"
+    assert response.text.startswith("# Nautilus Studio\n")
+    assert "codex mcp add nautilus-studio --url http://studio.example:7860/mcp/" in response.text
+    assert "claude mcp add --transport http nautilus-studio http://studio.example:7860/mcp/" in response.text
+    assert "http://studio.example:7860/openapi.json" in response.text
+    assert "\n## Discovery\n" in response.text
+    assert "\n## MCP tools\n" in response.text
+    assert "\nThis trusted-network deployment" in response.text
+    assert "`studio_status()`" in response.text
+    assert "`studio_plan_project(" in response.text
+    assert "`studio_render_project(" in response.text
+    assert "GET `/api/services/status`" in response.text
+    assert "STUDIO_MCP_TOKEN" in response.text
+    assert "<provided-by-operator>" not in response.text
+    assert "/llms.txt" not in TestClient(create_app(settings)).get("/openapi.json").json()["paths"]
+
+
+def test_llms_txt_never_exposes_mcp_token_or_private_import_roots(settings):
+    protected = replace(
+        settings,
+        mcp_token="super-secret",
+        allowed_import_roots=(settings.data_dir / "private-import-root",),
+    )
+
+    response = TestClient(create_app(protected)).get("/llms.txt")
+
+    assert response.status_code == 200
+    assert "--bearer-token-env-var NAUTILUS_STUDIO_MCP_TOKEN" in response.text
+    assert "Authorization: Bearer ${NAUTILUS_STUDIO_MCP_TOKEN}" in response.text
+    assert "codex mcp add nautilus-studio --url" not in response.text
+    assert "super-secret" not in response.text
+    assert "private-import-root" not in response.text
+
+
+def test_llms_txt_does_not_advertise_disabled_mcp(settings):
+    disabled = replace(settings, mcp_enabled=False)
+
+    response = TestClient(create_app(disabled)).get("/llms.txt")
+
+    assert response.status_code == 200
+    assert "Streamable HTTP MCP: disabled in this deployment" in response.text
+    assert "codex mcp add nautilus-studio" not in response.text
+    assert "claude mcp add" not in response.text
+
+
 def test_service_status_api_keeps_optional_services_explicit(settings):
     client = TestClient(create_app(settings))
 

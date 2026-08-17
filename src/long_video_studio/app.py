@@ -3,13 +3,14 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from long_video_studio import __version__
 from long_video_studio.api import create_api_router
 from long_video_studio.config import Settings
+from long_video_studio.llms_txt import render_llms_txt
 from long_video_studio.mcp_server import BearerAuthASGI, create_mcp_server
 from long_video_studio.planning import PlanningManager
 from long_video_studio.runner import RenderManager
@@ -73,6 +74,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
     if mcp_http_app is not None:
         app.mount(resolved.mcp_path.rstrip("/") or "/mcp", mcp_http_app, name="mcp")
+
+    @app.get("/llms.txt", response_class=PlainTextResponse, include_in_schema=False)
+    def llms_txt(request: Request) -> PlainTextResponse:
+        return PlainTextResponse(
+            render_llms_txt(
+                str(request.base_url),
+                mcp_enabled=resolved.mcp_enabled,
+                mcp_requires_token=bool(resolved.mcp_token),
+            ),
+            headers={"Cache-Control": "public, max-age=300", "Vary": "Host"},
+        )
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:

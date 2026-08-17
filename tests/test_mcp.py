@@ -62,6 +62,7 @@ def test_mcp_lists_creator_safe_tools_and_calls_projects(settings):
     with TestClient(create_app(settings)) as client:
         _initialize(client)
         listed = _rpc(client, "tools/list", {}, request_id=2)
+        llms_txt = client.get("/llms.txt").text
         called = _rpc(
             client,
             "tools/call",
@@ -82,8 +83,29 @@ def test_mcp_lists_creator_safe_tools_and_calls_projects(settings):
         "studio_render_status",
         "studio_cancel_planning",
     } <= names
+    assert all(f"`{name}" in llms_txt for name in names)
     assert called.status_code == 200
     assert _response_json(called)["result"]["structuredContent"]["result"] == []
+
+
+def test_mcp_cancel_planning_awaits_manager(settings):
+    with TestClient(create_app(settings)) as client:
+        _initialize(client)
+        response = _rpc(
+            client,
+            "tools/call",
+            {
+                "name": "studio_cancel_planning",
+                "arguments": {"project_id": "project_missing"},
+            },
+            request_id=2,
+        )
+
+    assert response.status_code == 200
+    assert _response_json(response)["result"]["structuredContent"] == {
+        "project_id": "project_missing",
+        "cancelled": False,
+    }
 
 
 def test_mcp_can_start_heuristic_storyboard_planning(settings):
