@@ -1684,6 +1684,67 @@ Ultra-fast short-drama anchor policy:
         fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", value, flags=re.DOTALL | re.IGNORECASE)
         return fenced.group(1) if fenced else value
 
+    @staticmethod
+    def _fit_shot_durations(source_durations: list[float], requested_duration: int) -> list[float]:
+        """Fit positive shot weights to an exact, centisecond-safe 4-14s timeline."""
+
+        shot_count = len(source_durations)
+        if shot_count == 0:
+            raise ValueError("AI planner duration mismatch: no shots returned")
+        minimum_duration = 4
+        maximum_duration = 14
+        if requested_duration < shot_count * minimum_duration:
+            raise ValueError(
+                f"AI planner returned too many shots ({shot_count}) for {requested_duration}s; "
+                "each shot must be at least 4s"
+            )
+        if requested_duration > shot_count * maximum_duration:
+            raise ValueError(
+                f"AI planner returned too few shots ({shot_count}) for {requested_duration}s; "
+                "each shot must be at most 14s"
+            )
+        if any(not math.isfinite(duration) or duration <= 0 for duration in source_durations):
+            raise ValueError("AI planner duration mismatch: source durations must be positive and finite")
+
+        def bounded_total(scale: float) -> float:
+            return sum(min(maximum_duration, max(minimum_duration, duration * scale)) for duration in source_durations)
+
+        lower_scale = 0.0
+        upper_scale = max(1.0, maximum_duration / min(source_durations))
+        for _ in range(80):
+            scale = (lower_scale + upper_scale) / 2
+            if bounded_total(scale) < requested_duration:
+                lower_scale = scale
+            else:
+                upper_scale = scale
+        scale = (lower_scale + upper_scale) / 2
+        fitted = [min(maximum_duration, max(minimum_duration, duration * scale)) for duration in source_durations]
+
+        target_centiseconds = requested_duration * 100
+        fitted_centiseconds = [
+            max(
+                minimum_duration * 100,
+                min(maximum_duration * 100, math.floor(duration * 100 + 1e-9)),
+            )
+            for duration in fitted
+        ]
+        remaining_centiseconds = target_centiseconds - sum(fitted_centiseconds)
+        rounding_order = sorted(
+            range(shot_count),
+            key=lambda index: fitted[index] * 100 - fitted_centiseconds[index],
+            reverse=True,
+        )
+        for index in rounding_order:
+            if remaining_centiseconds <= 0:
+                break
+            if fitted_centiseconds[index] < maximum_duration * 100:
+                fitted_centiseconds[index] += 1
+                remaining_centiseconds -= 1
+        if remaining_centiseconds != 0:
+            residual = remaining_centiseconds / 100
+            raise ValueError(f"AI planner duration cannot fit the safe 4-14s shot range; residual {residual:.2f}s")
+        return [duration / 100 for duration in fitted_centiseconds]
+
     def _normalize_agent_output(
         self,
         output: PlannerOutput,
@@ -1833,25 +1894,16 @@ Ultra-fast short-drama anchor policy:
             normalized.append(shot)
             previous = shot
         requested = brief.duration_seconds
-        actual = sum(shot.duration_seconds for shot in normalized)
-        if actual <= 0 or not normalized:
-            raise ValueError(f"AI planner duration mismatch: requested {requested}s, got {actual}s")
         # Agents are creative about beat lengths. Project their result onto the
         # requested timeline while retaining relative pacing and H3's 4-14s
         # per-shot limits. This is a scheduler invariant, not a prompt rewrite.
-        scaled = [shot.duration_seconds * requested / actual for shot in normalized]
-        if any(value < 4 for value in scaled):
-            scaled = [4.0 for _ in normalized]
-            remainder = requested - sum(scaled)
-            if remainder < -0.01:
-                # Too many agent beats for the requested duration; retain the
-                # first beats that can fit and merge the residual into the last.
-                raise ValueError(f"AI planner returned too many shots for {requested}s")
-            scaled[-1] += remainder
-        for index, value in enumerate(scaled):
+        fitted_durations = self._fit_shot_durations(
+            [shot.duration_seconds for shot in normalized],
+            requested,
+        )
+        for index, new_duration in enumerate(fitted_durations):
             shot = normalized[index]
             old_duration = shot.duration_seconds
-            new_duration = round(value, 2)
             ratio = new_duration / old_duration if old_duration > 0 else 1.0
             dialogue = [
                 line.model_copy(
@@ -1871,6 +1923,8 @@ Ultra-fast short-drama anchor policy:
                 )
                 for beat in shot.visual_beats
             ]
+            if visual_beats:
+                visual_beats[-1] = visual_beats[-1].model_copy(update={"end_seconds": new_duration})
             normalized[index] = shot.model_copy(
                 update={
                     "duration_seconds": new_duration,
@@ -1878,37 +1932,8 @@ Ultra-fast short-drama anchor policy:
                     "visual_beats": visual_beats,
                 }
             )
-        # Rounding the proportional schedule can leave a last-shot residual
-        # above the safe ceiling. Move that excess into earlier shots with
-        # available headroom instead of emitting a 15s boundary video.
-        residual = round(requested - sum(shot.duration_seconds for shot in normalized), 2)
-        if residual:
-            if residual > 0:
-                for index in range(len(normalized) - 1, -1, -1):
-                    headroom = round(14 - normalized[index].duration_seconds, 2)
-                    delta = min(residual, max(0.0, headroom))
-                    if delta:
-                        shot = normalized[index]
-                        new_duration = round(shot.duration_seconds + delta, 2)
-                        beats = list(shot.visual_beats)
-                        if beats:
-                            beats[-1] = beats[-1].model_copy(update={"end_seconds": new_duration})
-                        normalized[index] = shot.model_copy(
-                            update={"duration_seconds": new_duration, "visual_beats": beats}
-                        )
-                        residual = round(residual - delta, 2)
-                    if not residual:
-                        break
-            else:
-                last = normalized[-1]
-                new_duration = round(last.duration_seconds + residual, 2)
-                beats = list(last.visual_beats)
-                if beats:
-                    beats[-1] = beats[-1].model_copy(update={"end_seconds": new_duration})
-                normalized[-1] = last.model_copy(update={"duration_seconds": new_duration, "visual_beats": beats})
-        if residual:
-            raise ValueError(f"AI planner duration cannot fit the safe 4-14s shot range: residual {residual}")
         if any(shot.duration_seconds < 4 or shot.duration_seconds > 14 for shot in normalized):
+            actual = sum(shot.duration_seconds for shot in normalized)
             raise ValueError(f"AI planner duration mismatch: requested {requested}s, got {actual}s")
         return output.model_copy(update={"shots": normalized})
 
