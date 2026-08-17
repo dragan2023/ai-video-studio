@@ -71,6 +71,7 @@ def test_openai_compatible_provider_sends_multimodal_manifest_and_writes_image(t
         api_key="secret",
         transport=httpx.MockTransport(handler),
     )
+    assert provider.configured is True
     output = tmp_path / "anchor.png"
     request = ImageEditRequest(
         prompt="Place both references in one cinematic street scene.",

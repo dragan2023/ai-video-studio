@@ -51,6 +51,9 @@ class ImageEditRequest:
 
 class ImageEditProvider(Protocol):
     @property
+    def configured(self) -> bool: ...
+
+    @property
     def capabilities(self) -> ImageEditCapabilities: ...
 
     async def edit(self, request: ImageEditRequest) -> Path: ...
@@ -165,6 +168,12 @@ class OpenAICompatibleImageEditProvider:
         self.tokenizer_path = tokenizer_path
         self._tokenizer: object | None = None
         self.transport = transport
+
+    @property
+    def configured(self) -> bool:
+        """Whether this provider has a usable endpoint configured."""
+
+        return bool(self.base_url)
 
     @property
     def capabilities(self) -> ImageEditCapabilities:
