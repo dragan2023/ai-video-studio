@@ -76,6 +76,29 @@ nautilus-studio --host 127.0.0.1 --port 7860
 Open `http://127.0.0.1:7860`. Without external endpoints, the deterministic
 planner, project editor, material library, and compiler remain available.
 
+### MCP endpoint
+
+The same Studio process exposes a Streamable HTTP MCP endpoint at
+`http://127.0.0.1:7860/mcp/`. It provides creator-facing tools for listing
+assets/projects, planning a storyboard, checking render state, and starting a
+render; it does not expose shell or arbitrary filesystem operations. Set
+`STUDIO_MCP_TOKEN` when the service is reachable by other users, then configure
+Codex with the endpoint and a Bearer token. Set `STUDIO_MCP_ENABLED=false` to
+disable MCP without changing the Studio API.
+
+```bash
+# Local Studio without a token
+codex mcp add nautilus-studio --url http://127.0.0.1:7860/mcp/
+
+# Token-protected Studio
+export NAUTILUS_STUDIO_MCP_TOKEN='...'
+codex mcp add nautilus-studio \
+  --url http://127.0.0.1:7860/mcp/ \
+  --bearer-token-env-var NAUTILUS_STUDIO_MCP_TOKEN
+
+codex mcp list
+```
+
 ## Docker
 
 ```bash

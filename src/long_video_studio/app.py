@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from long_video_studio import __version__
 from long_video_studio.api import create_api_router
 from long_video_studio.config import Settings
+from long_video_studio.mcp_server import BearerAuthASGI, create_mcp_server
 from long_video_studio.planning import PlanningManager
 from long_video_studio.runner import RenderManager
 from long_video_studio.services import StudioServices
@@ -24,14 +25,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.repository,
         estimator=services.estimator,
     )
+    mcp_server = create_mcp_server(services, planning_manager, render_manager) if resolved.mcp_enabled else None
+    mcp_http_app = mcp_server.streamable_http_app() if mcp_server is not None else None
+    if mcp_http_app is not None and resolved.mcp_token:
+        mcp_http_app = BearerAuthASGI(mcp_http_app, resolved.mcp_token)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        try:
-            yield
-        finally:
-            await planning_manager.shutdown()
-            await render_manager.shutdown()
+        if mcp_server is None:
+            try:
+                yield
+            finally:
+                await planning_manager.shutdown()
+                await render_manager.shutdown()
+            return
+        async with mcp_server.session_manager.run():
+            try:
+                yield
+            finally:
+                await planning_manager.shutdown()
+                await render_manager.shutdown()
 
     app = FastAPI(
         title="Nautilus Studio",
@@ -42,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.services = services
     app.state.planning_manager = planning_manager
     app.state.render_manager = render_manager
+    app.state.mcp_server = mcp_server
     app.include_router(create_api_router())
 
     if not resolved.web_root:
@@ -57,6 +71,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     assets_dir = static_dir / "assets"
     if assets_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+    if mcp_http_app is not None:
+        app.mount(resolved.mcp_path.rstrip("/") or "/mcp", mcp_http_app, name="mcp")
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:

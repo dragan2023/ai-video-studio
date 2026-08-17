@@ -142,6 +142,14 @@ class Settings:
     gpu_snapshot_max_age_seconds: float = 20.0
     gpu_snapshot_max_bytes: int = 1_048_576
     h3_quality: str = "lossless"
+    mcp_enabled: bool = True
+    mcp_token: str | None = None
+    mcp_path: str = "/mcp"
+    mcp_allowed_hosts: tuple[str, ...] = (
+        "127.0.0.1:*",
+        "localhost:*",
+        "testserver",
+    )
 
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> Settings:
@@ -266,6 +274,17 @@ class Settings:
             gpu_snapshot_max_bytes=max(
                 1024,
                 int(os.getenv("STUDIO_GPU_SNAPSHOT_MAX_BYTES", "1048576")),
+            ),
+            mcp_enabled=_enabled("STUDIO_MCP_ENABLED", default=True),
+            mcp_token=os.getenv("STUDIO_MCP_TOKEN") or None,
+            mcp_path=os.getenv("STUDIO_MCP_PATH", "/mcp").strip() or "/mcp",
+            mcp_allowed_hosts=tuple(
+                host.strip()
+                for host in os.getenv(
+                    "STUDIO_MCP_ALLOWED_HOSTS",
+                    "127.0.0.1:*,localhost:*,testserver",
+                ).split(",")
+                if host.strip()
             ),
         )
 

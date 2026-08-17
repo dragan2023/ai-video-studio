@@ -22,6 +22,8 @@ All notable changes to Nautilus Studio will be documented here.
   tail-reference Ref2VA `fast`, and full-reference Ref2VA `quality`. Ultra-fast
   supports black fades, dissolves, hard cuts, deterministic random transitions,
   and an opt-in legacy boundary-frame strategy.
+- Added an in-process Streamable HTTP MCP endpoint with creator-safe project,
+  asset, planner, and render tools.
 - A 14-second per-shot safety ceiling across planner, API, compiler, and H3
   transport boundaries so encoded Ref2VA inputs stay below H3's 15-second
   reference-video limit.
