@@ -440,7 +440,9 @@ def test_director_source_ledger_allows_only_complete_adjacent_screenplay_lines()
             ]
         }
     )
-    PlannerService._validate_creator_dialogue_selection([second_only], source, world)
+    with pytest.raises(DialogueHarnessError) as partial_run:
+        PlannerService._validate_creator_dialogue_selection([second_only], source, world)
+    assert partial_run.value.code == "dialogue_source_mismatch"
 
     shortened = blueprint.model_copy(update={"dialogue": [combined.model_copy(update={"text": "关键是——它保熟。"})]})
     with pytest.raises(DialogueHarnessError) as raised:

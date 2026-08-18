@@ -1237,8 +1237,22 @@ Ultra-fast short-drama anchor policy:
             for blueprint_index, blueprint in enumerate(blueprints)
             for line_index, line in enumerate(blueprint.dialogue)
         ]
+        source_runs: list[tuple[int, int]] = []
+        run_start = 0
+        while run_start < len(canonical_source):
+            run_end = run_start + 1
+            while (
+                run_end < len(canonical_source)
+                and canonical_source[run_end].speaker == canonical_source[run_start].speaker
+                and canonical_source[run_end].mode == canonical_source[run_start].mode
+            ):
+                run_end += 1
+            source_runs.append((run_start, run_end))
+            run_start = run_end
         source_cursor = 0
+        selected_indices: set[int] = set()
         for blueprint_index, line_index, line in selected:
+            matched_start: int | None = None
             matched_end: int | None = None
             for possible_start in range(source_cursor, len(canonical_source)):
                 first = canonical_source[possible_start]
@@ -1251,6 +1265,7 @@ Ultra-fast short-drama anchor policy:
                         break
                     combined += candidate.text
                     if cls._dialogue_text_key(line.text) == cls._dialogue_text_key(combined):
+                        matched_start = possible_start
                         matched_end = source_index + 1
                         break
                 if matched_end is not None:
@@ -1266,6 +1281,28 @@ Ultra-fast short-drama anchor policy:
                     text=line.text,
                 )
             source_cursor = matched_end
+            assert matched_start is not None
+            selected_indices.update(range(matched_start, matched_end))
+        for run_start, run_end in source_runs:
+            run_indices = set(range(run_start, run_end))
+            overlap = selected_indices & run_indices
+            if overlap and overlap != run_indices:
+                raise DialogueHarnessError(
+                    "dialogue_source_mismatch",
+                    "Director selected only part of an adjacent same-speaker dialogue run",
+                    source_run_start=run_start,
+                    source_run_end=run_end,
+                    selected_source_indices=sorted(overlap),
+                )
+        for run_start, run_end in source_runs[-2:]:
+            if set(range(run_start, run_end)).issubset(selected_indices):
+                continue
+            raise DialogueHarnessError(
+                "dialogue_source_mismatch",
+                "Director omitted a required final payoff dialogue run",
+                source_run_start=run_start,
+                source_run_end=run_end,
+            )
 
     @classmethod
     def _director_shot_schedule(cls, brief: ProjectBrief) -> dict[str, Any]:
@@ -1370,7 +1407,9 @@ Ultra-fast short-drama anchor policy:
             "join only adjacent lines from the same speaker; never select a fragment, paraphrase, or invented "
             "replacement. Select the causally essential source dialogue events that fit the requested film "
             "duration, preserve their source order, and never repeat one. Adjacent selected events from the same "
-            "speaker/mode may be joined as one ledger line, but no other merge is allowed. Omitting a whole "
+            "speaker/mode form an atomic dialogue run: select the whole run or omit the whole run; the run may be "
+            "joined as one ledger line, but selecting only its tail/head is forbidden. Always preserve the final "
+            "two dialogue runs because they carry the climax/payoff. Omitting another whole "
             "nonessential source event is allowed when the requested duration cannot carry the complete screenplay; "
             "truncating a selected event is never allowed. Every source "
             "speaker spelling, including the creator's original language, must appear verbatim as that "
