@@ -468,6 +468,27 @@ function ServiceStatusRow({ service, telemetryState }) {
 function RuntimeStatus({ status, job, open, onToggle, onClose }) {
   const root = useRef(null);
   const services = status?.services || [];
+  const orderedServices = useMemo(
+    () =>
+      services
+        .map((service, index) => ({ service, index }))
+        .sort(({ service: left, index: leftIndex }, { service: right, index: rightIndex }) => {
+          const leftOnline = ["ready", "busy", "queued"].includes(left.state);
+          const rightOnline = ["ready", "busy", "queued"].includes(right.state);
+          if (leftOnline !== rightOnline) return leftOnline ? -1 : 1;
+
+          // Keep the two H3 workers together ahead of planner/image services
+          // whenever they are in the same online/offline group.
+          const h3Rank = (service) =>
+            service.id === "fl2va" || service.id === "ref2va" ? 0 : 1;
+          const leftH3 = h3Rank(left);
+          const rightH3 = h3Rank(right);
+          if (leftH3 !== rightH3) return leftH3 - rightH3;
+          return leftIndex - rightIndex;
+        })
+        .map(({ service }) => service),
+    [services],
+  );
   const configured = services.filter((service) => service.configured);
   const available = configured.filter((service) =>
     ["ready", "busy", "queued"].includes(service.state),
@@ -546,7 +567,7 @@ function RuntimeStatus({ status, job, open, onToggle, onClose }) {
                 </span>
               </div>
               <div className="runtime-service-list">
-                {services.map((service) => (
+                {orderedServices.map((service) => (
                   <ServiceStatusRow
                     key={service.id}
                     service={service}
