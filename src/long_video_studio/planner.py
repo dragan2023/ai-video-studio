@@ -1239,34 +1239,26 @@ Ultra-fast short-drama anchor policy:
         ]
         source_cursor = 0
         for blueprint_index, line_index, line in selected:
-            if source_cursor >= len(canonical_source):
-                raise DialogueHarnessError(
-                    "dialogue_source_mismatch",
-                    "Director repeated or invented dialogue after the creator screenplay ledger ended",
-                    shot_index=blueprint_index,
-                    line_index=line_index,
-                    speaker=line.speaker,
-                    text=line.text,
-                )
-            first = canonical_source[source_cursor]
-            combined = ""
             matched_end: int | None = None
-            for source_index in range(source_cursor, len(canonical_source)):
-                candidate = canonical_source[source_index]
-                if candidate.speaker != first.speaker or candidate.mode != first.mode:
-                    break
-                combined += candidate.text
-                if (
-                    line.speaker == first.speaker
-                    and line.mode == first.mode
-                    and cls._dialogue_text_key(line.text) == cls._dialogue_text_key(combined)
-                ):
-                    matched_end = source_index + 1
+            for possible_start in range(source_cursor, len(canonical_source)):
+                first = canonical_source[possible_start]
+                if line.speaker != first.speaker or line.mode != first.mode:
+                    continue
+                combined = ""
+                for source_index in range(possible_start, len(canonical_source)):
+                    candidate = canonical_source[source_index]
+                    if candidate.speaker != first.speaker or candidate.mode != first.mode:
+                        break
+                    combined += candidate.text
+                    if cls._dialogue_text_key(line.text) == cls._dialogue_text_key(combined):
+                        matched_end = source_index + 1
+                        break
+                if matched_end is not None:
                     break
             if matched_end is None:
                 raise DialogueHarnessError(
                     "dialogue_source_mismatch",
-                    "Director omitted, reordered, shortened, paraphrased, invented, or reassigned screenplay dialogue",
+                    "Director repeated, reordered, shortened, paraphrased, invented, or reassigned screenplay dialogue",
                     shot_index=blueprint_index,
                     line_index=line_index,
                     expected_source_index=source_cursor,
@@ -1274,15 +1266,6 @@ Ultra-fast short-drama anchor policy:
                     text=line.text,
                 )
             source_cursor = matched_end
-        if source_cursor != len(canonical_source):
-            missing = canonical_source[source_cursor]
-            raise DialogueHarnessError(
-                "dialogue_source_mismatch",
-                "Director omitted one or more creator-authored screenplay dialogue events",
-                expected_source_index=source_cursor,
-                missing_speaker=missing.speaker,
-                missing_text=missing.text,
-            )
 
     @classmethod
     def _director_shot_schedule(cls, brief: ProjectBrief) -> dict[str, Any]:
@@ -1385,11 +1368,11 @@ Ultra-fast short-drama anchor policy:
             "every on-screen dialogue subject_id must appear in that exact typed list. When "
             "creator_dialogue_source is non-empty, a selected ledger line must copy one source line exactly or "
             "join only adjacent lines from the same speaker; never select a fragment, paraphrase, or invented "
-            "replacement. Cover every source dialogue event exactly once and in source order across all "
-            "blueprints; never omit or repeat one. Adjacent events from the same speaker/mode may be joined as one "
-            "ledger line, but no other merge is allowed. If the requested duration cannot carry the complete "
-            "screenplay at the speech budget, return a schedule that fails the harness rather than silently "
-            "dropping words. Every source "
+            "replacement. Select the causally essential source dialogue events that fit the requested film "
+            "duration, preserve their source order, and never repeat one. Adjacent selected events from the same "
+            "speaker/mode may be joined as one ledger line, but no other merge is allowed. Omitting a whole "
+            "nonessential source event is allowed when the requested duration cannot carry the complete screenplay; "
+            "truncating a selected event is never allowed. Every source "
             "speaker spelling, including the creator's original language, must appear verbatim as that "
             "SubjectCard's label or alias so the deterministic ledger can resolve it. "
             f"{continuity_contract} {cls._director_schedule_contract(brief)} "

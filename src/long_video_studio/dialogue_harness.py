@@ -395,6 +395,7 @@ def normalize_dialogue_timing(
     interline_gap_seconds: float = DEFAULT_INTERLINE_GAP_SECONDS,
     tail_out_seconds: float = DEFAULT_TAIL_OUT_SECONDS,
     speech_margin_seconds: float = DEFAULT_SPEECH_MARGIN_SECONDS,
+    repair_explicit: bool = False,
 ) -> list[DialogueLine]:
     """Canonicalize and deterministically fill missing line timings.
 
@@ -405,6 +406,15 @@ def normalize_dialogue_timing(
 
     _validate_schedule_options(duration_seconds, lead_in_seconds, interline_gap_seconds, tail_out_seconds)
     canonical = canonicalize_dialogue(lines, world_bible, roster=roster)
+    if repair_explicit:
+        return _repair_lines(
+            canonical,
+            duration_seconds,
+            lead_in_seconds=lead_in_seconds,
+            interline_gap_seconds=interline_gap_seconds,
+            tail_out_seconds=tail_out_seconds,
+            speech_margin_seconds=speech_margin_seconds,
+        )
     return _schedule_lines(
         canonical,
         duration_seconds,
@@ -456,6 +466,7 @@ def prepare_dialogue(
         duration_seconds,
         world_bible=canonical_bible,
         roster=roster,
+        repair_explicit=True,
         **timing_options,
     )
     return DialoguePreparation(canonical_bible, roster, tuple(timed))
@@ -488,10 +499,104 @@ def schedule_dialogue_lines(
     """Planner-facing alias that fills timings and returns a small envelope."""
 
     try:
-        scheduled = normalize_dialogue_timing(lines, duration_seconds)
+        scheduled = normalize_dialogue_timing(lines, duration_seconds, repair_explicit=True)
     except DialogueHarnessError as error:
         raise _with_shot_index(error, shot_index) from error
     return DialogueSchedule(tuple(scheduled), shot_index=shot_index)
+
+
+def _repair_lines(
+    lines: Sequence[DialogueLine],
+    duration_seconds: float,
+    *,
+    lead_in_seconds: float,
+    interline_gap_seconds: float,
+    tail_out_seconds: float,
+    speech_margin_seconds: float,
+) -> list[DialogueLine]:
+    """Reflow fixable LLM timing mistakes without changing spoken content."""
+
+    if not lines:
+        return []
+    required = [minimum_dialogue_window(line, speech_margin_seconds=speech_margin_seconds) for line in lines]
+    available = duration_seconds - lead_in_seconds - tail_out_seconds
+    required_total = sum(required) + interline_gap_seconds * max(0, len(lines) - 1)
+    if required_total > available + _TIMING_TOLERANCE:
+        raise DialogueHarnessError(
+            "dialogue_schedule_overflow",
+            "dialogue cannot fit this shot after deterministic reflow; Director must redistribute the cut",
+            required_seconds=round(required_total, 3),
+            available_seconds=round(available, 3),
+            line_count=len(lines),
+        )
+
+    preferred: list[float] = []
+    desired_starts: list[float | None] = []
+    for line, minimum in zip(lines, required, strict=True):
+        explicit_window = (
+            line.end_seconds - line.start_seconds
+            if line.start_seconds is not None and line.end_seconds is not None
+            else minimum
+        )
+        preferred.append(max(minimum, explicit_window))
+        if line.start_seconds is not None:
+            desired_starts.append(line.start_seconds)
+        elif line.end_seconds is not None:
+            desired_starts.append(max(lead_in_seconds, line.end_seconds - minimum))
+        else:
+            desired_starts.append(None)
+
+    preferred_total = sum(preferred) + interline_gap_seconds * max(0, len(lines) - 1)
+    windows = preferred if preferred_total <= available + _TIMING_TOLERANCE else required
+
+    starts: list[float] = []
+    ends: list[float] = []
+    cursor = lead_in_seconds
+    for desired, window in zip(desired_starts, windows, strict=True):
+        start = max(cursor, desired if desired is not None else cursor)
+        end = start + window
+        starts.append(start)
+        ends.append(end)
+        cursor = end + interline_gap_seconds
+
+    maximum_end = duration_seconds - tail_out_seconds
+    overflow = ends[-1] - maximum_end
+    if overflow > _TIMING_TOLERANCE:
+        shift = min(overflow, max(0.0, starts[0] - lead_in_seconds))
+        if shift > 0:
+            starts = [value - shift for value in starts]
+            ends = [value - shift for value in ends]
+            overflow -= shift
+        if overflow > _TIMING_TOLERANCE:
+            # Explicit timestamps contained idle gaps or oversized speech
+            # windows. Compact them from the lead-in using only safe minimums.
+            windows = required
+            starts = []
+            ends = []
+            cursor = lead_in_seconds
+            for window in windows:
+                starts.append(cursor)
+                cursor += window
+                ends.append(cursor)
+                cursor += interline_gap_seconds
+
+    if ends[-1] > maximum_end + _TIMING_TOLERANCE:
+        raise DialogueHarnessError(
+            "dialogue_schedule_overflow",
+            "dialogue reflow could not preserve the requested tail room",
+            required_seconds=round(required_total, 3),
+            available_seconds=round(available, 3),
+            final_end_seconds=round(ends[-1], 3),
+        )
+    return [
+        line.model_copy(
+            update={
+                "start_seconds": round(start, 3),
+                "end_seconds": round(end, 3),
+            }
+        )
+        for line, start, end in zip(lines, starts, ends, strict=True)
+    ]
 
 
 def _schedule_lines(

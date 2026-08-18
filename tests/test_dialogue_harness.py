@@ -279,6 +279,36 @@ def test_final_line_reserves_a_short_natural_tail():
     assert raised.value.code == "dialogue_tail_overflow"
 
 
+def test_planner_wrapper_repairs_tail_overflow_and_unnecessary_slack():
+    lines = [
+        DialogueLine(speaker="梁文锋", text="第一句。", start_seconds=0, end_seconds=5),
+        DialogueLine(speaker="梁文锋", text="第二句。", start_seconds=5, end_seconds=10),
+        DialogueLine(speaker="梁文锋", text="第三句。", start_seconds=10, end_seconds=15),
+    ]
+
+    repaired = schedule_dialogue_lines(lines, 15).lines
+
+    assert [line.text for line in repaired] == [line.text for line in lines]
+    assert repaired[-1].end_seconds is not None
+    assert repaired[-1].end_seconds <= 14.65
+    assert repaired[1].start_seconds is not None
+    assert repaired[0].end_seconds is not None
+    assert repaired[1].start_seconds >= repaired[0].end_seconds
+
+
+def test_planner_wrapper_escalates_only_intrinsically_overfull_dialogue():
+    lines = [
+        DialogueLine(speaker="梁文锋", text="这是一个绝对不能被截断的非常长的句子。" * 4),
+        DialogueLine(speaker="梁文锋", text="这是第二个同样绝对不能被截断的非常长的句子。" * 4),
+    ]
+
+    with pytest.raises(DialogueHarnessError) as raised:
+        schedule_dialogue_lines(lines, 15)
+
+    assert raised.value.code == "dialogue_schedule_overflow"
+    assert raised.value.details["required_seconds"] > raised.value.details["available_seconds"]
+
+
 def test_validate_requires_explicit_timing_but_prepare_combines_all_steps():
     line = DialogueLine(speaker="梁文锋", text="你好。")
     with pytest.raises(DialogueHarnessError) as raised:
@@ -403,6 +433,15 @@ def test_director_source_ledger_allows_only_complete_adjacent_screenplay_lines()
 
     PlannerService._validate_creator_dialogue_selection([blueprint], source, world)
 
+    second_only = blueprint.model_copy(
+        update={
+            "dialogue": [
+                combined.model_copy(update={"text": "我这 S5000 国产的，算力实打实，价格只要你零头。关键是——它保熟。"})
+            ]
+        }
+    )
+    PlannerService._validate_creator_dialogue_selection([second_only], source, world)
+
     shortened = blueprint.model_copy(update={"dialogue": [combined.model_copy(update={"text": "关键是——它保熟。"})]})
     with pytest.raises(DialogueHarnessError) as raised:
         PlannerService._validate_creator_dialogue_selection([shortened], source, world)
@@ -504,7 +543,7 @@ def test_hierarchical_planner_retries_only_the_rejected_shot(settings):
     assert len(shot_requests) == 2
     feedback = shot_requests[1]["harness_feedback"]
     assert isinstance(feedback, dict)
-    assert "dialogue_window_too_short" in str(feedback["error"])
+    assert "dialogue_ledger_mismatch" in str(feedback["error"])
     assert output.shots[0].dialogue[0].speaker == "Liang Wenfeng"
     assert output.shots[0].dialogue[0].end_seconds == 12.5
 
@@ -516,7 +555,7 @@ def test_planner_wrappers_attach_shot_index_to_structured_errors():
 
     with pytest.raises(DialogueHarnessError) as raised:
         schedule_dialogue_lines(
-            [DialogueLine(speaker="Liang Wenfeng", text="一" * 40, start_seconds=0, end_seconds=1)],
+            [DialogueLine(speaker="Liang Wenfeng", text="一" * 100, start_seconds=0, end_seconds=1)],
             15,
             shot_index=4,
         )
