@@ -477,6 +477,15 @@ function RuntimeStatus({ status, job, open, onToggle, onClose }) {
           const rightOnline = ["ready", "busy", "queued"].includes(right.state);
           if (leftOnline !== rightOnline) return leftOnline ? -1 : 1;
 
+          // The planner is useful context, but active model workers are more
+          // actionable while rendering, so keep planner last among online
+          // services. Offline services retain the backend's stable order.
+          if (leftOnline && rightOnline) {
+            const leftPlanner = left.id === "planner";
+            const rightPlanner = right.id === "planner";
+            if (leftPlanner !== rightPlanner) return leftPlanner ? 1 : -1;
+          }
+
           // Keep the two H3 workers together ahead of planner/image services
           // whenever they are in the same online/offline group.
           const h3Rank = (service) =>
