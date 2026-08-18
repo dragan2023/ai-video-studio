@@ -10,6 +10,7 @@ from test_assets import png_bytes
 
 from long_video_studio.app import create_app
 from long_video_studio.domain import (
+    ContinuationMode,
     FilmProject,
     ProjectBrief,
     RenderJob,
@@ -404,7 +405,11 @@ def test_zero_material_render_accepts_configured_text_to_image_endpoint(settings
     )
     project = app.state.services.repository.save_project(
         FilmProject(
-            brief=ProjectBrief(prompt="A new studio.", reference_asset_ids=[]),
+            brief=ProjectBrief(
+                prompt="A new studio.",
+                reference_asset_ids=[],
+                continuation_mode=ContinuationMode.ULTRA_FAST,
+            ),
             world_bible=WorldBible(logline="Arrival", visual_style="cinematic"),
             shots=[shot],
             status="planned",

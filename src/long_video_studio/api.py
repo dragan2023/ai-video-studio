@@ -596,12 +596,27 @@ def create_api_router() -> APIRouter:
                 missing.append(f"earlier continuation source for shot {shot.index + 1}")
             if runtime_task == ShotTask.FL2VA:
                 image_references = [asset for asset in assets if asset.kind == AssetKind.IMAGE]
-                needs_anchor = ultra_independent[shot.id] or (
-                    continuation_modes[shot.id] != ContinuationMode.ULTRA_FAST
-                    and anchor_selected(
-                        shot,
-                        position,
-                        services.settings.image_edit_anchor_mode,
+                first_shot_needs_t2i = (
+                    position == 0
+                    and not shot.start_frame_asset_id
+                    and not shot.continuity_from_shot_id
+                    and bool(shot.anchor_prompt)
+                )
+                is_boundary_continuation = (
+                    continuation_modes[shot.id] == ContinuationMode.ULTRA_FAST
+                    and bool(shot.continuity_from_shot_id)
+                    and not ultra_independent[shot.id]
+                )
+                needs_anchor = (
+                    first_shot_needs_t2i
+                    or ultra_independent[shot.id]
+                    or (
+                        not is_boundary_continuation
+                        and anchor_selected(
+                            shot,
+                            position,
+                            services.settings.image_edit_anchor_mode,
+                        )
                     )
                 )
                 if needs_anchor:
