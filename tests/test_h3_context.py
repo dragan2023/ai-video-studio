@@ -309,9 +309,10 @@ def test_context_ir_keeps_stable_subject_card_identity_binding():
         ],
     )
     prompt = compile_ref2va_context(shot, [("video", "Video 1", "prior clip")], world_bible=bible).render()
-    assert "subject_id=bailu" in prompt
+    assert "<Subject 1> is the silent canonical character" in prompt
     assert "aliases=Bai Lu, 演员白鹿" in prompt
     assert "visual_identity=same face" in prompt
+    assert "no speaker ID is assigned in this clip" in prompt
 
 
 def test_context_ir_preserves_long_planner_fields_and_beat_details():

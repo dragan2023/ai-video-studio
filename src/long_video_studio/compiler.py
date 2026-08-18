@@ -5,6 +5,10 @@ from typing import TYPE_CHECKING
 from long_video_studio.adapters.image_edit import known_multi_image_support
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
+from long_video_studio.dialogue_harness import (
+    prepare_dialogue,
+    validate_active_speakers,
+)
 from long_video_studio.domain import (
     AssetKind,
     ContinuationMode,
@@ -153,6 +157,31 @@ class FilmCompiler:
             warnings.append(f"unsupported STUDIO_IMAGE_EDIT_ANCHOR_MODE: {anchor_mode}")
 
         for position, shot in enumerate(sorted(project.shots, key=lambda value: value.index)):
+            if shot.dialogue:
+                legacy_dialogue = not project.world_bible.subjects
+                prepared = prepare_dialogue(
+                    shot.dialogue,
+                    shot.duration_seconds,
+                    project.world_bible,
+                )
+                active_subject_ids = shot.continuity_in.active_subject_ids
+                if legacy_dialogue and not active_subject_ids and not shot.continuity_in.characters:
+                    active_subject_ids = [
+                        line.subject_id for line in prepared.lines if line.mode == "on_screen" and line.subject_id
+                    ]
+                    warnings.append(
+                        f"shot {shot.index + 1} used a one-time legacy dialogue roster migration; "
+                        "re-plan the project to persist canonical SubjectCards"
+                    )
+                validate_active_speakers(
+                    prepared.lines,
+                    prepared.world_bible,
+                    shot.continuity_in.characters,
+                    active_subject_ids=active_subject_ids,
+                    shot_index=shot.index,
+                )
+                continuity_in = shot.continuity_in.model_copy(update={"active_subject_ids": active_subject_ids})
+                shot = shot.model_copy(update={"dialogue": list(prepared.lines), "continuity_in": continuity_in})
             is_ultra_independent = uses_independent_ultra_fast_anchor(project, shot)
             dependencies: list[str] = []
             if shot.continuity_from_shot_id and not shot.start_frame_asset_id:

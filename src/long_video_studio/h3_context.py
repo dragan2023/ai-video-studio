@@ -19,6 +19,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .dialogue_harness import build_speaker_roster, canonicalize_dialogue
 from .domain import DialogueLine, ProjectBrief, ShotSpec, WorldBible
 from .style_registry import get_style_contract
 
@@ -159,14 +160,26 @@ render_ref2va_context = compile_ref2va_context
 compile_context_ir = compile_ref2va_context
 
 
-def stable_speaker_ids(shots: Sequence[ShotSpec]) -> dict[str, str]:
+def stable_speaker_ids(
+    shots: Sequence[ShotSpec],
+    world_bible: WorldBible | None = None,
+) -> dict[str, str]:
     """Assign project-stable speaker IDs in target playback order."""
 
+    ordered_lines = [line for shot in sorted(shots, key=lambda value: value.index) for line in shot.dialogue]
+    if world_bible and world_bible.subjects:
+        roster = build_speaker_roster(world_bible, ordered_lines)
+        result: dict[str, str] = {}
+        for binding in roster:
+            if binding.speaker_id is None:
+                continue
+            for name in binding.names:
+                result[name] = binding.speaker_id
+        return result
     result: dict[str, str] = {}
-    for shot in sorted(shots, key=lambda value: value.index):
-        for line in shot.dialogue:
-            if line.speaker not in result:
-                result[line.speaker] = f"S{len(result) + 1}"
+    for line in ordered_lines:
+        if line.speaker not in result:
+            result[line.speaker] = line.speaker_id or f"S{len(result) + 1}"
     return result
 
 
@@ -294,18 +307,16 @@ def _normalise_speaker_ids(
     world_bible: WorldBible | None = None,
 ) -> dict[str, str]:
     result: dict[str, str] = dict(supplied or {})
-    cards = world_bible.subjects if world_bible else ()
-    for line in lines:
-        for card in cards:
-            if card.speaker_id and line.speaker.casefold() in {
-                card.label.casefold(),
-                card.subject_id.casefold(),
-                *(alias.casefold() for alias in card.aliases),
-            }:
-                result.setdefault(line.speaker, card.speaker_id)
+    if world_bible and world_bible.subjects and lines:
+        canonical = canonicalize_dialogue(lines, world_bible)
+        for original, normalized in zip(lines, canonical, strict=True):
+            speaker_id = normalized.speaker_id or result.get(normalized.speaker)
+            if speaker_id:
+                result[original.speaker] = speaker_id
+                result[normalized.speaker] = speaker_id
     for line in lines:
         if line.speaker not in result:
-            result[line.speaker] = f"S{len(result) + 1}"
+            result[line.speaker] = line.speaker_id or f"S{len(set(result.values())) + 1}"
     return result
 
 
@@ -320,35 +331,11 @@ def _subject_definitions(
     lookup: dict[str, str] = {}
     seen: set[str] = set()
 
-    # World-bible cards are canonical. Per-shot continuity only fills an
-    # otherwise missing category, preventing the same person from being
-    # redefined as a short name, wardrobe string, and prop on every clip.
-    if world_bible and world_bible.subjects:
-        card_values = []
-        for card in world_bible.subjects:
-            details = [
-                f"subject_id={card.subject_id}",
-                f"label={card.label}",
-                f"aliases={', '.join(card.aliases) or 'none'}",
-                f"visual_identity={card.visual_identity or 'preserve the canonical identity'}",
-                f"wardrobe={card.wardrobe or 'preserve the established wardrobe'}",
-            ]
-            if card.reference_asset_ids:
-                details.append(f"reference_asset_ids={', '.join(card.reference_asset_ids)}")
-            if card.speaker_id:
-                details.append(f"speaker_id={card.speaker_id}")
-            card_values.append("; ".join(details))
-        character_values = tuple(card_values[:3]) or _active_canonical_values(
-            tuple(world_bible.character_notes),
-            tuple(shot.continuity_in.characters),
-            limit=3,
-        )
-    else:
-        character_values = _active_canonical_values(
-            tuple(world_bible.character_notes) if world_bible else (),
-            tuple(shot.continuity_in.characters),
-            limit=3,
-        )
+    character_values = _active_canonical_values(
+        tuple(world_bible.character_notes) if world_bible else (),
+        tuple(shot.continuity_in.characters),
+        limit=3,
+    )
     location_values = _active_canonical_values(
         tuple(world_bible.location_notes) if world_bible else (),
         (shot.continuity_in.location,) if shot.continuity_in.location else (),
@@ -359,14 +346,51 @@ def _subject_definitions(
         tuple(shot.continuity_in.props),
         limit=4,
     )
-    groups: tuple[tuple[str, Sequence[str]], ...] = (
-        ("character", character_values),
-        ("location", location_values),
-        ("prop", prop_values),
-    )
-
     subject_number = 1
     visual_sources = ", ".join(f"<{reference.label}>" for reference in refs if reference.kind in {"picture", "video"})
+    grounding = f", grounded in {visual_sources}" if visual_sources else ""
+    # SubjectCards are the canonical identity/voice table. Emit them directly
+    # instead of relying on a substring match between prose and a free-form
+    # speaker label. Every alias points to the same visual Subject and voice.
+    if world_bible and world_bible.subjects:
+        roster = build_speaker_roster(world_bible, shot.dialogue)
+        for binding in roster:
+            card = binding.card
+            assert card is not None
+            details = [
+                f"label={binding.label}",
+                f"aliases={', '.join(binding.aliases) or 'none'}",
+                f"visual_identity={card.visual_identity or 'preserve the canonical identity'}",
+                f"wardrobe={card.wardrobe or 'preserve the established wardrobe'}",
+            ]
+            if card.reference_asset_ids:
+                details.append(f"reference_asset_ids={', '.join(card.reference_asset_ids)}")
+            subject_label = f"Subject {subject_number}"
+            if binding.speaker_id:
+                entries.append(
+                    f"<{subject_label}> ({binding.speaker_id}) is the canonical character described as "
+                    f"{'; '.join(details)}{grounding}. This visual subject exclusively owns voice "
+                    f"{binding.speaker_id}; aliases never create another voice."
+                )
+            else:
+                entries.append(
+                    f"<{subject_label}> is the silent canonical character described as "
+                    f"{'; '.join(details)}{grounding}; no speaker ID is assigned in this clip."
+                )
+            for name in binding.names:
+                lookup[name] = subject_label
+            seen.add(binding.label.casefold())
+            subject_number += 1
+        groups: tuple[tuple[str, Sequence[str]], ...] = (
+            ("location", location_values),
+            ("prop", prop_values),
+        )
+    else:
+        groups = (
+            ("character", character_values),
+            ("location", location_values),
+            ("prop", prop_values),
+        )
     for category, values in groups:
         for value in values:
             text = " ".join(str(value).split()).strip()
@@ -381,7 +405,6 @@ def _subject_definitions(
                         speaker_suffix = f" ({speaker_id})"
                         lookup[speaker] = f"Subject {subject_number}"
                         break
-            grounding = f", grounded in {visual_sources}" if visual_sources else ""
             description = _prompt_text(text, limit=2400) if category == "character" else _limit_words(text, 36)
             entries.append(
                 f"<Subject {subject_number}>{speaker_suffix} is the {category} described as {description}{grounding}."
@@ -755,7 +778,10 @@ def _dialogue_line(
     timing = _dialogue_timing(line)
     language = _language_name(line.language)
     mode_instruction = {
-        "on_screen": "The speaker remains visible and the mouth movement synchronizes naturally to the line.",
+        "on_screen": (
+            "This bound visual subject is the only speaker: its mouth movement synchronizes naturally to the line, "
+            "while every other visible subject keeps their lips closed and does not inherit this voice."
+        ),
         "off_screen": "The speaker is off screen; every visible character keeps their lips closed.",
         "voice_over": "The line is voice-over; every visible character keeps their lips closed.",
     }[line.mode]
@@ -843,9 +869,21 @@ def _soundscape(shot: ShotSpec, refs: Sequence[ContextReference]) -> str:
         value = "Natural synchronized ambience and physical action sounds continue without a hard seam."
     audio_refs = [reference for reference in refs if reference.kind == "audio"]
     if audio_refs:
-        value += " " + " ".join(
-            f"<{reference.label}> supplies the referenced audio characteristics." for reference in audio_refs
-        )
+        bound_speakers = {
+            (line.speaker_id, line.speaker) for line in shot.dialogue if line.speaker_id and line.mode != "voice_over"
+        }
+        if len(bound_speakers) == 1:
+            speaker_id, speaker = next(iter(bound_speakers))
+            value += " " + " ".join(
+                f"<{reference.label}> supplies voice timbre exclusively to ({speaker_id}) {speaker}; every other "
+                "subject keeps its own voice and must not adopt this timbre."
+                for reference in audio_refs
+            )
+        else:
+            value += " " + " ".join(
+                f"<{reference.label}> supplies the referenced audio characteristics without changing speaker ownership."
+                for reference in audio_refs
+            )
     return value
 
 

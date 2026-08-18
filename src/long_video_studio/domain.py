@@ -163,6 +163,7 @@ class ProjectBrief(BaseModel):
 
 
 class ContinuityState(BaseModel):
+    active_subject_ids: list[str] = Field(default_factory=list)
     characters: list[str] = Field(default_factory=list)
     wardrobe: list[str] = Field(default_factory=list)
     props: list[str] = Field(default_factory=list)
@@ -238,6 +239,12 @@ class DialogueLine(BaseModel):
     """
 
     speaker: str = Field(min_length=1)
+    # ``speaker`` is creator-facing text and may be an alias returned by an
+    # agent.  These optional fields are the canonical runtime binding.  The
+    # planner fills them from ``WorldBible.subjects`` before a shot reaches a
+    # model adapter, while keeping old project records readable.
+    subject_id: str | None = Field(default=None, min_length=1)
+    speaker_id: str | None = Field(default=None, min_length=1)
     text: str = Field(min_length=1)
     language: str = "Chinese"
     delivery: str = "natural"

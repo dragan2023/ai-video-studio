@@ -14,6 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
+from long_video_studio.dialogue_harness import (
+    DialogueHarnessError,
+    bind_dialogue_lines,
+    canonicalize_world_bible,
+    schedule_dialogue_lines,
+    validate_active_speakers,
+)
 from long_video_studio.director_skills import selected_skill_excerpt
 from long_video_studio.domain import (
     AssetKind,
@@ -79,6 +86,7 @@ class ShotBlueprint(BaseModel):
     purpose: str = ""
     source_section: str = Field(min_length=1)
     duration_seconds: float = Field(ge=H3_MIN_SHOT_SECONDS, le=H3_MAX_SHOT_SECONDS)
+    active_subject_ids: list[str] = Field(default_factory=list)
     active_subjects: list[str] = Field(default_factory=list)
     scene_and_landmarks: str = ""
     opening_state: str = ""
@@ -86,6 +94,9 @@ class ShotBlueprint(BaseModel):
     incoming_handoff: str = ""
     outgoing_handoff: str = ""
     audio_phase: str = ""
+    # Stage A owns the selected spoken content. Stage B may enrich delivery
+    # and visuals, but must not shorten, drop, merge, or reassign these lines.
+    dialogue: list[DialogueLine] = Field(default_factory=list)
     transition_kind: TransitionKind = TransitionKind.CONTINUOUS
     hook: str = ""
 
@@ -177,6 +188,12 @@ class PlannerService:
                     planner_trace=self._trace_snapshot(project_id),
                 )
                 return self.repository.save_project(project)
+            except DialogueHarnessError as error:
+                # A malformed speaker/timing contract is not an availability
+                # failure. Falling back to a generic heuristic storyboard
+                # would silently discard the creator's exact dialogue, so
+                # retain the structured trace and fail closed instead.
+                raise PlannerError(f"AI dialogue harness failed: {error}") from error
             except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as error:
                 if not self.settings.planner_allow_fallback:
                     raise PlannerError(f"AI storyboard planner failed: {error}") from error
@@ -523,6 +540,15 @@ delivery. Do not invent dialogue merely to make a shot feel complete. If the
 story does not explicitly require speech, return an empty dialogue list; the
 runtime will enforce no dialogue, narration, or voice-over. subtitle_text is
 external post-production text and must not be treated as model speech.
+For every dialogue line, copy the exact canonical label from a World Bible
+SubjectCard and provide its subject_id and speaker_id; aliases must resolve to
+that same card and invented speakers are forbidden. ``voice_over`` is the only
+valid mode for an unrostered narrator. Before choosing timings, estimate the
+spoken duration and reserve at least 0.35 seconds of headroom; use explicit,
+non-overlapping start_seconds/end_seconds. If a line plus the visible action
+cannot fit, split the shot rather than shortening or omitting the words. Only
+the bound subject may speak or move their lips; all other visible subjects stay
+silent during that interval.
 Write audio_prompt as 1-4 concrete English sentences containing only ambience,
 Foley, and non-verbal human sound. Write music_prompt as 1-3 English sentences
 with instrumentation, tempo, rhythm, and dynamic progression, or leave it empty
@@ -537,8 +563,11 @@ every visual_beats description. Asset metadata can be in another language;
 translate its visual meaning into English without translating proper names.
 Keep dialogue text in its original spoken language. Split the requested
 duration into {H3_MIN_SHOT_SECONDS:g}-{H3_MAX_SHOT_SECONDS:g} second shots whose durations add up to the
-requested duration. Prefer the fewest long clips that preserve creator-authored scene headings; keep dialogue turns,
-camera coverage, and 1-2 second visual beats inside a clip instead of promoting them to new clips. Never plan above
+requested duration. Prefer the fewest long clips that preserve creator-authored scene headings, but treat that count
+as a preference when the dialogue budget does not fit: split the densest source section at a natural action boundary
+instead of squeezing speech into a short window. Keep dialogue turns, camera coverage, and 1-2 second visual beats
+inside a clip instead of promoting them to new clips unless the deterministic dialogue harness requires a split.
+Never plan above
 {H3_MAX_SHOT_SECONDS:g} seconds. H3 accepts that request and aligns it to 362 frames / about 15.083 seconds.
 Use FL2VA for shots that begin from an image anchor. A later continuous shot may
 still be labeled FL2VA in the storyboard; the runtime continuation policy will
@@ -718,6 +747,7 @@ Ultra-fast short-drama anchor policy:
         style_contract = style_prompt(brief.style_preset, brief.style_instructions)
         h3_rules = self._h3_skill_contract(brief.style_preset)
         director_schedule = self._director_shot_schedule(brief)
+        creator_dialogue_source = self._creator_dialogue_source(brief.prompt)
         explicit_start_ids = {
             asset.id for asset in assets if asset.kind == AssetKind.IMAGE and AssetRole.START_FRAME in asset.roles
         }
@@ -725,79 +755,183 @@ Ultra-fast short-drama anchor policy:
             timeout=self.settings.planner_timeout_seconds,
             transport=self._transport,
         ) as client:
-            director_raw = await self._request_json(
-                client,
-                self._director_system_prompt(brief, style_contract),
-                {
-                    "stage": "creative_director",
-                    "brief": brief.model_dump(mode="json"),
-                    "assets": asset_context,
-                    "h3_skill_contract": h3_rules,
-                    "shot_schedule": director_schedule,
-                },
-                schema=self._director_json_schema(brief),
-                schema_name="nautilus_creative_director",
-            )
-            director_output, blueprints = self._parse_director_payload(director_raw)
-            if not blueprints:
-                raise ValueError("creative director returned no shot spine")
             target_count = director_schedule["target_shot_count"]
-            if target_count is not None and len(blueprints) != target_count:
-                raise ValueError(
-                    "creative director ignored the creator-aware shot schedule: "
-                    f"expected {target_count} clips, got {len(blueprints)}"
+            maximum_planned = director_schedule["maximum_planned_shot_count"]
+            director_payload: dict[str, Any] = {
+                "stage": "creative_director",
+                "brief": brief.model_dump(mode="json"),
+                "assets": asset_context,
+                "h3_skill_contract": h3_rules,
+                "shot_schedule": director_schedule,
+                "creator_dialogue_source": [line.model_dump(mode="json") for line in creator_dialogue_source],
+            }
+            director_output: PlannerOutput | None = None
+            blueprints: list[ShotBlueprint] = []
+            director_error: ValueError | None = None
+            semantic_attempts = max(1, self.settings.planner_retry_attempts)
+            for director_attempt in range(semantic_attempts):
+                if director_error is not None:
+                    director_payload["harness_feedback"] = {
+                        "attempt": director_attempt + 1,
+                        "error": str(director_error),
+                        "instruction": (
+                            "Repair the canonical speaker roster and/or clip schedule. Preserve the story and "
+                            "exact quoted dialogue; add a clip only when the dialogue/action budget requires it."
+                        ),
+                    }
+                director_raw = await self._request_json(
+                    client,
+                    self._director_system_prompt(brief, style_contract),
+                    director_payload,
+                    schema=self._director_json_schema(brief),
+                    schema_name="nautilus_creative_director",
                 )
-            if any(blueprint.duration_seconds > H3_MAX_SHOT_SECONDS for blueprint in blueprints):
-                raise ValueError(
-                    "creative director returned a shot longer than the H3 output-duration "
-                    f"{H3_MAX_SHOT_SECONDS:g}-second ceiling"
-                )
+                try:
+                    candidate_output, candidate_blueprints = self._parse_director_payload(director_raw)
+                    canonical_bible = canonicalize_world_bible(
+                        candidate_output.world_bible,
+                        [line for blueprint in candidate_blueprints for line in blueprint.dialogue],
+                    )
+                    assert canonical_bible is not None
+                    candidate_output = candidate_output.model_copy(update={"world_bible": canonical_bible})
+                    candidate_blueprints = [
+                        self._apply_blueprint_dialogue_harness(
+                            blueprint,
+                            canonical_bible,
+                            shot_index=index,
+                        )
+                        for index, blueprint in enumerate(candidate_blueprints)
+                    ]
+                    self._validate_creator_dialogue_selection(
+                        candidate_blueprints,
+                        creator_dialogue_source,
+                        canonical_bible,
+                    )
+                    if not candidate_blueprints:
+                        raise ValueError("creative director returned no shot spine")
+                    if target_count is not None and not (target_count <= len(candidate_blueprints) <= maximum_planned):
+                        raise ValueError(
+                            "creative director ignored the creator-aware shot schedule: "
+                            f"expected {target_count}-{maximum_planned} clips, got {len(candidate_blueprints)}"
+                        )
+                    if any(blueprint.duration_seconds > H3_MAX_SHOT_SECONDS for blueprint in candidate_blueprints):
+                        raise ValueError(
+                            "creative director returned a shot longer than the H3 output-duration "
+                            f"{H3_MAX_SHOT_SECONDS:g}-second ceiling"
+                        )
+                    planned_duration = sum(blueprint.duration_seconds for blueprint in candidate_blueprints)
+                    if abs(planned_duration - brief.duration_seconds) > 0.05:
+                        raise ValueError(
+                            "creative director blueprint durations do not match the requested film duration: "
+                            f"expected {brief.duration_seconds:g}s, got {planned_duration:g}s"
+                        )
+                except ValueError as error:
+                    director_error = error
+                    await self._record_trace(
+                        "nautilus_creative_director",
+                        "client",
+                        message="director harness rejected plan; retrying the director",
+                        error=str(error),
+                    )
+                    continue
+                director_output = candidate_output
+                blueprints = candidate_blueprints
+                break
+            if director_output is None:
+                assert director_error is not None
+                if isinstance(director_error, DialogueHarnessError):
+                    raise director_error
+                raise DialogueHarnessError(
+                    "director_contract_failed",
+                    "Creative Director failed the speaker-roster/clip-schedule harness after bounded retries",
+                    attempts=semantic_attempts,
+                    error=str(director_error),
+                ) from director_error
             semaphore = asyncio.Semaphore(max(1, self.settings.planner_shot_concurrency))
 
             async def direct_one(index: int, blueprint: ShotBlueprint) -> ShotSpec:
                 async with semaphore:
-                    raw = await self._request_json(
-                        client,
-                        self._shot_director_system_prompt(
-                            brief,
-                            style_contract,
-                            h3_rules,
-                            blueprint,
-                            is_first=index == 0,
-                            needs_generated_anchor=(
-                                not (
-                                    index == 0
-                                    and any(asset_id in explicit_start_ids for asset_id in brief.reference_asset_ids)
-                                )
-                            )
-                            and (
+                    system_prompt = self._shot_director_system_prompt(
+                        brief,
+                        style_contract,
+                        h3_rules,
+                        blueprint,
+                        is_first=index == 0,
+                        needs_generated_anchor=(
+                            not (
                                 index == 0
-                                or blueprint.transition_kind
-                                in {
-                                    TransitionKind.ANCHOR,
-                                    TransitionKind.HARD_CUT,
-                                    TransitionKind.MATCH_CUT,
-                                    TransitionKind.OCCLUSION_CUT,
-                                }
-                            ),
-                            has_reference_images=any(asset.kind is AssetKind.IMAGE for asset in assets),
+                                and any(asset_id in explicit_start_ids for asset_id in brief.reference_asset_ids)
+                            )
+                        )
+                        and (
+                            index == 0
+                            or blueprint.transition_kind
+                            in {
+                                TransitionKind.ANCHOR,
+                                TransitionKind.HARD_CUT,
+                                TransitionKind.MATCH_CUT,
+                                TransitionKind.OCCLUSION_CUT,
+                            }
                         ),
-                        {
-                            "stage": "shot_director",
-                            "brief": brief.model_dump(mode="json"),
-                            "world_bible": director_output.world_bible.model_dump(mode="json"),
-                            "assets": asset_context,
-                            "shot_index": index,
-                            "shot_blueprint": blueprint.model_dump(mode="json"),
-                            "previous_blueprint": (blueprints[index - 1].model_dump(mode="json") if index else None),
-                            "next_blueprint": (
-                                blueprints[index + 1].model_dump(mode="json") if index + 1 < len(blueprints) else None
-                            ),
-                        },
-                        schema=self._shot_json_schema(),
-                        schema_name=f"nautilus_shot_director_{index + 1}",
+                        has_reference_images=any(asset.kind is AssetKind.IMAGE for asset in assets),
+                        world_bible=director_output.world_bible,
                     )
-                    return self._coerce_shot_payload(raw, index, blueprint)
+                    payload = {
+                        "stage": "shot_director",
+                        "brief": brief.model_dump(mode="json"),
+                        "world_bible": director_output.world_bible.model_dump(mode="json"),
+                        "assets": asset_context,
+                        "shot_index": index,
+                        "shot_blueprint": blueprint.model_dump(mode="json"),
+                        "previous_blueprint": (blueprints[index - 1].model_dump(mode="json") if index else None),
+                        "next_blueprint": (
+                            blueprints[index + 1].model_dump(mode="json") if index + 1 < len(blueprints) else None
+                        ),
+                    }
+                    harness_error: DialogueHarnessError | None = None
+                    # The provider retry loop handles transport failures. This
+                    # loop is separate: it retries only this creative unit and
+                    # feeds the semantic harness violation back to the agent.
+                    for harness_attempt in range(semantic_attempts):
+                        if harness_error is not None:
+                            payload["harness_feedback"] = {
+                                "attempt": harness_attempt + 1,
+                                "error": str(harness_error),
+                                "instruction": (
+                                    "Repair only the dialogue timing/speaker binding while preserving the "
+                                    "blueprint, exact spoken words, and visual continuity."
+                                ),
+                            }
+                        raw = await self._request_json(
+                            client,
+                            system_prompt,
+                            payload,
+                            schema=self._shot_json_schema(),
+                            schema_name=f"nautilus_shot_director_{index + 1}",
+                        )
+                        shot = self._coerce_shot_payload(raw, index, blueprint)
+                        try:
+                            validated_shot = self._apply_dialogue_harness(
+                                shot,
+                                director_output.world_bible,
+                                shot_index=index,
+                            )
+                            self._validate_dialogue_ledger(
+                                validated_shot,
+                                blueprint,
+                                shot_index=index,
+                            )
+                            return validated_shot
+                        except DialogueHarnessError as error:
+                            harness_error = error
+                            await self._record_trace(
+                                f"nautilus_shot_director_{index + 1}",
+                                "client",
+                                message="dialogue harness rejected shot; retrying this shot director",
+                                error=str(error),
+                            )
+                    assert harness_error is not None
+                    raise harness_error
 
             shots = list(
                 await asyncio.gather(*(direct_one(index, blueprint) for index, blueprint in enumerate(blueprints)))
@@ -822,13 +956,44 @@ Ultra-fast short-drama anchor policy:
                                 "an exited character is not silently reintroduced",
                                 "the opening begins after the prior ending and never replays it",
                                 "dialogue, ambience, Foley, and music remain separate",
+                                "every dialogue speaker resolves to one canonical SubjectCard and stable speaker_id",
+                                "dialogue windows satisfy the language-aware speech budget without overlap",
                                 "each shot stays within H3's output-duration range and keeps complete beat coverage",
                             ],
                         },
                         schema=self._planner_json_schema(),
                         schema_name="nautilus_continuity_critic",
                     )
-                    final = self._parse_planner_payload(self._unwrap_stage_payload(critic_raw))
+                    critic_output = self._parse_planner_payload(self._unwrap_stage_payload(critic_raw))
+                    # The director's roster is authoritative. The critic may
+                    # repair continuity but cannot rename a subject or move a
+                    # line to another voice. A semantic violation falls into
+                    # the existing draft fallback below.
+                    critic_shots: list[ShotSpec] = []
+                    for shot in critic_output.shots:
+                        validated_shot = self._apply_dialogue_harness(
+                            shot,
+                            draft.world_bible,
+                            shot_index=shot.index,
+                        )
+                        if shot.index < 0 or shot.index >= len(blueprints):
+                            raise DialogueHarnessError(
+                                "dialogue_ledger_mismatch",
+                                "continuity critic returned an unknown shot index",
+                                shot_index=shot.index,
+                            )
+                        self._validate_dialogue_ledger(
+                            validated_shot,
+                            blueprints[shot.index],
+                            shot_index=shot.index,
+                        )
+                        critic_shots.append(validated_shot)
+                    final = critic_output.model_copy(
+                        update={
+                            "world_bible": draft.world_bible,
+                            "shots": critic_shots,
+                        }
+                    )
                 except Exception as error:
                     # The shot-director draft is already a complete, validated
                     # creative plan.  A continuity critic response is an
@@ -903,6 +1068,7 @@ Ultra-fast short-drama anchor policy:
                         "duration_seconds": blueprint.duration_seconds,
                         "transition_kind": blueprint.transition_kind,
                         "visual_beats": beats,
+                        "dialogue": blueprint.dialogue,
                     }
                 )
             )
@@ -943,7 +1109,15 @@ Ultra-fast short-drama anchor policy:
             "anticipation, commitment, impact, brake, and settle where relevant; preserve identity, wardrobe, "
             "landmarks, screen positions, eyelines, lighting, props, and action phase across boundaries; "
             "hold the inherited ending state briefly before advancing and never replay the previous action. "
-            + style_hint
+            "Treat the World Bible SubjectCard roster as the only authority for character identity and voice: "
+            "a dialogue line has exactly one canonical subject_id and speaker_id, and aliases are normalized to "
+            "the same card. H3 speaker IDs are only S1, S2, ... in first-vocal-event order across the film; silent "
+            "subjects receive no speaker ID and arbitrary internal voice keys never enter the model prompt. "
+            "Estimate speech time before assigning dialogue windows (about 4.2 Chinese characters "
+            "per second or 2.6 English words per second, plus pauses and headroom); never compress a line to fit "
+            "an overloaded beat. If the speech/action budget does not fit one clip, split the source section at "
+            "an irreversible action boundary. Only the bound subject may move their lips; every other visible "
+            "subject stays silent unless a separate dialogue line names them. " + style_hint
         )
         excerpt = selected_skill_excerpt(self.settings.planner_skills_dir, style_preset)
         if excerpt:
@@ -972,6 +1146,144 @@ Ultra-fast short-drama anchor policy:
                 seen.add(key)
         return tuple(ordered)
 
+    @staticmethod
+    def _creator_dialogue_source(prompt: str) -> list[DialogueLine]:
+        """Extract authoritative line-oriented screenplay dialogue."""
+
+        metadata_labels = {
+            "类型",
+            "风格",
+            "标签",
+            "人物",
+            "人设",
+            "节拍",
+            "单集时长",
+            "目标",
+            "画幅",
+            "语言",
+            "故事",
+            "故事正文",
+            "场景",
+            "镜头",
+            "开场",
+            "画面",
+            "音效",
+            "对白",
+            "动作",
+            "摄影",
+            "环境音",
+            "音乐",
+            "备注",
+            "提示词",
+            "prompt",
+            "audience",
+            "style",
+            "duration",
+        }
+        pattern = re.compile(r"^\s*(?:[-*]\s*)?(?P<speaker>[\w\u3400-\u9fff ._-]{1,32}?)\s*[：:]\s*(?P<text>.+?)\s*$")
+        lines = prompt.splitlines()
+        screenplay_start: int | None = None
+        screenplay_marker = re.compile(
+            r"^\s*(?:第[一二三四五六七八九十0-9]+(?:集|幕|场)|剧本|分镜|SCRIPT\b|△)",
+            flags=re.IGNORECASE,
+        )
+        for index, raw_line in enumerate(lines):
+            if screenplay_marker.match(raw_line):
+                screenplay_start = index
+                break
+        if screenplay_start is not None:
+            lines = lines[screenplay_start:]
+        result: list[DialogueLine] = []
+        for raw_line in lines:
+            match = pattern.match(raw_line)
+            if not match:
+                continue
+            speaker = " ".join(match.group("speaker").split()).strip()
+            if speaker.casefold() in {value.casefold() for value in metadata_labels}:
+                continue
+            mode = "on_screen"
+            if re.search(r"\s+(?:VO|V\.O\.)$", speaker, flags=re.IGNORECASE):
+                speaker = re.sub(r"\s+(?:VO|V\.O\.)$", "", speaker, flags=re.IGNORECASE).strip()
+                mode = "voice_over"
+            elif speaker.casefold() in {"narrator", "voice over", "voice-over", "旁白", "解说"}:
+                mode = "voice_over"
+            text = match.group("text").strip()
+            # Parenthesized delivery and trailing beat labels are not spoken.
+            while re.match(r"^[（(][^）)]{1,80}[）)]\s*", text):
+                text = re.sub(r"^[（(][^）)]{1,80}[）)]\s*", "", text, count=1).strip()
+            text = re.sub(r"\s*【[^】]{1,80}】\s*$", "", text).strip()
+            if text:
+                result.append(DialogueLine(speaker=speaker, text=text, mode=mode))
+        return result
+
+    @staticmethod
+    def _dialogue_text_key(text: str) -> str:
+        return re.sub(r"[\s—–-]+", "", text).casefold()
+
+    @classmethod
+    def _validate_creator_dialogue_selection(
+        cls,
+        blueprints: list[ShotBlueprint],
+        source_lines: list[DialogueLine],
+        world_bible: WorldBible,
+    ) -> None:
+        """Forbid partial/paraphrased screenplay lines at the Director boundary."""
+
+        if not source_lines:
+            return
+        canonical_source = list(bind_dialogue_lines(source_lines, world_bible))
+        selected = [
+            (blueprint_index, line_index, line)
+            for blueprint_index, blueprint in enumerate(blueprints)
+            for line_index, line in enumerate(blueprint.dialogue)
+        ]
+        source_cursor = 0
+        for blueprint_index, line_index, line in selected:
+            if source_cursor >= len(canonical_source):
+                raise DialogueHarnessError(
+                    "dialogue_source_mismatch",
+                    "Director repeated or invented dialogue after the creator screenplay ledger ended",
+                    shot_index=blueprint_index,
+                    line_index=line_index,
+                    speaker=line.speaker,
+                    text=line.text,
+                )
+            first = canonical_source[source_cursor]
+            combined = ""
+            matched_end: int | None = None
+            for source_index in range(source_cursor, len(canonical_source)):
+                candidate = canonical_source[source_index]
+                if candidate.speaker != first.speaker or candidate.mode != first.mode:
+                    break
+                combined += candidate.text
+                if (
+                    line.speaker == first.speaker
+                    and line.mode == first.mode
+                    and cls._dialogue_text_key(line.text) == cls._dialogue_text_key(combined)
+                ):
+                    matched_end = source_index + 1
+                    break
+            if matched_end is None:
+                raise DialogueHarnessError(
+                    "dialogue_source_mismatch",
+                    "Director omitted, reordered, shortened, paraphrased, invented, or reassigned screenplay dialogue",
+                    shot_index=blueprint_index,
+                    line_index=line_index,
+                    expected_source_index=source_cursor,
+                    speaker=line.speaker,
+                    text=line.text,
+                )
+            source_cursor = matched_end
+        if source_cursor != len(canonical_source):
+            missing = canonical_source[source_cursor]
+            raise DialogueHarnessError(
+                "dialogue_source_mismatch",
+                "Director omitted one or more creator-authored screenplay dialogue events",
+                expected_source_index=source_cursor,
+                missing_speaker=missing.speaker,
+                missing_text=missing.text,
+            )
+
     @classmethod
     def _director_shot_schedule(cls, brief: ProjectBrief) -> dict[str, Any]:
         """Build a creator-aware clip-count contract for the director stage."""
@@ -980,12 +1292,20 @@ Ultra-fast short-drama anchor policy:
         maximum_count = max(1, math.floor(brief.duration_seconds / H3_MIN_SHOT_SECONDS))
         source_sections = cls._explicit_source_sections(brief.prompt)
         target_count = min(maximum_count, max(minimum_count, len(source_sections)))
+        # The target is the creator-aware compact cut. Reserve a bounded
+        # overflow budget so a Director can split an otherwise impossible
+        # dialogue/action section instead of squeezing or truncating speech.
+        maximum_planned_count = min(
+            maximum_count,
+            target_count + max(2, math.ceil(target_count * 0.5)),
+        )
         target_average = brief.duration_seconds / target_count
         return {
             "requested_duration_seconds": brief.duration_seconds,
             "minimum_shot_count": minimum_count,
             "maximum_shot_count": maximum_count,
             "target_shot_count": target_count,
+            "maximum_planned_shot_count": maximum_planned_count,
             "target_average_shot_seconds": round(target_average, 2),
             "max_shot_seconds": H3_MAX_SHOT_SECONDS,
             "preferred_shot_seconds": f"10-{H3_MAX_SHOT_SECONDS:g}",
@@ -998,10 +1318,13 @@ Ultra-fast short-drama anchor policy:
         schedule = cls._director_shot_schedule(brief)
         sections = schedule["explicit_source_sections"]
         target = schedule["target_shot_count"]
+        maximum_planned = schedule["maximum_planned_shot_count"]
         average = schedule["target_average_shot_seconds"]
         count_instruction = (
-            f"Create exactly {target} generated clips for this {brief.duration_seconds}-second project, averaging "
-            f"about {average:g} seconds. Use the fewest clips that fit H3's output-duration ceiling and move "
+            f"Prefer {target} generated clips for this {brief.duration_seconds}-second project, averaging "
+            f"about {average:g} seconds, but you may create up to {maximum_planned} only when the conservative "
+            "dialogue/action budget proves a source section cannot fit. Use the fewest clips that fit H3's "
+            "output-duration ceiling and move "
             "individual "
             f"clip durations toward {H3_MAX_SHOT_SECONDS:g} seconds when the source-section pacing allows."
         )
@@ -1024,7 +1347,10 @@ Ultra-fast short-drama anchor policy:
         return (
             f"{count_instruction} {section_instruction} A source section is story structure; visual_beats are "
             "internal phases inside one continuous H3 clip. Do not create a new blueprint merely because the "
-            "camera moves, a different character speaks, or the action advances to its next beat."
+            "camera moves, a different character speaks, or the action advances to its next beat. Before locking "
+            "the count, sum each line's conservative speech duration plus 0.35s headroom and a short tail; if a "
+            "section is overloaded, add a clip at an irreversible action boundary even when that exceeds the "
+            "preferred count. Never solve an overflow by shortening dialogue or assigning it to another subject."
         )
 
     @classmethod
@@ -1044,13 +1370,35 @@ Ultra-fast short-drama anchor policy:
             "You are the Creative Director for a creator-facing long-video studio. This is stage 1 of 3. "
             "Turn the user's premise into a causal visual spine and a canonical World Bible. Establish stable "
             "character identities, stable subject IDs/aliases, wardrobe, props, locations, fixed landmarks, lighting, "
-            "camera axis, audio bed. "
+            "camera axis, audio bed. Build a canonical speaker roster in the World Bible: every subject who may "
+            "speak gets a unique subject_id, canonical label, aliases, and stable speaker_id; labels and aliases "
+            "must not overlap across subjects. Use only H3-form speaker IDs S1, S2, ... in first-vocal-event order "
+            "and leave silent subjects unnumbered; the deterministic harness will normalize the final IDs. A "
+            "dialogue line may reference only that roster (voice-over is "
+            "explicitly marked as mode=voice_over). Before fixing the clip count, calculate the dialogue budget "
+            "using conservative language-aware speaking rates and reserve headroom; if a source section cannot fit "
+            "its words plus action inside one H3 clip, split it at an irreversible physical boundary and preserve "
+            "the source_section link. Store every selected spoken line in the owning ShotBlueprint.dialogue as the "
+            "stage-A dialogue ledger: keep the creator's complete text and speaker, never save a shortened fragment, "
+            "and assign explicit non-overlapping timings that pass the budget. Stage B is forbidden from changing "
+            "this ledger. Populate each blueprint.active_subject_ids with canonical SubjectCard subject_id values; "
+            "every on-screen dialogue subject_id must appear in that exact typed list. When "
+            "creator_dialogue_source is non-empty, a selected ledger line must copy one source line exactly or "
+            "join only adjacent lines from the same speaker; never select a fragment, paraphrase, or invented "
+            "replacement. Cover every source dialogue event exactly once and in source order across all "
+            "blueprints; never omit or repeat one. Adjacent events from the same speaker/mode may be joined as one "
+            "ledger line, but no other merge is allowed. If the requested duration cannot carry the complete "
+            "screenplay at the speech budget, return a schedule that fails the harness rather than silently "
+            "dropping words. Every source "
+            "speaker spelling, including the creator's original language, must appear verbatim as that "
+            "SubjectCard's label or alias so the deterministic ledger can resolve it. "
             f"{continuity_contract} {cls._director_schedule_contract(brief)} "
             f"Never plan above {H3_MAX_SHOT_SECONDS:g} seconds; H3 accepts that request and aligns it to about "
             "15.083 seconds / 362 frames. Do not write final model prompts "
             "yet: make each shot's source_section, title, purpose, active "
             "subjects, opening/ending state, incoming/outgoing handoff, audio phase, transition kind, and one hook "
-            "unambiguous. Bind each SubjectCard to the relevant reference_asset_ids and speaker_id when known; "
+            "unambiguous. Bind each SubjectCard to the relevant reference_asset_ids and require speaker_id for "
+            "every speaking subject; do not leave a potential speaker unrostered. "
             "use semantic labels in prose rather than opaque IDs. Return the DirectorPlan JSON schema (World Bible "
             "plus shot_blueprints), not final H3 "
             "prompts; use compact placeholder fields only as a causal spine. Include a marker "
@@ -1069,6 +1417,7 @@ Ultra-fast short-drama anchor policy:
         is_first: bool,
         needs_generated_anchor: bool,
         has_reference_images: bool = False,
+        world_bible: WorldBible | None = None,
     ) -> str:
         ultra_independent = (
             brief.continuation_mode == ContinuationMode.ULTRA_FAST
@@ -1118,6 +1467,41 @@ Ultra-fast short-drama anchor policy:
             anchor_instruction = (
                 "An explicit creator-selected start-frame asset exists for this shot. Leave anchor_prompt empty."
             )
+        roster_instruction = (
+            "The canonical speaker roster is supplied in the user payload. Treat it as a closed set: every "
+            "dialogue[].speaker must match a SubjectCard label or alias and carry that card's subject_id and "
+            "speaker_id. Normalize aliases to the canonical label. Never invent a speaker or use a generic label "
+            "such as 'the woman'. A narrator is allowed only with mode=voice_over. Only the bound subject may "
+            "speak or move their lips; all other visible subjects remain silent during that interval. Include the "
+            "canonical label or alias in continuity_in.characters and the exact subject_id in "
+            "continuity_in.active_subject_ids for every on-screen speaker. "
+        )
+        if world_bible and world_bible.subjects:
+            roster_instruction += (
+                "Canonical roster snapshot (do not alter): "
+                + json.dumps(
+                    [
+                        {
+                            "subject_id": card.subject_id,
+                            "label": card.label,
+                            "aliases": card.aliases,
+                            "speaker_id": card.speaker_id,
+                        }
+                        for card in world_bible.subjects
+                    ],
+                    ensure_ascii=False,
+                )
+                + " "
+            )
+        timing_instruction = (
+            "Before writing dialogue, estimate each line's spoken duration (about 4.2 Chinese characters/s or "
+            "2.6 English words/s plus punctuation pauses and 0.35s headroom). Emit explicit non-overlapping "
+            "start_seconds/end_seconds and leave a short tail after the final line. If the words plus action do "
+            "not fit this blueprint duration, report the harness conflict rather than compressing or dropping "
+            "speech. ShotBlueprint.dialogue is an immutable stage-A ledger: copy every line exactly, including "
+            "speaker, subject_id, speaker_id, text, language, mode, and start/end timing. Do not add, merge, "
+            "shorten, omit, reorder, or reassign any ledger line. "
+        )
         return (
             "You are a specialist H3 Shot Director. This is stage 2 of 3. Produce one complete ShotSpec, not a "
             "story summary. One blueprint is one continuous H3 generation clip for the assigned source_section; "
@@ -1130,7 +1514,10 @@ Ultra-fast short-drama anchor policy:
             "camera movement with direction/amplitude/speed, and synchronized non-speech sound; use explicit "
             "setup -> anticipation -> commitment -> impact -> brake -> settle phases when appropriate. Keep all "
             "active characters visible or explicitly mark an exit and its reason. Bind references by semantic role, "
-            "never opaque IDs. Keep visual prompt free of dialogue, sound notes, and metadata; put speech only in "
+            "never opaque IDs. "
+            + roster_instruction
+            + timing_instruction
+            + "Keep visual prompt free of dialogue, sound notes, and metadata; put speech only in "
             "dialogue entries and ambience/Foley only in audio_prompt. Do not begin with a duration label or a "
             "generic continuation phrase. Keep the immutable style contract unchanged.\n\n"
             f"{mode}\n\nSource-section assignment: {blueprint.source_section}\n\n"
@@ -1167,7 +1554,12 @@ Ultra-fast short-drama anchor policy:
             f"stay inside their assigned clip. Keep each shot within {H3_MIN_SHOT_SECONDS:g}-"
             f"{H3_MAX_SHOT_SECONDS:g} seconds, preserve complete visual "
             "beat coverage, and keep visual/audio/dialogue fields separate. Do not shorten rich prompts merely to "
-            "make them uniform. All model-facing prose remains English.\n\n"
+            "make them uniform. Verify every dialogue line against the World Bible roster: preserve its canonical "
+            "subject_id/speaker_id, reject invented or ambiguous speakers, and ensure only that subject is visible "
+            "speaking. Recalculate the conservative speech budget, reject overlaps or windows shorter than the "
+            "spoken text, and preserve every ShotBlueprint.dialogue ledger line byte-for-byte in the same shot; "
+            "never shorten, merge, omit, reorder, or reassign it. All "
+            "model-facing prose remains English.\n\n"
             f"Immutable global style contract:\n{style_contract}\n\n"
             f"H3/style rules to retain:\n{h3_rules}\n\n"
             "Return exactly one complete PlannerOutput JSON object and no commentary."
@@ -1340,6 +1732,7 @@ Ultra-fast short-drama anchor policy:
             purpose=shot.purpose,
             source_section=shot.source_section or shot.title,
             duration_seconds=shot.duration_seconds,
+            active_subject_ids=list(shot.continuity_in.active_subject_ids),
             active_subjects=list(shot.continuity_in.characters),
             scene_and_landmarks="; ".join(
                 [value for value in [shot.continuity_in.location, *shot.continuity_in.fixed_landmarks] if value]
@@ -1349,6 +1742,7 @@ Ultra-fast short-drama anchor policy:
             incoming_handoff=shot.continuity_handoff,
             outgoing_handoff=shot.continuity_handoff,
             audio_phase=shot.continuity_in.audio or shot.audio_prompt,
+            dialogue=shot.dialogue,
             transition_kind=transition,
             hook=shot.hook,
         )
@@ -1401,6 +1795,9 @@ Ultra-fast short-drama anchor policy:
         creative_data["camera"] = creative.camera or "stable cinematic camera preserving the established axis"
         continuity_in = creative.continuity_in.model_copy(deep=True)
         continuity_out = creative.continuity_out.model_copy(deep=True)
+        if blueprint.active_subject_ids:
+            continuity_in.active_subject_ids = continuity_in.active_subject_ids or list(blueprint.active_subject_ids)
+            continuity_out.active_subject_ids = continuity_out.active_subject_ids or list(blueprint.active_subject_ids)
         if blueprint.active_subjects:
             continuity_in.characters = continuity_in.characters or list(blueprint.active_subjects)
             continuity_out.characters = continuity_out.characters or list(blueprint.active_subjects)
@@ -1412,6 +1809,99 @@ Ultra-fast short-drama anchor policy:
         creative_data["continuity_in"] = continuity_in
         creative_data["continuity_out"] = continuity_out
         return ShotSpec.model_validate(creative_data)
+
+    @staticmethod
+    def _apply_dialogue_harness(
+        shot: ShotSpec,
+        world_bible: WorldBible,
+        *,
+        shot_index: int | None = None,
+    ) -> ShotSpec:
+        """Canonicalize speakers and close the spoken timeline for one shot."""
+
+        if shot.dialogue and not world_bible.subjects:
+            raise DialogueHarnessError(
+                "missing_speaker_roster",
+                "a shot contains dialogue but the Creative Director returned no SubjectCard roster",
+                shot_index=shot_index,
+            )
+        canonical_bible = world_bible
+        bound = bind_dialogue_lines(shot.dialogue, canonical_bible, shot_index=shot_index)
+        validate_active_speakers(
+            bound,
+            canonical_bible,
+            shot.continuity_in.characters,
+            active_subject_ids=shot.continuity_in.active_subject_ids,
+            shot_index=shot_index,
+        )
+        timed = schedule_dialogue_lines(bound, shot.duration_seconds, shot_index=shot_index)
+        return shot.model_copy(update={"dialogue": list(timed.lines)})
+
+    @staticmethod
+    def _apply_blueprint_dialogue_harness(
+        blueprint: ShotBlueprint,
+        world_bible: WorldBible,
+        *,
+        shot_index: int,
+    ) -> ShotBlueprint:
+        """Close the stage-A dialogue ledger before shot fan-out."""
+
+        if not blueprint.dialogue:
+            return blueprint
+        if not world_bible.subjects:
+            raise DialogueHarnessError(
+                "missing_speaker_roster",
+                "a Director blueprint contains dialogue but the World Bible has no SubjectCard roster",
+                shot_index=shot_index,
+            )
+        bound = bind_dialogue_lines(blueprint.dialogue, world_bible, shot_index=shot_index)
+        validate_active_speakers(
+            bound,
+            world_bible,
+            blueprint.active_subjects,
+            active_subject_ids=blueprint.active_subject_ids,
+            shot_index=shot_index,
+        )
+        timed = schedule_dialogue_lines(bound, blueprint.duration_seconds, shot_index=shot_index)
+        return blueprint.model_copy(update={"dialogue": list(timed.lines)})
+
+    @staticmethod
+    def _validate_dialogue_ledger(
+        shot: ShotSpec,
+        blueprint: ShotBlueprint,
+        *,
+        shot_index: int,
+    ) -> None:
+        """Prevent stage B or the critic from rewriting selected dialogue."""
+
+        if len(shot.dialogue) != len(blueprint.dialogue):
+            raise DialogueHarnessError(
+                "dialogue_ledger_mismatch",
+                "shot director changed the number of Director-approved dialogue lines",
+                shot_index=shot_index,
+                expected_lines=len(blueprint.dialogue),
+                actual_lines=len(shot.dialogue),
+            )
+        for line_index, (actual, expected) in enumerate(zip(shot.dialogue, blueprint.dialogue, strict=True)):
+            immutable = ("speaker", "subject_id", "speaker_id", "text", "language", "mode")
+            differences = {
+                field: {"expected": getattr(expected, field), "actual": getattr(actual, field)}
+                for field in immutable
+                if getattr(actual, field) != getattr(expected, field)
+            }
+            for field in ("start_seconds", "end_seconds"):
+                actual_time = getattr(actual, field)
+                expected_time = getattr(expected, field)
+                if actual_time is None or expected_time is None or abs(actual_time - expected_time) > 0.02:
+                    differences[field] = {"expected": expected_time, "actual": actual_time}
+            if differences:
+                raise DialogueHarnessError(
+                    "dialogue_ledger_mismatch",
+                    f"shot director rewrote Director-approved dialogue line {line_index + 1}",
+                    shot_index=shot_index,
+                    line_index=line_index,
+                    differences=differences,
+                )
 
     @staticmethod
     def _sanitize_shot_wire(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1476,6 +1966,8 @@ Ultra-fast short-drama anchor policy:
                 continue
             line = dict(item)
             line["speaker"] = PlannerService._wire_scalar(line.get("speaker"), default="")
+            line["subject_id"] = PlannerService._wire_scalar(line.get("subject_id"), default=None)
+            line["speaker_id"] = PlannerService._wire_scalar(line.get("speaker_id"), default=None)
             line["text"] = PlannerService._wire_scalar(line.get("text"), default="")
             line["language"] = PlannerService._wire_scalar(line.get("language"), default="Chinese")
             line["delivery"] = PlannerService._wire_scalar(line.get("delivery"), default="natural")
@@ -1564,11 +2056,13 @@ Ultra-fast short-drama anchor policy:
     def _director_json_schema(cls, brief: ProjectBrief | None = None) -> dict[str, Any]:
         schema = DirectorPlan.model_json_schema()
         if brief is not None:
-            target_count = cls._director_shot_schedule(brief)["target_shot_count"]
+            schedule = cls._director_shot_schedule(brief)
+            target_count = schedule["target_shot_count"]
+            maximum_planned = schedule["maximum_planned_shot_count"]
             blueprints_schema = schema.get("properties", {}).get("shot_blueprints")
             if target_count is not None and isinstance(blueprints_schema, dict):
                 blueprints_schema["minItems"] = target_count
-                blueprints_schema["maxItems"] = target_count
+                blueprints_schema["maxItems"] = maximum_planned
         # Preserve the canonical ShotSpec alias for proxies that validate or
         # introspect the old schema, while the real root is shot_blueprints.
         planner_schema = PlannerService._planner_json_schema()
@@ -1633,6 +2127,9 @@ Ultra-fast short-drama anchor policy:
         beat_schema = definitions.get("StoryboardBeat")
         if isinstance(beat_schema, dict):
             beat_schema["required"] = sorted(beat_schema.get("properties", {}))
+        dialogue_schema = definitions.get("DialogueLine")
+        if isinstance(dialogue_schema, dict):
+            dialogue_schema["required"] = sorted(dialogue_schema.get("properties", {}))
         duration_schema = properties.get("duration_seconds")
         if isinstance(duration_schema, dict):
             duration_schema["maximum"] = H3_MAX_SHOT_SECONDS
@@ -1702,6 +2199,9 @@ Ultra-fast short-drama anchor policy:
         beat_schema = definitions.get("StoryboardBeat")
         if isinstance(beat_schema, dict):
             beat_schema["required"] = sorted(beat_schema.get("properties", {}))
+        dialogue_schema = definitions.get("DialogueLine")
+        if isinstance(dialogue_schema, dict):
+            dialogue_schema["required"] = sorted(dialogue_schema.get("properties", {}))
         return schema
 
     @staticmethod
@@ -1887,6 +2387,13 @@ Ultra-fast short-drama anchor policy:
         assets: list[AssetRecord],
     ) -> PlannerOutput:
         valid_assets = {asset.id: asset for asset in assets}
+        # Establish the roster once, before any shot director prose is
+        # compiled.  Missing speaker IDs are assigned deterministically here
+        # so aliases cannot create a fresh voice on every shot.
+        world_bible = canonicalize_world_bible(
+            output.world_bible,
+            [line for shot in output.shots for line in shot.dialogue],
+        )
         default_ids = [asset.id for asset in assets]
         image_ids = [asset.id for asset in assets if asset.kind == AssetKind.IMAGE]
         explicit_start_ids = {
@@ -1912,6 +2419,13 @@ Ultra-fast short-drama anchor policy:
         for index, original in enumerate(output.shots):
             shot = original.model_copy(deep=True)
             shot.index = index
+            try:
+                shot = self._apply_dialogue_harness(shot, world_bible, shot_index=index)
+            except DialogueHarnessError:
+                # Keep this as a semantic contract error.  The caller can
+                # surface the exact line/roster mismatch instead of silently
+                # falling back to a generic heuristic storyboard.
+                raise
             if index == 0 and shot.transition_kind is TransitionKind.CONTINUOUS:
                 shot.transition_kind = TransitionKind.ANCHOR
             if shot.start_frame_asset_id:
@@ -1929,7 +2443,7 @@ Ultra-fast short-drama anchor policy:
             if not shot.reference_asset_ids:
                 shot.reference_asset_ids = list(default_ids)
             self._validate_h3_storyboard_contract(shot)
-            self._validate_h3_language_contract(shot, output.world_bible)
+            self._validate_h3_language_contract(shot, world_bible)
             if shot.task == ShotTask.REF2VA and not (image_ids and media_ids):
                 shot.task = ShotTask.FL2VA
             if ultra_independent_project and not shot.start_frame_asset_id:
@@ -2043,7 +2557,9 @@ Ultra-fast short-drama anchor policy:
             dialogue = [
                 line.model_copy(
                     update={
-                        "start_seconds": round(line.start_seconds * ratio, 3),
+                        "start_seconds": (
+                            round(line.start_seconds * ratio, 3) if line.start_seconds is not None else None
+                        ),
                         "end_seconds": (round(line.end_seconds * ratio, 3) if line.end_seconds is not None else None),
                     }
                 )
@@ -2060,10 +2576,15 @@ Ultra-fast short-drama anchor policy:
             ]
             if visual_beats:
                 visual_beats[-1] = visual_beats[-1].model_copy(update={"end_seconds": new_duration})
+            # Fill omitted endpoints and enforce a language-aware minimum
+            # speech window after duration fitting.  Valid explicit timings
+            # are never silently stretched; an overloaded shot fails with a
+            # split-the-shot diagnostic before H3 is called.
+            timing = schedule_dialogue_lines(dialogue, new_duration, shot_index=index)
             normalized[index] = shot.model_copy(
                 update={
                     "duration_seconds": new_duration,
-                    "dialogue": dialogue,
+                    "dialogue": list(timing.lines),
                     "visual_beats": visual_beats,
                 }
             )
@@ -2073,7 +2594,7 @@ Ultra-fast short-drama anchor policy:
         ):
             actual = sum(shot.duration_seconds for shot in normalized)
             raise ValueError(f"AI planner duration mismatch: requested {requested}s, got {actual}s")
-        return output.model_copy(update={"shots": normalized})
+        return output.model_copy(update={"world_bible": world_bible, "shots": normalized})
 
     @staticmethod
     def _validate_h3_storyboard_contract(shot: ShotSpec) -> None:

@@ -9,6 +9,10 @@ from pathlib import Path
 
 import httpx
 
+from long_video_studio.dialogue_harness import (
+    prepare_dialogue,
+    validate_active_speakers,
+)
 from long_video_studio.domain import ProjectBrief, ShotSpec, ShotTask, WorldBible
 from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS
 from long_video_studio.h3_prompt import H3Reference, render_h3_prompt
@@ -69,6 +73,7 @@ class H3Client:
         speaker_ids: dict[str, str] | None = None,
     ) -> Path:
         self._validate_duration(shot)
+        shot = self._prepare_dialogue_request(shot, world_bible)
         extra_params = {
             "task": "fl2va",
             "duration": shot.duration_seconds,
@@ -115,6 +120,7 @@ class H3Client:
         speaker_ids: dict[str, str] | None = None,
     ) -> Path:
         self._validate_duration(shot)
+        shot = self._prepare_dialogue_request(shot, world_bible)
         extra_params = {
             "task": "ref2va",
             "duration": shot.duration_seconds,
@@ -208,6 +214,29 @@ class H3Client:
         if shot.duration_seconds > H3_MAX_SHOT_SECONDS:
             raise ValueError(f"H3 output-duration ceiling is {H3_MAX_SHOT_SECONDS:g} seconds per shot")
 
+    @staticmethod
+    def _prepare_dialogue_request(shot: ShotSpec, world_bible: WorldBible | None) -> ShotSpec:
+        """Run the same deterministic dialogue preflight at the adapter edge."""
+
+        if not shot.dialogue:
+            return shot
+        legacy_dialogue = world_bible is None or not world_bible.subjects
+        prepared = prepare_dialogue(shot.dialogue, shot.duration_seconds, world_bible)
+        active_subject_ids = shot.continuity_in.active_subject_ids
+        if legacy_dialogue and not active_subject_ids and not shot.continuity_in.characters:
+            active_subject_ids = [
+                line.subject_id for line in prepared.lines if line.mode == "on_screen" and line.subject_id
+            ]
+        validate_active_speakers(
+            prepared.lines,
+            prepared.world_bible,
+            shot.continuity_in.characters,
+            active_subject_ids=active_subject_ids,
+            shot_index=shot.index,
+        )
+        continuity_in = shot.continuity_in.model_copy(update={"active_subject_ids": active_subject_ids})
+        return shot.model_copy(update={"dialogue": list(prepared.lines), "continuity_in": continuity_in})
+
     def _common_data(
         self,
         shot: ShotSpec,
@@ -233,6 +262,11 @@ class H3Client:
         )
         data = {
             "prompt": prompt,
+            # ``seconds`` is the public VideoGenerationRequest field used by
+            # provider metadata and audio scheduling. Keep ``duration`` in
+            # extra_params for the current H3 pipeline, but do not rely on the
+            # implementation-specific field alone.
+            "seconds": str(shot.duration_seconds),
             "fps": str(shot.fps),
             "num_inference_steps": str(shot.inference_steps),
             "seed": str(shot.seed),

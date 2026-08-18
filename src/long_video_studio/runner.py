@@ -128,7 +128,7 @@ class RenderManager:
         rendered: list[Path] = []
         rendered_by_shot: dict[str, Path] = {}
         boundary_frames: dict[str, Path] = {}
-        project_speaker_ids = stable_speaker_ids(project.shots)
+        project_speaker_ids = stable_speaker_ids(project.shots, project.world_bible)
         ordered_shots = sorted(project.shots, key=lambda value: value.index)
         width, height = self._video_canvas(project.brief.aspect_ratio)
         active_shot: ShotSpec | None = None

@@ -110,6 +110,8 @@ def test_fl2va_adapter_uses_current_video_api(tmp_path: Path):
     assert b'name="extra_params"' in request_body
     assert b'name="quality"' in request_body
     assert b"\r\n\r\nlossless\r\n" in request_body
+    assert b'name="seconds"' in request_body
+    assert b"\r\n\r\n10.0\r\n" in request_body
     assert b'"task": "fl2va"' in request_body
     assert b'name="width"' in request_body
     assert b'name="height"' in request_body

@@ -36,11 +36,11 @@ def test_time_ranges_are_not_treated_as_source_scene_headings():
     assert schedule["target_shot_count"] == 4
 
 
-def test_dynamic_director_schema_locks_target_count():
+def test_dynamic_director_schema_keeps_bounded_dialogue_overflow_budget():
     brief = _brief(60, "**1-1 开场**\n**1-2 冲突**\n**1-3 反转**\n**1-4 离场**")
     schema = PlannerService._director_json_schema(brief)
     assert schema["properties"]["shot_blueprints"]["minItems"] == 4
-    assert schema["properties"]["shot_blueprints"]["maxItems"] == 4
+    assert schema["properties"]["shot_blueprints"]["maxItems"] == 6
     assert schema["$defs"]["ShotBlueprint"]["properties"]["duration_seconds"]["maximum"] == 15
 
 
