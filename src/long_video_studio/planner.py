@@ -7,6 +7,7 @@ import math
 import re
 import time
 from contextvars import ContextVar
+from itertools import combinations
 from typing import Any
 
 import httpx
@@ -15,9 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from long_video_studio.anchor_policy import IMAGE_EDIT_ANCHOR_MODES, anchor_selected
 from long_video_studio.config import Settings
 from long_video_studio.dialogue_harness import (
+    DEFAULT_INTERLINE_GAP_SECONDS,
+    DEFAULT_LEAD_IN_SECONDS,
+    DEFAULT_TAIL_OUT_SECONDS,
     DialogueHarnessError,
     bind_dialogue_lines,
     canonicalize_world_bible,
+    minimum_dialogue_window,
     schedule_dialogue_lines,
     validate_active_speakers,
 )
@@ -788,25 +793,6 @@ Ultra-fast short-drama anchor policy:
                 )
                 try:
                     candidate_output, candidate_blueprints = self._parse_director_payload(director_raw)
-                    canonical_bible = canonicalize_world_bible(
-                        candidate_output.world_bible,
-                        [line for blueprint in candidate_blueprints for line in blueprint.dialogue],
-                    )
-                    assert canonical_bible is not None
-                    candidate_output = candidate_output.model_copy(update={"world_bible": canonical_bible})
-                    candidate_blueprints = [
-                        self._apply_blueprint_dialogue_harness(
-                            blueprint,
-                            canonical_bible,
-                            shot_index=index,
-                        )
-                        for index, blueprint in enumerate(candidate_blueprints)
-                    ]
-                    self._validate_creator_dialogue_selection(
-                        candidate_blueprints,
-                        creator_dialogue_source,
-                        canonical_bible,
-                    )
                     if not candidate_blueprints:
                         raise ValueError("creative director returned no shot spine")
                     if target_count is not None and not (target_count <= len(candidate_blueprints) <= maximum_planned):
@@ -825,6 +811,53 @@ Ultra-fast short-drama anchor policy:
                             "creative director blueprint durations do not match the requested film duration: "
                             f"expected {brief.duration_seconds:g}s, got {planned_duration:g}s"
                         )
+                    canonical_bible = canonicalize_world_bible(
+                        candidate_output.world_bible,
+                        [line for blueprint in candidate_blueprints for line in blueprint.dialogue],
+                    )
+                    assert canonical_bible is not None
+                    candidate_output = candidate_output.model_copy(update={"world_bible": canonical_bible})
+                    candidate_blueprints = [
+                        blueprint.model_copy(
+                            update={
+                                "dialogue": list(
+                                    bind_dialogue_lines(
+                                        blueprint.dialogue,
+                                        canonical_bible,
+                                        shot_index=index,
+                                    )
+                                )
+                            }
+                        )
+                        for index, blueprint in enumerate(candidate_blueprints)
+                    ]
+                    candidate_blueprints = self._complete_creator_dialogue_runs(
+                        candidate_blueprints,
+                        creator_dialogue_source,
+                        canonical_bible,
+                    )
+                    self._validate_creator_dialogue_selection(
+                        candidate_blueprints,
+                        creator_dialogue_source,
+                        canonical_bible,
+                    )
+                    candidate_blueprints = self._rebalance_blueprint_dialogue(
+                        candidate_blueprints,
+                        canonical_bible,
+                    )
+                    self._validate_creator_dialogue_selection(
+                        candidate_blueprints,
+                        creator_dialogue_source,
+                        canonical_bible,
+                    )
+                    candidate_blueprints = [
+                        self._apply_blueprint_dialogue_harness(
+                            blueprint,
+                            canonical_bible,
+                            shot_index=index,
+                        )
+                        for index, blueprint in enumerate(candidate_blueprints)
+                    ]
                 except ValueError as error:
                     director_error = error
                     await self._record_trace(
@@ -1303,6 +1336,103 @@ Ultra-fast short-drama anchor policy:
                 source_run_start=run_start,
                 source_run_end=run_end,
             )
+
+    @classmethod
+    def _complete_creator_dialogue_runs(
+        cls,
+        blueprints: list[ShotBlueprint],
+        source_lines: list[DialogueLine],
+        world_bible: WorldBible,
+    ) -> list[ShotBlueprint]:
+        """Complete atomic source runs and inject missing payoff events."""
+
+        if not source_lines:
+            return blueprints
+        canonical_source = list(bind_dialogue_lines(source_lines, world_bible))
+        selected = [
+            (blueprint_index, line)
+            for blueprint_index, blueprint in enumerate(blueprints)
+            for line in blueprint.dialogue
+        ]
+        source_runs: list[tuple[int, int]] = []
+        run_start = 0
+        while run_start < len(canonical_source):
+            run_end = run_start + 1
+            while (
+                run_end < len(canonical_source)
+                and canonical_source[run_end].speaker == canonical_source[run_start].speaker
+                and canonical_source[run_end].mode == canonical_source[run_start].mode
+            ):
+                run_end += 1
+            source_runs.append((run_start, run_end))
+            run_start = run_end
+
+        source_cursor = 0
+        ownership: dict[int, tuple[int, DialogueLine]] = {}
+        for blueprint_index, line in selected:
+            matched: tuple[int, int] | None = None
+            for possible_start in range(source_cursor, len(canonical_source)):
+                first = canonical_source[possible_start]
+                if line.speaker != first.speaker or line.mode != first.mode:
+                    continue
+                combined = ""
+                for source_index in range(possible_start, len(canonical_source)):
+                    candidate = canonical_source[source_index]
+                    if candidate.speaker != first.speaker or candidate.mode != first.mode:
+                        break
+                    combined += candidate.text
+                    if cls._dialogue_text_key(line.text) == cls._dialogue_text_key(combined):
+                        matched = (possible_start, source_index + 1)
+                        break
+                if matched is not None:
+                    break
+            if matched is None:
+                raise DialogueHarnessError(
+                    "dialogue_source_mismatch",
+                    "Director shortened, paraphrased, invented, or reordered screenplay dialogue",
+                    shot_index=blueprint_index,
+                    speaker=line.speaker,
+                    text=line.text,
+                )
+            for source_index in range(*matched):
+                ownership[source_index] = (blueprint_index, line)
+            source_cursor = matched[1]
+
+        selected_indices = set(ownership)
+        for start, end in source_runs:
+            if selected_indices.intersection(range(start, end)):
+                selected_indices.update(range(start, end))
+        for start, end in source_runs[-2:]:
+            selected_indices.update(range(start, end))
+
+        rebuilt: list[list[DialogueLine]] = [[] for _ in blueprints]
+        for source_index in sorted(selected_indices):
+            run = next((value for value in source_runs if value[0] <= source_index < value[1]), None)
+            assert run is not None
+            owner = ownership.get(source_index)
+            if owner is None:
+                sibling = next(
+                    (ownership[index] for index in range(*run) if index in ownership),
+                    None,
+                )
+                if sibling is not None:
+                    owner = sibling
+                else:
+                    required_runs = source_runs[-2:]
+                    required_offset = required_runs.index(run) if run in required_runs else 0
+                    target = max(0, len(blueprints) - len(required_runs) + required_offset)
+                    owner = (target, canonical_source[source_index])
+            blueprint_index, director_line = owner
+            rebuilt[blueprint_index].append(
+                canonical_source[source_index].model_copy(
+                    update={
+                        "delivery": director_line.delivery,
+                        "start_seconds": None,
+                        "end_seconds": None,
+                    }
+                )
+            )
+        return [blueprint.model_copy(update={"dialogue": rebuilt[index]}) for index, blueprint in enumerate(blueprints)]
 
     @classmethod
     def _director_shot_schedule(cls, brief: ProjectBrief) -> dict[str, Any]:
@@ -1886,6 +2016,138 @@ Ultra-fast short-drama anchor policy:
         )
         timed = schedule_dialogue_lines(bound, blueprint.duration_seconds, shot_index=shot_index)
         return blueprint.model_copy(update={"dialogue": list(timed.lines)})
+
+    @staticmethod
+    def _rebalance_blueprint_dialogue(
+        blueprints: list[ShotBlueprint],
+        world_bible: WorldBible,
+    ) -> list[ShotBlueprint]:
+        """Partition the selected dialogue ledger across clips deterministically.
+
+        The dynamic program preserves global line order, minimizes movement
+        from the Director's intended clip, and keeps the payoff in the final
+        clip. This removes clip-capacity arithmetic from the LLM retry loop.
+        """
+
+        entries: list[tuple[int, DialogueLine]] = []
+        for blueprint_index, blueprint in enumerate(blueprints):
+            bound = bind_dialogue_lines(
+                blueprint.dialogue,
+                world_bible,
+                shot_index=blueprint_index,
+            )
+            entries.extend((blueprint_index, line) for line in bound)
+        if not entries:
+            return blueprints
+
+        capacities = [
+            blueprint.duration_seconds - DEFAULT_LEAD_IN_SECONDS - DEFAULT_TAIL_OUT_SECONDS for blueprint in blueprints
+        ]
+
+        def solve(
+            candidate_entries: list[tuple[int, DialogueLine]],
+        ) -> tuple[int, list[tuple[int, int]]] | None:
+            windows = [minimum_dialogue_window(line) for _, line in candidate_entries]
+
+            def fits(start: int, end: int, bucket: int) -> bool:
+                count = end - start
+                needed = sum(windows[start:end])
+                needed += DEFAULT_INTERLINE_GAP_SECONDS * max(0, count - 1)
+                return needed <= capacities[bucket] + 0.02
+
+            states: dict[int, tuple[int, list[tuple[int, int]]]] = {0: (0, [])}
+            line_count = len(candidate_entries)
+            for bucket in range(len(blueprints)):
+                next_states: dict[int, tuple[int, list[tuple[int, int]]]] = {}
+                for start, (cost, ranges) in states.items():
+                    for end in range(start, line_count + 1):
+                        if not fits(start, end, bucket):
+                            break
+                        if bucket == len(blueprints) - 1 and line_count and end == start:
+                            continue
+                        movement = sum(abs(bucket - candidate_entries[index][0]) for index in range(start, end))
+                        candidate = (cost + movement, [*ranges, (start, end)])
+                        current = next_states.get(end)
+                        if current is None or candidate[0] < current[0]:
+                            next_states[end] = candidate
+                states = next_states
+            return states.get(line_count)
+
+        solution = solve(entries)
+        if solution is None:
+            # Dialogue selection is already ordered and source-validated.
+            # Drop only whole optional same-speaker runs; the final two runs
+            # are the mandatory climax/payoff contract.
+            runs: list[tuple[int, int]] = []
+            run_start = 0
+            while run_start < len(entries):
+                run_end = run_start + 1
+                while (
+                    run_end < len(entries)
+                    and entries[run_end][1].speaker == entries[run_start][1].speaker
+                    and entries[run_end][1].mode == entries[run_start][1].mode
+                ):
+                    run_end += 1
+                runs.append((run_start, run_end))
+                run_start = run_end
+            optional_runs = list(range(max(0, len(runs) - 2)))
+            windows = [minimum_dialogue_window(line) for _, line in entries]
+            for drop_count in range(1, len(optional_runs) + 1):
+                choices = list(combinations(optional_runs, drop_count))
+                choices.sort(
+                    key=lambda choice: (
+                        -sum(sum(windows[start:end]) for run_index in choice for start, end in [runs[run_index]])
+                    )
+                )
+                for choice in choices:
+                    dropped = {index for run_index in choice for index in range(*runs[run_index])}
+                    candidate_entries = [entry for index, entry in enumerate(entries) if index not in dropped]
+                    candidate_solution = solve(candidate_entries)
+                    if candidate_solution is None:
+                        continue
+                    entries = candidate_entries
+                    solution = candidate_solution
+                    break
+                if solution is not None:
+                    break
+        if solution is None:
+            line_windows = [minimum_dialogue_window(line) for _, line in entries]
+            line_count = len(entries)
+            required_seconds = sum(line_windows) + DEFAULT_INTERLINE_GAP_SECONDS * max(0, line_count - 1)
+            raise DialogueHarnessError(
+                "dialogue_project_capacity_overflow",
+                "selected dialogue cannot fit the complete film; Director must choose fewer complete source runs",
+                required_seconds=round(required_seconds, 3),
+                aggregate_available_seconds=round(sum(capacities), 3),
+                line_count=line_count,
+            )
+
+        rebalanced: list[ShotBlueprint] = []
+        for blueprint_index, (start, end) in enumerate(solution[1]):
+            blueprint = blueprints[blueprint_index]
+            lines = [entries[index][1] for index in range(start, end)]
+            scheduled = schedule_dialogue_lines(
+                lines,
+                blueprint.duration_seconds,
+                shot_index=blueprint_index,
+            ).lines
+            subject_ids = list(blueprint.active_subject_ids)
+            subjects = list(blueprint.active_subjects)
+            for line in scheduled:
+                if line.mode == "on_screen" and line.subject_id and line.subject_id not in subject_ids:
+                    subject_ids.append(line.subject_id)
+                if line.mode == "on_screen" and line.speaker not in subjects:
+                    subjects.append(line.speaker)
+            rebalanced.append(
+                blueprint.model_copy(
+                    update={
+                        "dialogue": list(scheduled),
+                        "active_subject_ids": subject_ids,
+                        "active_subjects": subjects,
+                    }
+                )
+            )
+        return rebalanced
 
     @staticmethod
     def _validate_dialogue_ledger(
