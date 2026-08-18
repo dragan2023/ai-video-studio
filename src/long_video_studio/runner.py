@@ -657,7 +657,13 @@ class RenderManager:
 
         mode = resolved_continuation_mode(project, shot)
         if mode == ContinuationMode.QUALITY:
-            return source_boundary, source_video
+            reference_path = output_dir / f"shot-{position + 1:03d}-continuation-ref2va-max15s.mp4"
+            normalized = await asyncio.to_thread(
+                self.media.normalize_ref2va_video,
+                source_video,
+                reference_path,
+            )
+            return source_boundary, normalized
 
         tail_path = output_dir / (f"shot-{position + 1:03d}-continuation-tail-{self.CONTINUATION_TAIL_SECONDS:g}s.mp4")
         await asyncio.to_thread(

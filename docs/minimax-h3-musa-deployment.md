@@ -33,7 +33,7 @@ steps, or a lower resolution.
 
 ## Recommended Ref2VA profile
 
-For Nautilus Studio clips up to 14 seconds at `1280x704`, the best validated
+For Nautilus Studio clips up to the H3 nominal 15-second output limit at `1280x704`, the best validated
 four-GPU profile is TP4/TE4/VAE-PP4 with MUSA FlashAttention and no CPU
 offload:
 

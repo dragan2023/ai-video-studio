@@ -87,10 +87,10 @@ model's native versus Cache-DiT conditioning path, while `ultra_fast`/`fast`/
 baseline. The model's internal reference-noise timestep remains fixed until a
 dedicated artifact/continuity sweep justifies exposing it.
 
-Every planned H3 shot is limited to 14 seconds. This intentionally leaves
-container-timestamp headroom below H3's hard 15-second reference-video limit:
-a nominal 15-second encode can be reported by ffprobe as slightly longer than
-15 seconds and would otherwise make the following Ref2VA request fail.
+Every planned H3 shot can use the model's nominal 15-second output limit. H3
+aligns that request to 362 frames (about 15.083 seconds). When that output is
+later used as a Ref2VA reference, the continuation adapter trims the tail input
+to stay within Ref2VA's strict <=15-second reference-video contract.
 
 ## Hierarchical storyboard planning
 

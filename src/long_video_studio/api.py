@@ -41,6 +41,7 @@ from long_video_studio.domain import (
     uses_independent_ultra_fast_anchor,
     utc_now,
 )
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS, H3_MIN_SHOT_SECONDS
 from long_video_studio.planner import PlannerError
 from long_video_studio.planning import PlanningManager
 from long_video_studio.runner import RenderManager
@@ -59,7 +60,11 @@ class ImportPathRequest(BaseModel):
 class ShotUpdate(BaseModel):
     title: str | None = None
     purpose: str | None = None
-    duration_seconds: float | None = Field(default=None, ge=4, le=14)
+    duration_seconds: float | None = Field(
+        default=None,
+        ge=H3_MIN_SHOT_SECONDS,
+        le=H3_MAX_SHOT_SECONDS,
+    )
     task: ShotTask | None = None
     transition_kind: TransitionKind | None = None
     prompt: str | None = None

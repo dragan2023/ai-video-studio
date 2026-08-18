@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from long_video_studio.domain import AssetRecord, FilmProject, RenderJob, RenderObservation, utc_now
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS
 
 
 class StudioRepository:
@@ -179,29 +180,38 @@ class StudioRepository:
 
     @staticmethod
     def _load_project(payload: str) -> FilmProject:
-        """Load legacy projects while keeping the new 14s write ceiling.
+        """Load legacy projects while keeping the H3 output-duration ceiling.
 
         Existing projects may contain a historical 15s shot. They remain
         readable for review; any edit/replan/render path validates the new
-        safe limit before sending a reference video to H3.
+        output limit before sending a request to H3.
         """
 
         data = json.loads(payload)
         for shot in data.get("shots", []):
-            if isinstance(shot, dict) and float(shot.get("duration_seconds", 0)) > 14:
+            if isinstance(shot, dict) and float(shot.get("duration_seconds", 0)) > H3_MAX_SHOT_SECONDS:
                 shot["legacy_duration_seconds"] = shot["duration_seconds"]
-                shot["duration_seconds"] = 14.0
+                shot["duration_seconds"] = H3_MAX_SHOT_SECONDS
                 for line in shot.get("dialogue", []):
                     if isinstance(line, dict):
                         if line.get("start_seconds") is not None:
-                            line["start_seconds"] = min(float(line["start_seconds"]), 13.5)
+                            line["start_seconds"] = min(
+                                float(line["start_seconds"]),
+                                H3_MAX_SHOT_SECONDS - 0.5,
+                            )
                         if line.get("end_seconds") is not None:
-                            line["end_seconds"] = min(float(line["end_seconds"]), 14.0)
+                            line["end_seconds"] = min(
+                                float(line["end_seconds"]),
+                                H3_MAX_SHOT_SECONDS,
+                            )
                             if line.get("start_seconds") is not None and line["end_seconds"] <= line["start_seconds"]:
-                                line["end_seconds"] = min(14.0, line["start_seconds"] + 0.5)
+                                line["end_seconds"] = min(
+                                    H3_MAX_SHOT_SECONDS,
+                                    line["start_seconds"] + 0.5,
+                                )
                 beats = shot.get("visual_beats") or []
                 if beats:
-                    beats[-1]["end_seconds"] = 14.0
+                    beats[-1]["end_seconds"] = H3_MAX_SHOT_SECONDS
         return FilmProject.model_validate(data)
 
     def save_job(self, job: RenderJob) -> RenderJob:

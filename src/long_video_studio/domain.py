@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS, H3_MIN_SHOT_SECONDS
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -282,10 +284,10 @@ class ShotSpec(BaseModel):
     index: int = Field(ge=0)
     title: str
     purpose: str
-    # Keep a safety margin below H3's nominal 15s reference-video limit. The
-    # encoded/container duration can round up by a few frames (e.g. 15.083s).
-    # Legacy projects are normalized by the repository before validation.
-    duration_seconds: float = Field(ge=4, le=15)
+    source_section: str = ""
+    # H3 accepts a nominal 15-second output request and aligns it to 362 frames
+    # / about 15.083 seconds. Ref2VA reference inputs are trimmed separately.
+    duration_seconds: float = Field(ge=H3_MIN_SHOT_SECONDS, le=H3_MAX_SHOT_SECONDS)
     task: ShotTask = ShotTask.FL2VA
     transition_kind: TransitionKind = TransitionKind.CONTINUOUS
     prompt: str = Field(

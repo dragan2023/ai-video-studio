@@ -10,9 +10,9 @@ from long_video_studio.repository import StudioRepository
 
 
 def _assert_schedule(durations: list[float], requested_duration: int) -> None:
-    assert sum(round(duration * 100) for duration in durations) == requested_duration * 100
-    assert all(4 <= duration <= 14 for duration in durations)
-    assert all(round(duration, 2) == duration for duration in durations)
+    assert sum(round(duration * 1000) for duration in durations) == requested_duration * 1000
+    assert all(4 <= duration <= 15 for duration in durations)
+    assert all(round(duration, 3) == duration for duration in durations)
 
 
 def test_duration_harness_replays_negative_rounding_residual(settings):
@@ -51,7 +51,7 @@ def test_duration_harness_rejects_infeasible_or_invalid_inputs():
     with pytest.raises(ValueError, match="too many shots"):
         PlannerService._fit_shot_durations([8] * 16, 60)
     with pytest.raises(ValueError, match="too few shots"):
-        PlannerService._fit_shot_durations([8, 8], 29)
+        PlannerService._fit_shot_durations([15] * 3, 60)
     with pytest.raises(ValueError, match="positive and finite"):
         PlannerService._fit_shot_durations([8, 0, 8], 24)
     with pytest.raises(ValueError, match="no shots"):
@@ -62,7 +62,7 @@ def test_duration_harness_randomized_feasible_matrix():
     rng = random.Random(20260817)
     for _ in range(1_000):
         shot_count = rng.randint(1, 64)
-        maximum_duration = min(shot_count * 14, 900)
+        maximum_duration = min(shot_count * 15, 900)
         requested_duration = rng.randint(shot_count * 4, maximum_duration)
         source_durations = [10 ** rng.uniform(-1, 2) for _ in range(shot_count)]
 

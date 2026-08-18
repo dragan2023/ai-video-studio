@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from long_video_studio.domain import ProjectBrief, ShotSpec, ShotTask, WorldBible
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS
 from long_video_studio.h3_prompt import H3Reference, render_h3_prompt
 
 
@@ -204,11 +205,8 @@ class H3Client:
 
     @staticmethod
     def _validate_duration(shot: ShotSpec) -> None:
-        if shot.duration_seconds > 14:
-            raise ValueError(
-                "H3 safety ceiling is 14 seconds per shot; a nominal 15-second "
-                "reference video can probe above the model's hard 15-second limit"
-            )
+        if shot.duration_seconds > H3_MAX_SHOT_SECONDS:
+            raise ValueError(f"H3 output-duration ceiling is {H3_MAX_SHOT_SECONDS:g} seconds per shot")
 
     def _common_data(
         self,

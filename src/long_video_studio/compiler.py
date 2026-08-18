@@ -19,6 +19,7 @@ from long_video_studio.domain import (
     resolved_continuation_mode,
     uses_independent_ultra_fast_anchor,
 )
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS
 
 if TYPE_CHECKING:
     from long_video_studio.estimator import RenderEstimator
@@ -96,7 +97,7 @@ class FilmCompiler:
                 task="fl2va",
                 endpoint=self.settings.h3_fl2va_url,
                 available=bool(self.settings.h3_fl2va_url),
-                max_duration_seconds=14,
+                max_duration_seconds=H3_MAX_SHOT_SECONDS,
                 supports_audio=True,
                 recommended_gpus=8,
                 notes=["First-frame-led video and audio generation."],
@@ -107,7 +108,7 @@ class FilmCompiler:
                 task="ref2va",
                 endpoint=self.settings.h3_ref2va_url,
                 available=bool(self.settings.h3_ref2va_url),
-                max_duration_seconds=14,
+                max_duration_seconds=H3_MAX_SHOT_SECONDS,
                 supports_audio=True,
                 supports_multiple_references=True,
                 recommended_gpus=8,
@@ -130,10 +131,14 @@ class FilmCompiler:
         ]
 
     def compile(self, project: FilmProject) -> ExecutionPlan:
-        over_limit = [(shot.index + 1, shot.duration_seconds) for shot in project.shots if shot.duration_seconds > 14]
+        over_limit = [
+            (shot.index + 1, shot.duration_seconds)
+            for shot in project.shots
+            if shot.duration_seconds > H3_MAX_SHOT_SECONDS
+        ]
         if over_limit:
             raise ValueError(
-                "H3 safety ceiling is 14 seconds per shot; refusing to render: "
+                f"H3 output-duration ceiling is {H3_MAX_SHOT_SECONDS:g} seconds per shot; refusing to render: "
                 + ", ".join(f"shot {index}={duration:g}s" for index, duration in over_limit)
             )
         capability_map = {capability.id: capability for capability in self.capabilities()}

@@ -73,6 +73,41 @@ def test_extract_tail_rejects_non_positive_duration(tmp_path):
         raise AssertionError("non-positive tail duration should fail")
 
 
+def test_normalize_ref2va_video_trims_h3_15_083_second_output(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[0] == "ffprobe":
+            return SimpleNamespace(stdout=json.dumps({"format": {"duration": "15.083333"}}))
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "ref2va.mp4"
+    result = MediaTools("ffmpeg", "ffprobe").normalize_ref2va_video(source, output)
+
+    assert result == output
+    ffmpeg = calls[-1]
+    assert ffmpeg[ffmpeg.index("-t") + 1] == "14.950000"
+
+
+def test_normalize_ref2va_video_reuses_short_input(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=json.dumps({"format": {"duration": "14.5"}}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    source = tmp_path / "source.mp4"
+    output = tmp_path / "unused.mp4"
+    result = MediaTools("ffmpeg", "ffprobe").normalize_ref2va_video(source, output)
+
+    assert result == source
+    assert len(calls) == 1
+
+
 def test_continuous_concatenation_drops_repeated_anchor_and_joins_streams(tmp_path, monkeypatch):
     calls: list[list[str]] = []
 

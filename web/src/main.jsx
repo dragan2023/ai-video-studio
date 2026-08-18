@@ -1961,7 +1961,7 @@ function App() {
                   value={duration}
                   onChange={(event) => setDuration(event.target.value)}
                 >
-                  <option value="14">14 秒（安全上限）</option>
+                  <option value="15">15 秒（H3 单镜上限）</option>
                   <option value="30">30 秒</option>
                   <option value="60">1 分钟</option>
                   <option value="120">2 分钟</option>
@@ -2815,8 +2815,8 @@ function App() {
                       <input
                         type="number"
                         min="4"
-                        max="14"
-                        step="0.5"
+                        max="15"
+                        step="0.001"
                         value={shotDraft.duration_seconds}
                         onChange={(event) =>
                           updateShotDraft(

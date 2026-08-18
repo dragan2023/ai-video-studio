@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from long_video_studio.h3_limits import H3_REF2VA_MAX_INPUT_SECONDS, H3_REF2VA_TRIM_SECONDS
+
 
 class MediaTools:
     def __init__(self, ffmpeg_binary: str = "ffmpeg", ffprobe_binary: str = "ffprobe"):
@@ -50,16 +52,7 @@ class MediaTools:
         )
         return output_path
 
-    def extract_tail(
-        self,
-        video_path: Path,
-        output_path: Path,
-        duration_seconds: float = 5.0,
-    ) -> Path:
-        """Create a tail reference of up to the requested duration with video and audio."""
-
-        if duration_seconds <= 0:
-            raise ValueError("tail duration must be positive")
+    def probe_duration(self, video_path: Path) -> float:
         probe = subprocess.run(
             [
                 self.ffprobe_binary,
@@ -76,9 +69,34 @@ class MediaTools:
             text=True,
             timeout=60,
         )
-        source_duration = float(json.loads(probe.stdout)["format"]["duration"])
-        if source_duration <= 0:
+        duration = float(json.loads(probe.stdout)["format"]["duration"])
+        if duration <= 0:
             raise ValueError("source video has no positive duration")
+        return duration
+
+    def normalize_ref2va_video(self, video_path: Path, output_path: Path) -> Path:
+        """Trim an H3 output before using it as a Ref2VA reference.
+
+        FL2VA accepts a nominal 15-second request and emits 362 frames
+        (~15.083s). Ref2VA validates the encoded reference duration strictly
+        at <=15s, so only over-limit inputs are re-encoded here.
+        """
+
+        if self.probe_duration(video_path) <= H3_REF2VA_MAX_INPUT_SECONDS:
+            return video_path
+        return self.extract_tail(video_path, output_path, H3_REF2VA_TRIM_SECONDS)
+
+    def extract_tail(
+        self,
+        video_path: Path,
+        output_path: Path,
+        duration_seconds: float = 5.0,
+    ) -> Path:
+        """Create a tail reference of up to the requested duration with video and audio."""
+
+        if duration_seconds <= 0:
+            raise ValueError("tail duration must be positive")
+        source_duration = self.probe_duration(video_path)
         start_seconds = max(0.0, source_duration - duration_seconds)
         tail_duration = source_duration - start_seconds
         output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -48,9 +48,9 @@ def test_planner_builds_continuity_aware_film_ir(settings):
             )
         )
     )
-    assert len(project.shots) == 5
+    assert len(project.shots) == 4
     assert sum(shot.duration_seconds for shot in project.shots) == 60
-    assert all(4 <= shot.duration_seconds <= 14 for shot in project.shots)
+    assert all(4 <= shot.duration_seconds <= 15 for shot in project.shots)
     assert project.shots[0].start_frame_asset_id == hero.id
     assert project.shots[1].continuity_from_shot_id == project.shots[0].id
     assert all(shot.opening_state for shot in project.shots)
@@ -254,7 +254,6 @@ def test_hierarchical_planner_calls_director_shot_directors_and_critic(settings)
         "creative_director",
         "shot_director",
         "shot_director",
-        "shot_director",
         "continuity_critic",
     ]
     first_shot_payload = calls[1][1]
@@ -262,12 +261,12 @@ def test_hierarchical_planner_calls_director_shot_directors_and_critic(settings)
     assert first_shot_payload["next_blueprint"] is not None
     second_shot_payload = calls[2][1]
     assert second_shot_payload["previous_blueprint"] is not None
-    assert second_shot_payload["next_blueprint"] is not None
-    assert len(output.shots) == 3
+    assert second_shot_payload["next_blueprint"] is None
+    assert len(output.shots) == 2
     assert output.shots[0].transition_kind is TransitionKind.ANCHOR
     assert output.shots[1].transition_kind is TransitionKind.CONTINUOUS
     assert sum(shot.duration_seconds for shot in output.shots) == 30
-    assert [shot.index for shot in output.shots] == [0, 1, 2]
+    assert [shot.index for shot in output.shots] == [0, 1]
 
 
 def test_hierarchical_planner_keeps_draft_when_critic_json_is_truncated(settings, monkeypatch):
@@ -389,6 +388,7 @@ def test_shot_director_wire_schema_fragment_in_dialogue_is_sanitized(settings):
         index=0,
         title="Opening",
         purpose="A woman speaks",
+        source_section="Scene 1",
         duration_seconds=8,
         opening_state="standing",
         ending_state="settled",
@@ -781,6 +781,8 @@ def test_shot_director_requires_generated_anchor_when_no_start_frame_is_selected
         index=0,
         title="Opening",
         purpose="Establish the scene",
+        source_section="Scene 1",
+        duration_seconds=8,
         transition_kind=TransitionKind.ANCHOR,
     )
 
@@ -1023,7 +1025,7 @@ def test_planner_parses_proxy_double_envelope_and_closes_duration(settings):
     assert len(parsed.shots) == len(shots)
     normalized = planner._normalize_agent_output(parsed, base.brief, [])
     assert sum(shot.duration_seconds for shot in normalized.shots) == 30
-    assert all(4 <= shot.duration_seconds <= 14 for shot in normalized.shots)
+    assert all(4 <= shot.duration_seconds <= 15 for shot in normalized.shots)
 
 
 def test_planner_derives_missing_shot_indices_from_array_order(settings):
@@ -1274,13 +1276,12 @@ def test_compiler_snapshots_structured_storyboard_fields(settings):
     assert stage.inputs["dialogue"][0]["text"] == "I am here."
 
 
-def test_compiler_refuses_legacy_fifteen_second_shot(settings):
+def test_compiler_accepts_h3_maximum_fifteen_second_shot(settings):
     project = _anchor_mode_project()
     project.shots[0].duration_seconds = 15
-    with pytest.raises(ValueError, match="safety ceiling is 14 seconds"):
-        FilmCompiler(settings).compile(project)
+    FilmCompiler(settings).compile(project)
 
 
-def test_planner_structured_schema_caps_h3_shots_at_fourteen_seconds():
+def test_planner_structured_schema_caps_h3_shots_at_fifteen_seconds():
     schema = PlannerService._planner_json_schema()
-    assert schema["$defs"]["ShotSpec"]["properties"]["duration_seconds"]["maximum"] == 14
+    assert schema["$defs"]["ShotSpec"]["properties"]["duration_seconds"]["maximum"] == 15

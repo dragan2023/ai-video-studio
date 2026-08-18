@@ -136,7 +136,7 @@ def test_continuation_rule_is_ephemeral_and_idempotent():
     assert retried_request.prompt.count(RenderManager.CONTINUATION_REF2VA_RULE) == 1
 
 
-def test_quality_uses_full_previous_clip_without_tail_transcode(settings, tmp_path, monkeypatch):
+def test_quality_normalizes_only_overlong_previous_clip(settings, tmp_path, monkeypatch):
     configured = replace(settings, h3_fl2va_url="http://fl2va", h3_ref2va_url="http://ref2va")
     repository = StudioRepository(configured.database_path)
     first = _shot(0)
@@ -156,10 +156,11 @@ def test_quality_uses_full_previous_clip_without_tail_transcode(settings, tmp_pa
     source.write_bytes(b"video")
     boundary.write_bytes(png_bytes().getvalue())
 
-    def unexpected_extract(*args, **kwargs):
-        raise AssertionError("quality mode must not extract a tail")
+    def normalize(source_path, output_path):
+        assert source_path == source
+        return source
 
-    monkeypatch.setattr(manager.media, "extract_tail", unexpected_extract)
+    monkeypatch.setattr(manager.media, "normalize_ref2va_video", normalize)
     image, media = asyncio.run(
         manager._continuation_ref2va_inputs(
             project,
@@ -262,6 +263,7 @@ def test_fast_render_routes_continuation_to_tail_ref2va_and_leaves_asset_ref2va_
     monkeypatch.setattr(H3Client, "generate_ref2va", fake_ref2va)
     monkeypatch.setattr(manager.media, "fit_image_to_canvas", fake_fit)
     monkeypatch.setattr(manager.media, "extract_last_stable_frame", fake_boundary)
+    monkeypatch.setattr(manager.media, "normalize_ref2va_video", lambda source, output: source)
     monkeypatch.setattr(manager.media, "extract_tail", fake_tail)
     monkeypatch.setattr(manager.media, "concatenate", fake_concatenate)
 
@@ -420,6 +422,7 @@ def test_failed_render_can_resume_a_completed_first_clip(settings, tmp_path, mon
     monkeypatch.setattr(H3Client, "generate_fl2va", unexpected_fl2va)
     monkeypatch.setattr(H3Client, "generate_ref2va", fake_ref2va)
     monkeypatch.setattr(manager.media, "extract_last_stable_frame", fake_boundary)
+    monkeypatch.setattr(manager.media, "normalize_ref2va_video", lambda source, output: source)
     monkeypatch.setattr(manager.media, "concatenate", fake_concatenate)
 
     job = repository.save_job(RenderJob(project_id=project.id))

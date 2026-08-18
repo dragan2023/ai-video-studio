@@ -34,6 +34,7 @@ from long_video_studio.domain import (
     WorldBible,
 )
 from long_video_studio.h3_context import sanitize_audio_prompt
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS, H3_MIN_SHOT_SECONDS
 from long_video_studio.repository import StudioRepository
 from long_video_studio.style_registry import get_style_contract, style_prompt
 
@@ -49,6 +50,21 @@ BEATS = [
     ("Resolution", "Resolve the action and leave a clean final image."),
 ]
 
+_SOURCE_SECTION_PATTERNS = (
+    re.compile(
+        r"(?im)^\s*(?:#{1,6}\s*)?(?:\*{1,2})?\s*"
+        r"((?:\d+\s*[-－—.]\s*\d+)(?=\s|[:：]|$)(?:[^\n*]*))"
+    ),
+    re.compile(
+        r"(?im)^\s*(?:#{1,6}\s*)?(?:\*{1,2})?\s*"
+        r"((?:第[一二三四五六七八九十百0-9]+(?:场|幕|段|章))(?=\s|[:：]|$)(?:[^\n*]*))"
+    ),
+    re.compile(
+        r"(?im)^\s*(?:#{1,6}\s*)?(?:\*{1,2})?\s*"
+        r"((?:(?:scene|act)\s+[A-Za-z0-9IVXLC]+)(?:[^\n*]*))"
+    ),
+)
+
 
 class PlannerOutput(BaseModel):
     world_bible: WorldBible
@@ -61,7 +77,8 @@ class ShotBlueprint(BaseModel):
     index: int = 0
     title: str = ""
     purpose: str = ""
-    duration_seconds: float = 8.0
+    source_section: str = Field(min_length=1)
+    duration_seconds: float = Field(ge=H3_MIN_SHOT_SECONDS, le=H3_MAX_SHOT_SECONDS)
     active_subjects: list[str] = Field(default_factory=list)
     scene_and_landmarks: str = ""
     opening_state: str = ""
@@ -88,7 +105,7 @@ class ShotCreativeDraft(BaseModel):
     index: int = 0
     title: str = ""
     purpose: str = ""
-    duration_seconds: float = 8.0
+    duration_seconds: float = Field(ge=H3_MIN_SHOT_SECONDS, le=H3_MAX_SHOT_SECONDS)
     task: ShotTask = ShotTask.FL2VA
     transition_kind: TransitionKind = TransitionKind.CONTINUOUS
     prompt: str = ""
@@ -244,8 +261,10 @@ class PlannerService:
         return self._get_assets(brief.reference_asset_ids) if brief.reference_asset_ids else []
 
     def _plan_heuristically(self, brief: ProjectBrief, assets: list[AssetRecord]) -> FilmProject:
-        shot_count = max(1, math.ceil(brief.duration_seconds / 12))
+        schedule = self._director_shot_schedule(brief)
+        shot_count = int(schedule["target_shot_count"])
         duration = brief.duration_seconds / shot_count
+        source_sections = schedule["explicit_source_sections"]
         style_contract = get_style_contract(brief.style_preset, brief.style_instructions)
         image_assets = [asset for asset in assets if asset.kind == AssetKind.IMAGE]
         explicit_start_assets = [asset for asset in image_assets if AssetRole.START_FRAME in asset.roles]
@@ -347,6 +366,7 @@ class PlannerService:
                 index=index,
                 title=f"{index + 1}. {title}",
                 purpose=action,
+                source_section=(source_sections[min(index, len(source_sections) - 1)] if source_sections else title),
                 duration_seconds=round(duration, 2),
                 task=task,
                 transition_kind=(
@@ -461,7 +481,7 @@ class PlannerService:
             }
             for asset in assets
         ]
-        system_prompt = """
+        system_prompt = f"""
 You are an autonomous film director, screenwriter, storyboard artist, and
 continuity supervisor for a creator-facing long-video studio. Expand the user's
 one-sentence idea into an original visual story; do not merely copy that sentence
@@ -516,10 +536,10 @@ reference_anchors, hook, continuity_in, continuity_out, negative_prompt, and
 every visual_beats description. Asset metadata can be in another language;
 translate its visual meaning into English without translating proper names.
 Keep dialogue text in its original spoken language. Split the requested
-duration into 4-14 second shots whose durations add up to the requested duration.
-Never generate a 15-second shot: H3's encoded reference video can round up by
-frames (for example, 15.083s) and cross its hard limit. Treat 14 seconds as the
-absolute per-shot ceiling.
+duration into {H3_MIN_SHOT_SECONDS:g}-{H3_MAX_SHOT_SECONDS:g} second shots whose durations add up to the
+requested duration. Prefer the fewest long clips that preserve creator-authored scene headings; keep dialogue turns,
+camera coverage, and 1-2 second visual beats inside a clip instead of promoting them to new clips. Never plan above
+{H3_MAX_SHOT_SECONDS:g} seconds. H3 accepts that request and aligns it to 362 frames / about 15.083 seconds.
 Use FL2VA for shots that begin from an image anchor. A later continuous shot may
 still be labeled FL2VA in the storyboard; the runtime continuation policy will
 promote it to Ref2VA when a rendered prior clip and a Ref2VA endpoint are
@@ -618,6 +638,7 @@ Ultra-fast short-drama anchor policy:
         user_payload: dict[str, Any] = {
             "brief": brief.model_dump(mode="json"),
             "assets": asset_context,
+            "shot_schedule": self._director_shot_schedule(brief),
         }
         headers = {"Content-Type": "application/json"}
         if self.settings.planner_api_key:
@@ -678,8 +699,10 @@ Ultra-fast short-drama anchor policy:
         output = self._parse_planner_payload(raw_payload)
         if not output.shots:
             raise ValueError("planner returned no shots")
-        if any(shot.duration_seconds > 14 for shot in output.shots):
-            raise ValueError("planner returned a shot longer than the safe 14-second H3 ceiling")
+        if any(shot.duration_seconds > H3_MAX_SHOT_SECONDS for shot in output.shots):
+            raise ValueError(
+                f"planner returned a shot longer than the H3 output-duration {H3_MAX_SHOT_SECONDS:g}-second H3 ceiling"
+            )
         return self._normalize_agent_output(output, brief, assets)
 
     async def _plan_with_llm_hierarchical(
@@ -694,6 +717,7 @@ Ultra-fast short-drama anchor policy:
         asset_context = self._asset_context(assets)
         style_contract = style_prompt(brief.style_preset, brief.style_instructions)
         h3_rules = self._h3_skill_contract(brief.style_preset)
+        director_schedule = self._director_shot_schedule(brief)
         explicit_start_ids = {
             asset.id for asset in assets if asset.kind == AssetKind.IMAGE and AssetRole.START_FRAME in asset.roles
         }
@@ -709,15 +733,25 @@ Ultra-fast short-drama anchor policy:
                     "brief": brief.model_dump(mode="json"),
                     "assets": asset_context,
                     "h3_skill_contract": h3_rules,
+                    "shot_schedule": director_schedule,
                 },
-                schema=self._director_json_schema(),
+                schema=self._director_json_schema(brief),
                 schema_name="nautilus_creative_director",
             )
             director_output, blueprints = self._parse_director_payload(director_raw)
             if not blueprints:
                 raise ValueError("creative director returned no shot spine")
-            if any(blueprint.duration_seconds > 14 for blueprint in blueprints):
-                raise ValueError("creative director returned a shot longer than the safe 14-second ceiling")
+            target_count = director_schedule["target_shot_count"]
+            if target_count is not None and len(blueprints) != target_count:
+                raise ValueError(
+                    "creative director ignored the creator-aware shot schedule: "
+                    f"expected {target_count} clips, got {len(blueprints)}"
+                )
+            if any(blueprint.duration_seconds > H3_MAX_SHOT_SECONDS for blueprint in blueprints):
+                raise ValueError(
+                    "creative director returned a shot longer than the H3 output-duration "
+                    f"{H3_MAX_SHOT_SECONDS:g}-second ceiling"
+                )
             semaphore = asyncio.Semaphore(max(1, self.settings.planner_shot_concurrency))
 
             async def direct_one(index: int, blueprint: ShotBlueprint) -> ShotSpec:
@@ -779,6 +813,7 @@ Ultra-fast short-drama anchor policy:
                         {
                             "stage": "continuity_critic",
                             "brief": brief.model_dump(mode="json"),
+                            "shot_schedule": director_schedule,
                             "world_bible": draft.world_bible.model_dump(mode="json"),
                             "shots": [shot.model_dump(mode="json") for shot in draft.shots],
                             "checks": [
@@ -787,7 +822,7 @@ Ultra-fast short-drama anchor policy:
                                 "an exited character is not silently reintroduced",
                                 "the opening begins after the prior ending and never replays it",
                                 "dialogue, ambience, Foley, and music remain separate",
-                                "each shot stays between 4 and 14 seconds and keeps complete beat coverage",
+                                "each shot stays within H3's output-duration range and keeps complete beat coverage",
                             ],
                         },
                         schema=self._planner_json_schema(),
@@ -864,6 +899,7 @@ Ultra-fast short-drama anchor policy:
                 shot.model_copy(
                     update={
                         "index": index,
+                        "source_section": blueprint.source_section,
                         "duration_seconds": blueprint.duration_seconds,
                         "transition_kind": blueprint.transition_kind,
                         "visual_beats": beats,
@@ -918,11 +954,86 @@ Ultra-fast short-drama anchor policy:
         return contract
 
     @staticmethod
-    def _director_system_prompt(brief: ProjectBrief, style_contract: str) -> str:
+    def _explicit_source_sections(prompt: str) -> tuple[str, ...]:
+        """Extract creator-authored macro scene headings without parsing beats."""
+
+        matches: list[tuple[int, str]] = []
+        for pattern in _SOURCE_SECTION_PATTERNS:
+            for match in pattern.finditer(prompt):
+                heading = re.sub(r"\s+", " ", match.group(1)).strip(" *#")
+                if heading:
+                    matches.append((match.start(), heading))
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for _position, heading in sorted(matches):
+            key = heading.casefold()
+            if key not in seen:
+                ordered.append(heading)
+                seen.add(key)
+        return tuple(ordered)
+
+    @classmethod
+    def _director_shot_schedule(cls, brief: ProjectBrief) -> dict[str, Any]:
+        """Build a creator-aware clip-count contract for the director stage."""
+
+        minimum_count = max(1, math.ceil(brief.duration_seconds / H3_MAX_SHOT_SECONDS))
+        maximum_count = max(1, math.floor(brief.duration_seconds / H3_MIN_SHOT_SECONDS))
+        source_sections = cls._explicit_source_sections(brief.prompt)
+        target_count = min(maximum_count, max(minimum_count, len(source_sections)))
+        target_average = brief.duration_seconds / target_count
+        return {
+            "requested_duration_seconds": brief.duration_seconds,
+            "minimum_shot_count": minimum_count,
+            "maximum_shot_count": maximum_count,
+            "target_shot_count": target_count,
+            "target_average_shot_seconds": round(target_average, 2),
+            "max_shot_seconds": H3_MAX_SHOT_SECONDS,
+            "preferred_shot_seconds": f"10-{H3_MAX_SHOT_SECONDS:g}",
+            "explicit_source_sections": list(source_sections),
+            "source_sections_exceed_capacity": len(source_sections) > maximum_count,
+        }
+
+    @classmethod
+    def _director_schedule_contract(cls, brief: ProjectBrief) -> str:
+        schedule = cls._director_shot_schedule(brief)
+        sections = schedule["explicit_source_sections"]
+        target = schedule["target_shot_count"]
+        average = schedule["target_average_shot_seconds"]
+        count_instruction = (
+            f"Create exactly {target} generated clips for this {brief.duration_seconds}-second project, averaging "
+            f"about {average:g} seconds. Use the fewest clips that fit H3's output-duration ceiling and move "
+            "individual "
+            f"clip durations toward {H3_MAX_SHOT_SECONDS:g} seconds when the source-section pacing allows."
+        )
+        if sections:
+            section_instruction = (
+                "The creator supplied these ordered macro scene headings: "
+                + json.dumps(sections, ensure_ascii=False)
+                + ". Preserve their order and copy the relevant heading into each blueprint's source_section. "
+                "Give every source section at least one clip when feasible. If the maximum duration requires more "
+                "clips than source sections, split only the densest section at a natural irreversible action "
+                "boundary. If there are more source sections than the 4-second minimum can fit, merge only "
+                "adjacent sections and record the combined headings in source_section."
+            )
+        else:
+            section_instruction = (
+                "No explicit macro scene headings were detected. Create a small number of causal macro sections "
+                "instead of promoting individual dialogue turns, camera coverage changes, hooks, or 1-2 second "
+                "visual beats into separate generated clips."
+            )
+        return (
+            f"{count_instruction} {section_instruction} A source section is story structure; visual_beats are "
+            "internal phases inside one continuous H3 clip. Do not create a new blueprint merely because the "
+            "camera moves, a different character speaks, or the action advances to its next beat."
+        )
+
+    @classmethod
+    def _director_system_prompt(cls, brief: ProjectBrief, style_contract: str) -> str:
         continuity_contract = (
-            "Plan each shot as a self-contained short-drama scene with its own explicit zero-second composition; "
-            "preserve identity and story causality across cuts, but do not require the next opening pose or camera "
-            "layout to match the previous final frame."
+            "Give each generated clip its own explicit zero-second composition so it can render independently, but "
+            "do not mistake every dialogue turn, camera change, or action beat for a new story scene. Preserve "
+            "identity and story causality across cuts without requiring the next opening pose or camera layout to "
+            "match the previous final frame."
             if (
                 brief.continuation_mode == ContinuationMode.ULTRA_FAST
                 and brief.ultra_fast_anchor_strategy == UltraFastAnchorStrategy.INDEPENDENT
@@ -934,8 +1045,10 @@ Ultra-fast short-drama anchor policy:
             "Turn the user's premise into a causal visual spine and a canonical World Bible. Establish stable "
             "character identities, stable subject IDs/aliases, wardrobe, props, locations, fixed landmarks, lighting, "
             "camera axis, audio bed. "
-            f"{continuity_contract} Plan 4-14 second shots; "
-            "never plan 15 seconds. Do not write final model prompts yet: make each shot's title, purpose, active "
+            f"{continuity_contract} {cls._director_schedule_contract(brief)} "
+            f"Never plan above {H3_MAX_SHOT_SECONDS:g} seconds; H3 accepts that request and aligns it to about "
+            "15.083 seconds / 362 frames. Do not write final model prompts "
+            "yet: make each shot's source_section, title, purpose, active "
             "subjects, opening/ending state, incoming/outgoing handoff, audio phase, transition kind, and one hook "
             "unambiguous. Bind each SubjectCard to the relevant reference_asset_ids and speaker_id when known; "
             "use semantic labels in prose rather than opaque IDs. Return the DirectorPlan JSON schema (World Bible "
@@ -1007,7 +1120,10 @@ Ultra-fast short-drama anchor policy:
             )
         return (
             "You are a specialist H3 Shot Director. This is stage 2 of 3. Produce one complete ShotSpec, not a "
-            "story summary. Expand the supplied blueprint into a production-ready visual prompt of roughly "
+            "story summary. One blueprint is one continuous H3 generation clip for the assigned source_section; "
+            "all 1-2 second visual beats are internal phases of that clip, not edit points. Do not invent a cut or "
+            "new scene merely because the camera moves, another character speaks, or the action advances. Expand "
+            "the supplied blueprint into a production-ready visual prompt of roughly "
             "120-220 informative English words plus 4-8 timeline beats covering the entire duration; the compiled "
             "H3 detailed_description should land near 350-500 words without repeated boilerplate. Every beat "
             "must state one primary action, visible pose/expression change, screen-space position or landmark, "
@@ -1017,7 +1133,8 @@ Ultra-fast short-drama anchor policy:
             "never opaque IDs. Keep visual prompt free of dialogue, sound notes, and metadata; put speech only in "
             "dialogue entries and ambience/Foley only in audio_prompt. Do not begin with a duration label or a "
             "generic continuation phrase. Keep the immutable style contract unchanged.\n\n"
-            f"{mode}\n\nGlobal style contract:\n{style_contract}\n\n"
+            f"{mode}\n\nSource-section assignment: {blueprint.source_section}\n\n"
+            f"Global style contract:\n{style_contract}\n\n"
             f"H3/style rules to apply:\n{h3_rules}\n\n"
             f"Blueprint to execute:\n{blueprint.model_dump_json(indent=2)}\n\n"
             f"Opening-anchor contract:\n{anchor_instruction}\n\n"
@@ -1046,7 +1163,9 @@ Ultra-fast short-drama anchor policy:
             "screen positions, eyelines, props/contact, lighting direction, camera axis, motion direction, action "
             "phase, audio bed, and dialogue speaker binding. A subject that exits must stay off screen until a "
             "planned re-entry. "
-            f"{continuity_contract} Keep each shot 4-14 seconds, preserve complete visual "
+            f"{continuity_contract} Preserve the director's clip count and source_section assignments; visual beats "
+            f"stay inside their assigned clip. Keep each shot within {H3_MIN_SHOT_SECONDS:g}-"
+            f"{H3_MAX_SHOT_SECONDS:g} seconds, preserve complete visual "
             "beat coverage, and keep visual/audio/dialogue fields separate. Do not shorten rich prompts merely to "
             "make them uniform. All model-facing prose remains English.\n\n"
             f"Immutable global style contract:\n{style_contract}\n\n"
@@ -1219,6 +1338,7 @@ Ultra-fast short-drama anchor policy:
             index=shot.index,
             title=shot.title,
             purpose=shot.purpose,
+            source_section=shot.source_section or shot.title,
             duration_seconds=shot.duration_seconds,
             active_subjects=list(shot.continuity_in.characters),
             scene_and_landmarks="; ".join(
@@ -1244,6 +1364,10 @@ Ultra-fast short-drama anchor policy:
         if not isinstance(candidate, dict):
             raise ValueError(f"shot director {index + 1} returned no ShotSpec")
         data = PlannerService._sanitize_shot_wire(candidate)
+        # Duration belongs to the director blueprint. Some shot-director
+        # providers omit the duplicated field; inject the authoritative value
+        # before validating the creative payload.
+        data.setdefault("duration_seconds", blueprint.duration_seconds)
         # Parse creative fields first; runtime IDs, output paths, and status
         # cannot be invented or overridden by a shot director.
         creative = ShotCreativeDraft.model_validate(data)
@@ -1251,6 +1375,7 @@ Ultra-fast short-drama anchor policy:
         creative_data["index"] = index
         creative_data["title"] = creative.title or blueprint.title or f"Shot {index + 1}"
         creative_data["purpose"] = creative.purpose or blueprint.purpose or "Advance the story"
+        creative_data["source_section"] = blueprint.source_section
         creative_data["duration_seconds"] = blueprint.duration_seconds
         creative_data["transition_kind"] = blueprint.transition_kind
         creative_data["opening_state"] = creative.opening_state or blueprint.opening_state
@@ -1435,9 +1560,15 @@ Ultra-fast short-drama anchor policy:
         output = PlannerService._parse_planner_payload(payload)
         return output, [PlannerService._blueprint_from_shot(shot) for shot in output.shots]
 
-    @staticmethod
-    def _director_json_schema() -> dict[str, Any]:
+    @classmethod
+    def _director_json_schema(cls, brief: ProjectBrief | None = None) -> dict[str, Any]:
         schema = DirectorPlan.model_json_schema()
+        if brief is not None:
+            target_count = cls._director_shot_schedule(brief)["target_shot_count"]
+            blueprints_schema = schema.get("properties", {}).get("shot_blueprints")
+            if target_count is not None and isinstance(blueprints_schema, dict):
+                blueprints_schema["minItems"] = target_count
+                blueprints_schema["maxItems"] = target_count
         # Preserve the canonical ShotSpec alias for proxies that validate or
         # introspect the old schema, while the real root is shot_blueprints.
         planner_schema = PlannerService._planner_json_schema()
@@ -1504,7 +1635,7 @@ Ultra-fast short-drama anchor policy:
             beat_schema["required"] = sorted(beat_schema.get("properties", {}))
         duration_schema = properties.get("duration_seconds")
         if isinstance(duration_schema, dict):
-            duration_schema["maximum"] = 14
+            duration_schema["maximum"] = H3_MAX_SHOT_SECONDS
         # A few OpenAI-compatible proxies (and older Studio test doubles)
         # inspect the canonical nested name even when the requested root is a
         # single ShotSpec. Keep that alias harmlessly available.
@@ -1565,10 +1696,9 @@ Ultra-fast short-drama anchor policy:
                     field_schema["minItems"] = 1
             duration_schema = properties.get("duration_seconds")
             if isinstance(duration_schema, dict):
-                # H3 rejects reference videos longer than 15 seconds, while a
-                # nominal 15-second encode can probe as 15.083 seconds. Keep
-                # the structured planner itself inside the safe boundary.
-                duration_schema["maximum"] = 14
+                # H3 accepts a nominal 15-second output duration and aligns it
+                # to 362 frames / about 15.083 seconds.
+                duration_schema["maximum"] = H3_MAX_SHOT_SECONDS
         beat_schema = definitions.get("StoryboardBeat")
         if isinstance(beat_schema, dict):
             beat_schema["required"] = sorted(beat_schema.get("properties", {}))
@@ -1686,22 +1816,24 @@ Ultra-fast short-drama anchor policy:
 
     @staticmethod
     def _fit_shot_durations(source_durations: list[float], requested_duration: int) -> list[float]:
-        """Fit positive shot weights to an exact, centisecond-safe 4-14s timeline."""
+        """Fit positive shot weights to the exact H3 output-duration timeline."""
 
         shot_count = len(source_durations)
         if shot_count == 0:
             raise ValueError("AI planner duration mismatch: no shots returned")
-        minimum_duration = 4
-        maximum_duration = 14
+        minimum_milliseconds = int(round(H3_MIN_SHOT_SECONDS * 1000))
+        maximum_milliseconds = int(round(H3_MAX_SHOT_SECONDS * 1000))
+        minimum_duration = minimum_milliseconds / 1000
+        maximum_duration = maximum_milliseconds / 1000
         if requested_duration < shot_count * minimum_duration:
             raise ValueError(
                 f"AI planner returned too many shots ({shot_count}) for {requested_duration}s; "
-                "each shot must be at least 4s"
+                f"each shot must be at least {H3_MIN_SHOT_SECONDS:g}s"
             )
         if requested_duration > shot_count * maximum_duration:
             raise ValueError(
                 f"AI planner returned too few shots ({shot_count}) for {requested_duration}s; "
-                "each shot must be at most 14s"
+                f"each shot must be at most {H3_MAX_SHOT_SECONDS:g}s"
             )
         if any(not math.isfinite(duration) or duration <= 0 for duration in source_durations):
             raise ValueError("AI planner duration mismatch: source durations must be positive and finite")
@@ -1720,30 +1852,33 @@ Ultra-fast short-drama anchor policy:
         scale = (lower_scale + upper_scale) / 2
         fitted = [min(maximum_duration, max(minimum_duration, duration * scale)) for duration in source_durations]
 
-        target_centiseconds = requested_duration * 100
-        fitted_centiseconds = [
+        target_milliseconds = requested_duration * 1000
+        fitted_milliseconds = [
             max(
-                minimum_duration * 100,
-                min(maximum_duration * 100, math.floor(duration * 100 + 1e-9)),
+                minimum_milliseconds,
+                min(maximum_milliseconds, math.floor(duration * 1000 + 1e-9)),
             )
             for duration in fitted
         ]
-        remaining_centiseconds = target_centiseconds - sum(fitted_centiseconds)
+        remaining_milliseconds = target_milliseconds - sum(fitted_milliseconds)
         rounding_order = sorted(
             range(shot_count),
-            key=lambda index: fitted[index] * 100 - fitted_centiseconds[index],
+            key=lambda index: fitted[index] * 1000 - fitted_milliseconds[index],
             reverse=True,
         )
         for index in rounding_order:
-            if remaining_centiseconds <= 0:
+            if remaining_milliseconds <= 0:
                 break
-            if fitted_centiseconds[index] < maximum_duration * 100:
-                fitted_centiseconds[index] += 1
-                remaining_centiseconds -= 1
-        if remaining_centiseconds != 0:
-            residual = remaining_centiseconds / 100
-            raise ValueError(f"AI planner duration cannot fit the safe 4-14s shot range; residual {residual:.2f}s")
-        return [duration / 100 for duration in fitted_centiseconds]
+            if fitted_milliseconds[index] < maximum_milliseconds:
+                fitted_milliseconds[index] += 1
+                remaining_milliseconds -= 1
+        if remaining_milliseconds != 0:
+            residual = remaining_milliseconds / 1000
+            raise ValueError(
+                "AI planner duration cannot fit the H3 "
+                f"{H3_MIN_SHOT_SECONDS:g}-{H3_MAX_SHOT_SECONDS:g}s shot range; residual {residual:.2f}s"
+            )
+        return [duration / 1000 for duration in fitted_milliseconds]
 
     def _normalize_agent_output(
         self,
@@ -1895,7 +2030,7 @@ Ultra-fast short-drama anchor policy:
             previous = shot
         requested = brief.duration_seconds
         # Agents are creative about beat lengths. Project their result onto the
-        # requested timeline while retaining relative pacing and H3's 4-14s
+        # requested timeline while retaining relative pacing and H3's
         # per-shot limits. This is a scheduler invariant, not a prompt rewrite.
         fitted_durations = self._fit_shot_durations(
             [shot.duration_seconds for shot in normalized],
@@ -1932,7 +2067,10 @@ Ultra-fast short-drama anchor policy:
                     "visual_beats": visual_beats,
                 }
             )
-        if any(shot.duration_seconds < 4 or shot.duration_seconds > 14 for shot in normalized):
+        if any(
+            shot.duration_seconds < H3_MIN_SHOT_SECONDS or shot.duration_seconds > H3_MAX_SHOT_SECONDS
+            for shot in normalized
+        ):
             actual = sum(shot.duration_seconds for shot in normalized)
             raise ValueError(f"AI planner duration mismatch: requested {requested}s, got {actual}s")
         return output.model_copy(update={"shots": normalized})
