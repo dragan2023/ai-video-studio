@@ -333,8 +333,11 @@ def test_ultra_fast_render_uses_only_previous_boundary_with_no_anchor_provider(
     fl2va_starts: list[Path] = []
     fit_sources: list[Path] = []
     ref2va_calls: list[Path] = []
+    active_services: list[str | None] = []
 
     async def fake_fl2va(self, shot, start_frame, output_path, **kwargs):
+        active = repository.get_job(job.id)
+        active_services.append(active.current_service_id if active else None)
         fl2va_starts.append(Path(start_frame))
         output_path.write_bytes(b"fl2va")
         return output_path
@@ -367,7 +370,9 @@ def test_ultra_fast_render_uses_only_previous_boundary_with_no_anchor_provider(
 
     completed = repository.get_job(job.id)
     assert completed is not None and completed.status == "complete"
+    assert completed.current_service_id is None
     assert not ref2va_calls
+    assert active_services == ["fl2va", "fl2va"]
     assert len(fl2va_starts) == 2
     assert fit_sources[1].name == "shot-001-boundary.png"
     persisted = repository.get_project(project.id)

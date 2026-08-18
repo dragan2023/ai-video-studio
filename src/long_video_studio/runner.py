@@ -142,6 +142,7 @@ class RenderManager:
                 output_path = output_dir / f"shot-{position + 1:03d}.mp4"
                 reusable_take = None if job.force_rerender else self.reusable_take_path(shot)
                 if reusable_take is not None:
+                    self._set_job_service(job, None)
                     shot.status = ShotStatus.COMPLETE
                     rendered.append(reusable_take)
                     rendered_by_shot[shot.id] = reusable_take
@@ -193,6 +194,7 @@ class RenderManager:
                         position,
                         boundary_frames,
                         output_dir,
+                        job=job,
                     )
                     start_frame = anchor or self._start_frame(shot, boundary_frames)
                     prepared_start = output_dir / f"shot-{position + 1:03d}-start-{width}x{height}.png"
@@ -205,6 +207,7 @@ class RenderManager:
                     )
                     if not self.settings.h3_fl2va_url:
                         raise RuntimeError("STUDIO_H3_FL2VA_URL is not configured")
+                    self._set_job_service(job, "fl2va")
                     await H3Client(
                         self.settings.h3_fl2va_url,
                         self.settings.h3_timeout_seconds,
@@ -224,6 +227,7 @@ class RenderManager:
                 elif is_ref2va_continuation:
                     if not self.settings.h3_ref2va_url:
                         raise RuntimeError("STUDIO_H3_REF2VA_URL is not configured")
+                    self._set_job_service(job, "ref2va")
                     image, media = await self._continuation_ref2va_inputs(
                         project,
                         shot,
@@ -257,6 +261,7 @@ class RenderManager:
                 else:
                     if not self.settings.h3_ref2va_url:
                         raise RuntimeError("STUDIO_H3_REF2VA_URL is not configured")
+                    self._set_job_service(job, "ref2va")
                     image, media = self._ref2va_inputs(shot)
                     await H3Client(
                         self.settings.h3_ref2va_url,
@@ -287,6 +292,7 @@ class RenderManager:
                 if active_started_monotonic is not None:
                     shot.render_duration_seconds = round(time.monotonic() - active_started_monotonic, 3)
                 self.repository.save_project(project)
+                self._set_job_service(job, None)
                 self.estimator.observe(project, shot)
                 active_shot = None
                 active_started_monotonic = None
@@ -316,6 +322,7 @@ class RenderManager:
             project.status = "complete"
             self.repository.save_project(project)
             job.status = "complete"
+            job.current_service_id = None
             job.progress = 1
             job.current_shot_id = None
             job.message = "render complete"
@@ -333,6 +340,7 @@ class RenderManager:
                 active_shot.render_duration_seconds = round(time.monotonic() - active_started_monotonic, 3)
             self.repository.save_project(project)
             job.status = "failed"
+            job.current_service_id = None
             job.error = self._format_error(error)
             job.message = "render failed"
             job.completed_at = utc_now()
@@ -384,6 +392,7 @@ class RenderManager:
             if not job or job.status not in {"queued", "running"}:
                 continue
             job.status = "failed"
+            job.current_service_id = None
             job.error = "Studio stopped before the render completed"
             job.message = "render interrupted"
             job.completed_at = utc_now()
@@ -487,6 +496,13 @@ class RenderManager:
                 return Path(asset.resolved_path)
         raise RuntimeError(f"shot {shot.id} has no start frame")
 
+    def _set_job_service(self, job: RenderJob | None, service_id: str | None) -> None:
+        if job is None or job.current_service_id == service_id:
+            return
+        job.current_service_id = service_id
+        job.updated_at = utc_now()
+        self.repository.save_job(job)
+
     async def _maybe_make_anchor(
         self,
         project,
@@ -494,6 +510,8 @@ class RenderManager:
         position: int,
         boundary_frames: dict[str, Path],
         output_dir: Path,
+        *,
+        job: RenderJob | None = None,
     ) -> Path | None:
         """Build an FL2VA anchor through Image Edit or zero-reference T2I."""
 
@@ -531,6 +549,7 @@ class RenderManager:
             provider = self.image_edit_provider
             if provider is None or not provider.configured:
                 raise RuntimeError("Image Edit anchor requested but provider is not configured")
+            self._set_job_service(job, "image_edit")
             await provider.edit(
                 ImageEditRequest(
                     # The planner owns the complete direct-to-Qwen prompt. Keep
@@ -555,6 +574,7 @@ class RenderManager:
             provider = self.text_to_image_provider
             if provider is None or not provider.configured:
                 raise RuntimeError("T2I anchor requested but provider is not configured; set STUDIO_T2I_BASE_URL")
+            self._set_job_service(job, "t2i")
             await provider.generate(
                 TextToImageRequest(
                     prompt=shot.anchor_prompt,

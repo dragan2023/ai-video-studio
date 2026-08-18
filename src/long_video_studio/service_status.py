@@ -196,11 +196,23 @@ class ServiceStatusCollector:
             probed = await asyncio.gather(*(self._probe(spec, client, checked_at) for spec in specs))
 
         gpu = self.gpu_snapshots.read(checked_at)
+        active_service_counts: dict[str, int] = {}
+        for job in active_jobs:
+            service_id = getattr(job, "current_service_id", None)
+            if job.status == "running" and service_id:
+                active_service_counts[service_id] = active_service_counts.get(service_id, 0) + 1
         devices_by_service: dict[str, list[dict[str, Any]]] = {}
         for device in gpu["devices"]:
             devices_by_service.setdefault(str(device["service_id"]), []).append(device)
         telemetry_fresh = gpu["state"] == "ready"
         for service in probed:
+            studio_active = active_service_counts.get(service["id"], 0)
+            service["studio_active_requests"] = studio_active
+            engine_running = service.get("requests_running")
+            engine_waiting = service.get("requests_waiting")
+            if engine_running is not None:
+                outer_waiting = max(0, studio_active - int(engine_running))
+                service["requests_waiting"] = max(int(engine_waiting or 0), outer_waiting)
             service_gpu = self._gpu_summary(devices_by_service.get(service["id"], []), gpu)
             service["gpu"] = service_gpu
             if (
@@ -209,6 +221,8 @@ class ServiceStatusCollector:
                 and (service_gpu.get("utilization_percent") or 0) >= 5
                 and service["state"] == "ready"
             ):
+                service["state"] = "busy"
+            if studio_active and service["state"] == "ready":
                 service["state"] = "busy"
 
         planner = self._planner_status(planning_project_ids, checked_at)
@@ -220,6 +234,7 @@ class ServiceStatusCollector:
                 "status": item.status,
                 "progress": item.progress,
                 "current_shot_id": item.current_shot_id,
+                "current_service_id": item.current_service_id,
                 "message": item.message,
             }
             for item in active_jobs

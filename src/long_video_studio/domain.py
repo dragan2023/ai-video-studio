@@ -506,6 +506,7 @@ class RenderJob(BaseModel):
     status: Literal["queued", "running", "complete", "failed"] = "queued"
     progress: float = Field(default=0, ge=0, le=1)
     current_shot_id: str | None = None
+    current_service_id: Literal["fl2va", "ref2va", "image_edit", "t2i"] | None = None
     message: str = "queued"
     output_path: str | None = None
     subtitle_path: str | None = None

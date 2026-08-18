@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from long_video_studio.domain import RenderJob
 from long_video_studio.service_status import (
     GpuSnapshotReader,
     ServiceStatusCollector,
@@ -224,3 +225,51 @@ def test_service_status_collector_reports_unreachable_without_exposing_endpoint(
     assert fl2va["state"] == "unreachable"
     assert "secret-host" not in json.dumps(result)
     assert "token=secret" not in json.dumps(result)
+
+
+def test_service_status_includes_studio_outer_queue_for_all_model_services(settings):
+    configured = replace(
+        settings,
+        h3_fl2va_url="http://provider.test/fl2va",
+        h3_ref2va_url="http://provider.test/ref2va",
+        image_edit_provider="vllm-omni",
+        image_edit_base_url="http://provider.test/edit/v1",
+        image_edit_model="Qwen/Image-Edit",
+        text_to_image_provider="vllm-omni",
+        text_to_image_base_url="http://provider.test/t2i/v1",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/health"):
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path.endswith("/metrics"):
+            return httpx.Response(
+                200,
+                text=(
+                    'vllm_omni:num_requests_running{model_name="demo"} 1\n'
+                    'vllm_omni:num_requests_waiting{model_name="demo"} 0\n'
+                ),
+            )
+        return httpx.Response(404)
+
+    service_ids = ("fl2va", "ref2va", "image_edit", "t2i")
+    jobs = [
+        RenderJob(project_id=f"{service_id}-{index}", status="running", current_service_id=service_id)
+        for service_id in service_ids
+        for index in range(2)
+    ]
+    result = asyncio.run(
+        ServiceStatusCollector(
+            configured,
+            transport=httpx.MockTransport(handler),
+        ).collect(planning_project_ids=[], active_jobs=jobs)
+    )
+
+    services = {item["id"]: item for item in result["services"]}
+    for service_id in service_ids:
+        service = services[service_id]
+        assert service["studio_active_requests"] == 2
+        assert service["requests_running"] == 1
+        assert service["requests_waiting"] == 1
+        assert service["state"] == "busy"
+    assert {item["current_service_id"] for item in result["activity"]["render"]["jobs"]} == set(service_ids)
