@@ -472,29 +472,36 @@ function RuntimeStatus({ status, job, open, onToggle, onClose }) {
     () =>
       services
         .map((service, index) => ({ service, index }))
-        .sort(({ service: left, index: leftIndex }, { service: right, index: rightIndex }) => {
-          const leftOnline = ["ready", "busy", "queued"].includes(left.state);
-          const rightOnline = ["ready", "busy", "queued"].includes(right.state);
-          if (leftOnline !== rightOnline) return leftOnline ? -1 : 1;
+        .sort(
+          (
+            { service: left, index: leftIndex },
+            { service: right, index: rightIndex },
+          ) => {
+            const leftOnline = ["ready", "busy", "queued"].includes(left.state);
+            const rightOnline = ["ready", "busy", "queued"].includes(
+              right.state,
+            );
+            if (leftOnline !== rightOnline) return leftOnline ? -1 : 1;
 
-          // The planner is useful context, but active model workers are more
-          // actionable while rendering, so keep planner last among online
-          // services. Offline services retain the backend's stable order.
-          if (leftOnline && rightOnline) {
-            const leftPlanner = left.id === "planner";
-            const rightPlanner = right.id === "planner";
-            if (leftPlanner !== rightPlanner) return leftPlanner ? 1 : -1;
-          }
+            // The planner is useful context, but active model workers are more
+            // actionable while rendering, so keep planner last among online
+            // services. Offline services retain the backend's stable order.
+            if (leftOnline && rightOnline) {
+              const leftPlanner = left.id === "planner";
+              const rightPlanner = right.id === "planner";
+              if (leftPlanner !== rightPlanner) return leftPlanner ? 1 : -1;
+            }
 
-          // Keep the two H3 workers together ahead of planner/image services
-          // whenever they are in the same online/offline group.
-          const h3Rank = (service) =>
-            service.id === "fl2va" || service.id === "ref2va" ? 0 : 1;
-          const leftH3 = h3Rank(left);
-          const rightH3 = h3Rank(right);
-          if (leftH3 !== rightH3) return leftH3 - rightH3;
-          return leftIndex - rightIndex;
-        })
+            // Keep the two H3 workers together ahead of planner/image services
+            // whenever they are in the same online/offline group.
+            const h3Rank = (service) =>
+              service.id === "fl2va" || service.id === "ref2va" ? 0 : 1;
+            const leftH3 = h3Rank(left);
+            const rightH3 = h3Rank(right);
+            if (leftH3 !== rightH3) return leftH3 - rightH3;
+            return leftIndex - rightIndex;
+          },
+        )
         .map(({ service }) => service),
     [services],
   );
