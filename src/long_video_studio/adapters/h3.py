@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from base64 import b64encode
@@ -266,7 +267,7 @@ class H3Client:
             # provider metadata and audio scheduling. Keep ``duration`` in
             # extra_params for the current H3 pipeline, but do not rely on the
             # implementation-specific field alone.
-            "seconds": str(shot.duration_seconds),
+            "seconds": self._seconds_form_value(shot.duration_seconds),
             "fps": str(shot.fps),
             "num_inference_steps": str(shot.inference_steps),
             "seed": str(shot.seed),
@@ -280,6 +281,34 @@ class H3Client:
         if width is not None and height is not None:
             data.update({"width": str(int(width)), "height": str(int(height))})
         return data
+
+    @staticmethod
+    def _seconds_form_value(duration_seconds: float) -> str:
+        """Encode the OpenAI-compatible integer ``seconds`` form field.
+
+        MiniMax-H3 keeps the exact request duration in ``extra_params``.  The
+        public vLLM-Omni ``seconds`` field is nevertheless schema-constrained
+        to an integer string, so ``10.0`` is invalid even though it is
+        numerically integral. For fractional requests use a conservative
+        ceiling in this metadata field; the exact float remains in the model
+        specific ``duration`` extra parameter.
+        """
+
+        value = float(duration_seconds)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"duration_seconds must be positive and finite, got {duration_seconds!r}")
+        if value.is_integer():
+            return str(int(value))
+        return str(math.ceil(value))
+
+    @staticmethod
+    def _raise_response_error(response: httpx.Response, task: str) -> None:
+        if not response.is_error:
+            return
+        detail = response.text.strip().replace("\n", " ")[:1000]
+        raise RuntimeError(
+            f"H3 {task} endpoint rejected the request with HTTP {response.status_code}: {detail or 'no response body'}"
+        )
 
     async def _post(
         self,
@@ -299,7 +328,8 @@ class H3Client:
             try:
                 async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
                     response = await client.post(self.endpoint, data=data, files=multipart)
-                response.raise_for_status()
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                self._raise_response_error(response, task)
             except httpx.RequestError as error:
                 task = json.loads(data.get("extra_params", "{}")).get("task", "video")
                 raise self.unavailable_error(task, error) from error
@@ -337,7 +367,8 @@ class H3Client:
             client = httpx.AsyncClient(timeout=self.timeout, transport=self.transport)
             try:
                 response = await client.post(base_url, data=data, files=multipart)
-                response.raise_for_status()
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                self._raise_response_error(response, task)
             except httpx.RequestError as error:
                 task = json.loads(data.get("extra_params", "{}")).get("task", "video")
                 raise self.unavailable_error(task, error) from error
