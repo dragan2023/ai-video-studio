@@ -129,6 +129,7 @@ settings, output dimensions, and output hash:
 ```bash
 python scripts/probe-image-edit.py \
   --base-url http://127.0.0.1:8093 \
+  --model Qwen/Qwen-Image-Edit-2511 \
   --reference location=/path/to/scene.png \
   --reference character=/path/to/hero.png \
   --reference character=/path/to/companion.png \
@@ -138,6 +139,10 @@ python scripts/probe-image-edit.py \
   --output /tmp/nautilus-image-edit/scene-two-characters-prop.png \
   --receipt /tmp/nautilus-image-edit/scene-two-characters-prop.json
 ```
+
+The `--model` value must match the server's `--served-model-name`. The included
+launcher defaults both to `Qwen/Qwen-Image-Edit-2511`; set both explicitly when
+serving a different checkpoint or alias.
 
 The receipt intentionally excludes the endpoint and API key. Visual identity
 and composition still require human review; hashes and dimensions are not a

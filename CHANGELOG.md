@@ -31,6 +31,9 @@ All notable changes to Nautilus Studio will be documented here.
   templates, and third-party license inventory.
 - A per-service runtime status panel with vLLM-Omni request activity and an
   optional provider-neutral GPU telemetry snapshot contract.
+- Lease-scoped, non-privileged MUSA container and Qwen Image launchers with
+  stable served model names, plus complete T2I environment forwarding in
+  Docker Compose.
 
 ### Changed
 
@@ -45,7 +48,8 @@ All notable changes to Nautilus Studio will be documented here.
 
 - The built-in server intentionally has no authentication, tenant isolation,
   rate limiting, or content moderation; deploy behind an authenticated proxy.
-- Real MUSA Qwen-Image-Edit-2511 multi-reference acceptance is pending complete
-  checkpoint download and an independent hardware run.
+- Multi-reference and human visual acceptance for Qwen-Image-Edit-2511 remains
+  pending on the current MUSA image digest; an older image passed the
+  single-image request smoke.
 - Hosted provider adapters share the OpenAI-compatible multimodal contract;
   vendor-specific request/response quirks may require a small adapter.

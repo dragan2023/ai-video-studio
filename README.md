@@ -227,8 +227,9 @@ timeout. The adapter still supports `/v1/videos/sync` for focused smoke tests.
 For vLLM-Omni servers, set `VLLM_OMNI_VIDEO_SYNC_TIMEOUT` high enough when using
 the synchronous endpoint.
 
-For the exact MUSA image, validated Ref2VA parameter matrix, failure modes, and
-three-service Docker commands, see [MiniMax-H3 on MUSA](docs/minimax-h3-musa-deployment.md).
+For current operator-supplied MUSA image provenance, the historical validated
+Ref2VA parameter matrix, failure modes, and model-service container commands,
+see [MiniMax-H3 on MUSA](docs/minimax-h3-musa-deployment.md).
 
 ### Image Edit
 
@@ -276,6 +277,20 @@ export STUDIO_T2I_TIMEOUT_SECONDS=7200
 
 Studio calls the OpenAI-compatible `/v1/images/generations` endpoint. The
 model field is optional for a single-model vLLM-Omni server.
+
+For a self-hosted Qwen Image checkpoint, make the server name explicit and use
+the same value for `STUDIO_T2I_MODEL`:
+
+```bash
+MODEL_PATH=/models/Qwen-Image-2512 \
+TP_SIZE=... \
+SERVED_MODEL_NAME=Qwen/Qwen-Image-2512 \
+scripts/serve-qwen-image.sh
+```
+
+Replace `TP_SIZE` with a topology validated for the target accelerator. When
+Studio itself runs through Compose, use `host.docker.internal` instead of
+`127.0.0.1` for model services running on the Docker host.
 
 ## Service and GPU status
 
@@ -420,6 +435,7 @@ parallel size that is known to fit the target accelerator:
 ```bash
 export TP_SIZE=... # replace with a size validated for this host
 export MAX_REFERENCE_IMAGES=4
+export SERVED_MODEL_NAME=Qwen/Qwen-Image-Edit-2511
 MODEL_PATH=/models/Qwen-Image-Edit-2511 scripts/serve-qwen-image-edit.sh
 ```
 
@@ -427,7 +443,8 @@ MODEL_PATH=/models/Qwen-Image-Edit-2511 scripts/serve-qwen-image-edit.sh
 `CFG_PARALLEL_SIZE`, `VAE_PATCH_PARALLEL_SIZE`, `VAE_USE_TILING`, and
 `VAE_USE_SLICING` expose vLLM-Omni's diffusion parallel layout;
 `EXPECTED_WORLD_SIZE` verifies their product. Nautilus does not assume that one
-GPU topology works across CUDA and MUSA.
+GPU topology works across CUDA and MUSA. `SERVED_MODEL_NAME` must equal the
+corresponding Studio model setting so vLLM-Omni does not reject the request.
 
 ## Project layout
 

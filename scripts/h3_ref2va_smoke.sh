@@ -9,8 +9,8 @@ FFPROBE_BIN="${FFPROBE_BIN:-ffprobe}"
 
 test -s "$REFERENCE_VIDEO"
 
-# 1344x768 supplies enough VAE tiles for vae-patch-parallel-size=8.  The
-# smaller 448x256 plumbing shape leaves some SP ranks empty on H3.
+# The 1344x768 default keeps every rank populated in the TP8/VAE-PP8 release
+# smoke. The smaller 448x256 plumbing shape leaves some H3 ranks empty.
 curl --fail-with-body --silent --show-error --request POST "$API_URL" \
   --dump-header "$HEADERS" \
   --write-out 'http_code=%{http_code} content_type=%{content_type} bytes=%{size_download} total_s=%{time_total}\n' \

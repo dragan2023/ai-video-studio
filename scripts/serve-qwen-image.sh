@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The checkpoint and tensor-parallel layout are intentionally explicit.
-# Different CUDA/MUSA generations may need different TP sizes.
-: "${MODEL_PATH:?set MODEL_PATH to a complete Qwen-Image-Edit-2509/2511 checkpoint}"
+: "${MODEL_PATH:?set MODEL_PATH to a complete Qwen-Image checkpoint}"
 : "${TP_SIZE:?set TP_SIZE to a tensor-parallel size validated for this host}"
+
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8093}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen/Qwen-Image-Edit-2511}"
+PORT="${PORT:-8094}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen/Qwen-Image-2512}"
 ULYSSES_DEGREE="${ULYSSES_DEGREE:-1}"
 RING_DEGREE="${RING_DEGREE:-1}"
 CFG_PARALLEL_SIZE="${CFG_PARALLEL_SIZE:-1}"
-MAX_REFERENCE_IMAGES="${MAX_REFERENCE_IMAGES:-4}"
 VAE_PATCH_PARALLEL_SIZE="${VAE_PATCH_PARALLEL_SIZE:-1}"
 VAE_USE_TILING="${VAE_USE_TILING:-0}"
 VAE_USE_SLICING="${VAE_USE_SLICING:-0}"
@@ -33,7 +31,6 @@ args=(
   --ulysses-degree "${ULYSSES_DEGREE}"
   --ring-degree "${RING_DEGREE}"
   --cfg-parallel-size "${CFG_PARALLEL_SIZE}"
-  --limit-mm-per-prompt "{\"image\":${MAX_REFERENCE_IMAGES}}"
   --vae-patch-parallel-size "${VAE_PATCH_PARALLEL_SIZE}"
 )
 if [[ "${VAE_USE_TILING}" == "1" ]]; then

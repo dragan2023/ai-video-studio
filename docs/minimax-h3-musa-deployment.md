@@ -1,12 +1,72 @@
 # MiniMax-H3 on MUSA
 
-This guide records the validated vLLM-Omni deployment used by Nautilus Studio.
-It is intentionally tied to an exact image and workload; do not copy CUDA/H100
+This guide records the vLLM-Omni deployment used by Nautilus Studio. Image
+provenance and performance evidence are listed separately: changing an image
+does not transfer timing claims from an older benchmark. Do not copy CUDA/H100
 parallelism flags into a MUSA deployment without re-running the matrix below.
 
-## Validated environment
+## Current Studio test image
 
-- image: private MiniMax-H3 MUSA validation image, supplied as `H3_MUSA_IMAGE`
+- image: operator-supplied `VLLM_OMNI_MUSA_IMAGE`, current internal tag suffix
+  `minimax-h3-20260819`
+- digest: `sha256:ccf07399174fceac3f0e1c56e26c42046a4244c4bae05f9f61875120d3e47a46`
+- vLLM-Omni revision: `6ae03f5253f74bfe1a040b9d8c35ecb78c32b2ea`
+- vLLM-Omni version: `0.1.dev28+g6ae03f525.musa`
+- PyTorch: `2.11.0.post1+musa5.2.0`
+- torchada: `0.1.82`
+
+The pushed digest passed compiled TP8 FL2VA and Ref2VA request-level smokes on
+MTT S5000. It is the preferred common runtime for subsequent MiniMax-H3, Qwen
+Image, and Qwen Image Edit Studio tests. Model-specific requests must still be
+smoked after deployment; the final-tag acceptance run did not re-run the Qwen
+Image or Qwen Image Edit matrices.
+
+The registry image may require Moore Threads network credentials. External
+deployments can substitute an equivalent image built from the recorded
+vLLM-Omni revision and dependency stack. Set the reference through the
+environment instead of committing private registry topology:
+
+```bash
+export VLLM_OMNI_MUSA_IMAGE='<registry>/<namespace>/vllm-omni:minimax-h3-20260819@sha256:ccf07399174fceac3f0e1c56e26c42046a4244c4bae05f9f61875120d3e47a46'
+```
+
+The included container wrapper fails closed unless the digest-qualified image,
+leased devices, owner, ticket, lease handle, and task-owned container name are
+explicit:
+
+```bash
+VLLM_OMNI_MUSA_IMAGE="$VLLM_OMNI_MUSA_IMAGE" \
+LEASED_GPU_IDS=0,1,2,3 \
+CONTAINER_NAME='hlease-<owner>-<task>-<node>-gpu0_1_2_3' \
+CONTAINER_OWNER='<lease-owner>' \
+CONTAINER_TICKET='<task-id>' \
+LEASE_HANDLE='<lease-handle>' \
+scripts/run-musa-vllm-omni-service.sh \
+  vllm serve /home/dist/models/MiniMax/MiniMax-H3/Ref2VA \
+    --omni --host 0.0.0.0 --port 8092 --trust-remote-code \
+    --num-gpus 4 --tensor-parallel-size 4 \
+    --text-encoder-tp-size 4 \
+    --vae-patch-parallel-size 4 --vae-parallel-mode tile \
+    --vae-use-tiling --diffusion-attention-backend FLASH_ATTN
+```
+
+The wrapper deliberately uses a non-privileged `mthreads` container and passes
+only `MTHREADS_VISIBLE_DEVICES=<physical leased ids>`. The runtime remaps those
+devices to `musa:0..N-1` inside the container. Do not add `--privileged`,
+`MUSA_VISIBLE_DEVICES`, or `CUDA_VISIBLE_DEVICES` to a shared-node functional
+run; privileged containers can see the whole host and are reserved for an
+isolated whole-node profiling lease.
+
+The wrapper also rejects mutable tag-only references. Keeping the tag next to
+`@sha256:<digest>` is useful for humans, while the digest prevents a local cache
+or later tag update from being mistaken for the image documented here.
+
+## Historical TP4 profile environment
+
+The TP4 parameter and performance matrix below was collected with the
+`minimax-h3-20260815` image. Preserve this provenance when comparing a newer
+image:
+
 - digest: `sha256:23ae27867cd19ce848a27688dba262d0569c67ff3c3b599cc2a429f8ab184a8b`
 - vLLM-Omni revision: `45c33a4a776450a7ba7875992d417757364fef47`
 - accelerator: 4 x MTT S5000, 80 GiB each
@@ -14,24 +74,12 @@ parallelism flags into a MUSA deployment without re-running the matrix below.
 - PyTorch: `2.11.0.post1+musa5.2.0`
 - torchada: `0.1.79`
 
-The registry image may require Moore Threads network credentials. External
-deployments can substitute an equivalent image built from the recorded
-vLLM-Omni revision and dependency stack; re-run the smoke and performance gates
-before reusing the timing claims.
-
-Set the image reference through the environment instead of recording private
-registry topology in deployment scripts:
-
-```bash
-export H3_MUSA_IMAGE='<registry>/<namespace>/vllm-omni:<tag>'
-```
-
 The primary Ref2VA benchmark uses the same first clip, prompt, references, and
 seed for every profile: `1280x704`, 10 seconds, 24 FPS, 50 inference steps, and
 the original BF16 checkpoint. It does not use quantization, Cache-DiT, fewer
 steps, or a lower resolution.
 
-## Recommended Ref2VA profile
+### 20260815 recommended Ref2VA profile
 
 For Nautilus Studio clips up to the H3 nominal 15-second output limit at `1280x704`, the best validated
 four-GPU profile is TP4/TE4/VAE-PP4 with MUSA FlashAttention and no CPU
@@ -54,9 +102,9 @@ vllm serve /home/dist/models/MiniMax/MiniMax-H3/Ref2VA \
 
 The full 10-second, 50-step request completed in `1709.6s` (about 28m30s).
 A 14-second, two-step memory gate also completed successfully in `131.8s`.
-The current serving-parameter space therefore does not remove the roughly
-30-minute DiT bottleneck, but this profile is the fastest stable four-GPU
-configuration found in the sweep.
+That 20260815 serving-parameter sweep did not remove the roughly 30-minute DiT
+bottleneck, but this profile was the fastest stable four-GPU configuration
+found in that sweep.
 
 ### Compilation and graph capture
 
@@ -108,32 +156,24 @@ The warmed two-step request then took `100.625s`, `20.42%` slower than the
 `83.564s` FlashAttention baseline. Treat this as a compatibility or diagnostic
 fallback, not the production profile.
 
-## Container example
+## Request validation and teardown
 
 The following example exposes the recommended Ref2VA service on port `8092`.
-Adjust the model mount and visible devices for the target host.
+Adjust the model mount and leased physical devices for the target host.
 
 ```bash
-docker run -d \
-  --name nautilus-h3-ref2va \
-  --runtime=mthreads \
-  --privileged \
-  --network host \
-  --ipc host \
-  --shm-size 1g \
-  -e MTHREADS_VISIBLE_DEVICES=0,1,2,3 \
-  -e MUSA_VISIBLE_DEVICES=0,1,2,3 \
-  -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  -e PYTHONUNBUFFERED=1 \
-  -v /mnt/nfs/models:/home/dist/models:ro \
-  "$H3_MUSA_IMAGE" \
-  bash -lc 'exec vllm serve \
-    /home/dist/models/MiniMax/MiniMax-H3/Ref2VA \
+LEASED_GPU_IDS=0,1,2,3 \
+CONTAINER_NAME='hlease-<owner>-<task>-<node>-gpu0_1_2_3' \
+CONTAINER_OWNER='<lease-owner>' \
+CONTAINER_TICKET='<task-id>' \
+LEASE_HANDLE='<lease-handle>' \
+scripts/run-musa-vllm-omni-service.sh \
+  vllm serve /home/dist/models/MiniMax/MiniMax-H3/Ref2VA \
     --omni --host 0.0.0.0 --port 8092 --trust-remote-code \
     --num-gpus 4 --tensor-parallel-size 4 \
     --text-encoder-tp-size 4 \
     --vae-patch-parallel-size 4 --vae-parallel-mode tile \
-    --vae-use-tiling --diffusion-attention-backend FLASH_ATTN'
+    --vae-use-tiling --diffusion-attention-backend FLASH_ATTN
 ```
 
 Verify both health and a real request. Server startup alone is not a pass:
@@ -145,6 +185,21 @@ curl --fail http://127.0.0.1:8092/health
 Use `/v1/videos` plus polling for 50-step requests. The synchronous endpoint
 has a server-side timeout and returned HTTP 504 for a request longer than ten
 minutes even though the diffusion worker was otherwise healthy.
+
+Before releasing the lease, stop the exact owner-labelled container. Because
+the launch wrapper uses `--rm`, a successful stop also removes the container:
+
+```bash
+CONTAINER_NAME='hlease-<owner>-<task>-<node>-gpu0_1_2_3' \
+CONTAINER_OWNER='<lease-owner>' \
+CONTAINER_TICKET='<task-id>' \
+LEASE_HANDLE='<lease-handle>' \
+scripts/stop-musa-vllm-omni-service.sh
+```
+
+The stop helper checks all three ownership labels and refuses to stop a
+different lease's container. Verify the task's containers are gone before
+releasing the lease through the operator's lease controller.
 
 ## Other model services
 
@@ -161,26 +216,56 @@ vllm serve /home/dist/models/MiniMax/MiniMax-H3/FL2VA \
   --diffusion-attention-backend FLASH_ATTN
 ```
 
-Qwen Image Edit runs independently on one GPU:
+Qwen Image Edit runs independently. This one-GPU command is the previously
+validated S5000 topology; re-run its request smoke on a new image digest. Keep
+the served name identical to Studio's configured model:
 
 ```bash
-vllm serve /home/dist/models/Qwen/Qwen-Image-Edit-2511 \
-  --omni --host 0.0.0.0 --port 8093 --trust-remote-code \
-  --num-gpus 1 --tensor-parallel-size 1 \
-  --vae-patch-parallel-size 1
+LEASED_GPU_IDS=4 \
+CONTAINER_NAME='hlease-<owner>-<task>-<node>-gpu4' \
+CONTAINER_OWNER='<lease-owner>' \
+CONTAINER_TICKET='<task-id>' \
+LEASE_HANDLE='<lease-handle>' \
+scripts/run-musa-vllm-omni-service.sh \
+  vllm serve /home/dist/models/Qwen/Qwen-Image-Edit-2511 \
+    --omni --host 0.0.0.0 --port 8093 --trust-remote-code \
+    --served-model-name Qwen/Qwen-Image-Edit-2511 \
+    --num-gpus 1 --tensor-parallel-size 1 \
+    --limit-mm-per-prompt '{"image":4}' \
+    --vae-patch-parallel-size 1
 ```
 
-Connect the three services to Studio with:
+Qwen Image provides the zero-material T2I route. Its served name must likewise
+match `STUDIO_T2I_MODEL` when that field is set:
+
+```bash
+LEASED_GPU_IDS=5 \
+CONTAINER_NAME='hlease-<owner>-<task>-<node>-gpu5' \
+CONTAINER_OWNER='<lease-owner>' \
+CONTAINER_TICKET='<task-id>' \
+LEASE_HANDLE='<lease-handle>' \
+scripts/run-musa-vllm-omni-service.sh \
+  vllm serve /home/dist/models/Qwen/Qwen-Image-2512 \
+    --omni --host 0.0.0.0 --port 8094 --trust-remote-code \
+    --served-model-name Qwen/Qwen-Image-2512 \
+    --num-gpus 1 --tensor-parallel-size 1 \
+    --vae-patch-parallel-size 1
+```
+
+Connect the four service types to Studio with:
 
 ```bash
 export STUDIO_H3_FL2VA_URL=http://127.0.0.1:8091
 export STUDIO_H3_REF2VA_URL=http://127.0.0.1:8092
 export STUDIO_IMAGE_EDIT_PROVIDER=vllm-omni
 export STUDIO_IMAGE_EDIT_BASE_URL=http://127.0.0.1:8093
-export STUDIO_IMAGE_EDIT_MODEL=/home/dist/models/Qwen/Qwen-Image-Edit-2511
+export STUDIO_IMAGE_EDIT_MODEL=Qwen/Qwen-Image-Edit-2511
+export STUDIO_T2I_PROVIDER=vllm-omni
+export STUDIO_T2I_BASE_URL=http://127.0.0.1:8094
+export STUDIO_T2I_MODEL=Qwen/Qwen-Image-2512
 ```
 
-## Parameter matrix
+## Historical 20260815 parameter matrix
 
 | Candidate | Result | Decision |
 | --- | --- | --- |
@@ -197,7 +282,7 @@ export STUDIO_IMAGE_EDIT_MODEL=/home/dist/models/Qwen/Qwen-Image-Edit-2511
 | USP4 / HSDP4 / CPU offload | first forward fails on cross-device parameter storage | Unsupported combination |
 | TP8 / TE8 | no eligible contiguous eight-GPU development host | Not run |
 
-## NVIDIA CI cross-hardware reference
+## Historical NVIDIA CI cross-hardware reference
 
 The Ref2VA V2V job in
 [vLLM-Omni Buildkite build 13601](https://buildkite.com/vllm/vllm-omni/builds/13601/canvas?sid=019fff05-1b91-4a96-a5c4-25a96536c9ea&tab=output)
