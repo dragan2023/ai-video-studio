@@ -5,6 +5,7 @@ import random
 import time
 from pathlib import Path
 
+from long_video_studio.adapters.black_frame import BLACK_FRAME_MARKER, write_black_png
 from long_video_studio.adapters.comfyui_h3 import ComfyUIH3Client
 from long_video_studio.adapters.h3 import H3Client
 from long_video_studio.adapters.image_edit import (
@@ -223,7 +224,19 @@ class RenderManager:
                         output_dir,
                         job=job,
                     )
-                    start_frame = anchor or self._start_frame(shot, boundary_frames)
+                    if anchor is not None:
+                        start_frame = anchor
+                    else:
+                        try:
+                            start_frame = self._start_frame(shot, boundary_frames)
+                        except RuntimeError:
+                            if shot.reference_asset_ids or shot.start_frame_asset_id:
+                                raise
+                            start_frame = write_black_png(
+                                output_dir / f"shot-{position + 1:03d}-black-anchor.png",
+                                width,
+                                height,
+                            )
                     prepared_start = output_dir / f"shot-{position + 1:03d}-start-{width}x{height}.png"
                     await asyncio.to_thread(
                         self.media.fit_image_to_canvas,
@@ -543,6 +556,10 @@ class RenderManager:
         if not is_ultra_independent and not anchor_selected(shot, position, mode):
             return None
         if not shot.anchor_prompt:
+            # Black/silent title cards are valid no-reference shots; they do not
+            # need an image-model anchor and are handled by _start_frame fallback.
+            if shot.subtitle_text == BLACK_FRAME_MARKER:
+                return None
             raise RuntimeError(f"shot {shot.index + 1} requires a planner-authored anchor_prompt")
 
         references = self._anchor_references(

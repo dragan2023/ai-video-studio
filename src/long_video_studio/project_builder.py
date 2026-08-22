@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from long_video_studio.adapters.black_frame import BLACK_FRAME_MARKER
 from long_video_studio.domain import (
     ContinuationMode,
     DialogueLine,
@@ -59,6 +60,7 @@ def build_film_project(
             )
             for item in raw.beats
         ]
+        is_black_card = not asset_ids and any(marker in raw.title for marker in ("黑屏", "字幕"))
         shot = ShotSpec(
             index=raw.index,
             title=raw.title,
@@ -73,11 +75,21 @@ def build_film_project(
             camera=raw.camera or DEFAULT_CAMERA,
             reference_asset_ids=asset_ids,
             start_frame_asset_id=start_frame_asset_id,
+            subtitle_text=BLACK_FRAME_MARKER if is_black_card else None,
             seed=42 + raw.index,
             inference_steps=10,
             status=ShotStatus.PLANNED,
         )
         shots.append(shot)
+
+    # 无独立参考图的镜头默认接上前一镜；有明确首帧的镜头保留独立锚点。
+    # 这样黑场字幕/缺图镜不会阻塞通用流程，也不会意外重置连续动作。
+    previous: ShotSpec | None = None
+    for shot in shots:
+        if previous is not None and not shot.start_frame_asset_id:
+            shot.continuity_from_shot_id = previous.id
+            shot.continuation_mode = ContinuationMode.QUALITY
+        previous = shot
 
     total_seconds = int(sum(shot.duration_seconds for shot in shots))
     brief = ProjectBrief(

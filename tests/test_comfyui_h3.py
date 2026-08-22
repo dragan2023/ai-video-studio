@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from long_video_studio.adapters.black_frame import write_black_png
 from long_video_studio.adapters.comfyui_h3 import ComfyUIH3Client
 from long_video_studio.config import Settings
 from long_video_studio.domain import ShotSpec
@@ -33,6 +34,12 @@ def shot(duration: float = 5.0) -> ShotSpec:
         seed=123,
         inference_steps=10,
     )
+
+
+def test_black_anchor_png(tmp_path: Path):
+    path = write_black_png(tmp_path / "black.png", 864, 480)
+    assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert path.stat().st_size > 100
 
 
 def test_frame_alignment():

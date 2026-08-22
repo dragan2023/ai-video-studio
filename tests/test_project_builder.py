@@ -34,6 +34,8 @@ def test_first_five_shot_mapping(project):
     shots = {s.title: s for s in project.shots[:5]}
     assert project.shots[0].start_frame_asset_id is None  # 1-01 黑屏
     assert project.shots[1].start_frame_asset_id is None  # 1-02 字幕
+    assert project.shots[1].continuity_from_shot_id == project.shots[0].id
+    assert project.shots[1].continuation_mode.value == "quality"
     assert project.shots[2].reference_asset_ids == ["asset:S-01"]  # 1-03
     assert project.shots[3].reference_asset_ids == ["asset:S-01"]  # 1-04
     assert project.shots[4].reference_asset_ids == ["asset:S-03"]  # 1-05
