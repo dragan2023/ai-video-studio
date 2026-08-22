@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from long_video_studio.adapters.h3 import H3Client
+from long_video_studio.asset_importer import detect_missing_codes, import_code_assets, scan_asset_codes
 from long_video_studio.anchor_policy import anchor_selected
 from long_video_studio.domain import (
     AssetKind,
@@ -42,8 +43,11 @@ from long_video_studio.domain import (
     utc_now,
 )
 from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS, H3_MIN_SHOT_SECONDS
+from long_video_studio.plan_exporter import write_plan
 from long_video_studio.planner import PlannerError
 from long_video_studio.planning import PlanningManager
+from long_video_studio.project_builder import build_film_project
+from long_video_studio.script_importer import parse_shot_script
 from long_video_studio.runner import RenderManager
 from long_video_studio.services import StudioServices
 from long_video_studio.style_registry import public_style_contracts
@@ -55,6 +59,13 @@ class ImportPathRequest(BaseModel):
     copy_into_library: bool | None = None
     tags: list[str] = Field(default_factory=list)
     roles: list[AssetRole] = Field(default_factory=lambda: [AssetRole.REFERENCE])
+
+
+class ThickScriptImportView(BaseModel):
+    project: FilmProject
+    missing_codes: list[str] = Field(default_factory=list)
+    imported_codes: list[str] = Field(default_factory=list)
+    plan_path: str
 
 
 class ShotUpdate(BaseModel):
@@ -328,6 +339,55 @@ def create_api_router() -> APIRouter:
         except (FileNotFoundError, ValueError):
             raise HTTPException(status_code=404, detail="asset content is missing") from None
         return FileResponse(path, media_type=asset.media_type, filename=asset.original_name)
+
+    @router.post("/projects/import-thick-script", response_model=ThickScriptImportView)
+    def import_thick_script(
+        request: Request,
+        script: UploadFile = File(...),
+        asset_root: str = Form(""),
+        title: str = Form(""),
+    ) -> ThickScriptImportView:
+        services = _services(request)
+        try:
+            raw_text = script.file.read().decode("utf-8-sig")
+            parsed = parse_shot_script(raw_text)
+            entries = scan_asset_codes(Path(asset_root)) if asset_root.strip() else {}
+            imported = import_code_assets(services.assets, entries) if entries else {}
+            project_title = title.strip() or Path(script.filename or "厚版脚本").stem
+            project = build_film_project(
+                parsed.shots,
+                imported,
+                title=project_title,
+            )
+            referenced = {code for shot in parsed.shots for code in shot.ordered_ref_codes}
+            missing = detect_missing_codes(referenced, entries)
+            project_path = services.settings.output_dir / f"{project.id}-plan.md"
+            code_hints = {asset_id: code for code, asset_id in imported.items()}
+            write_plan(
+                project,
+                project_path,
+                code_hints=code_hints,
+                missing_codes=missing,
+                max_shots=5,
+            )
+            project.planner_trace.append(
+                PlannerTraceEvent(
+                    stage="thick-script-import",
+                    status="completed",
+                    message=f"parsed {len(project.shots)} shots; missing assets: {len(missing)}",
+                )
+            )
+            services.repository.save_project(project)
+            return ThickScriptImportView(
+                project=_project_view(project),
+                missing_codes=missing,
+                imported_codes=sorted(imported),
+                plan_path=str(project_path),
+            )
+        except UnicodeDecodeError as error:
+            raise HTTPException(status_code=422, detail="script must be UTF-8 Markdown") from error
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @router.post("/projects/plan", response_model=FilmProject)
     async def plan_project(request: Request, brief: ProjectBrief) -> FilmProject:
