@@ -5,6 +5,7 @@ import random
 import time
 from pathlib import Path
 
+from long_video_studio.adapters.comfyui_h3 import ComfyUIH3Client
 from long_video_studio.adapters.h3 import H3Client
 from long_video_studio.adapters.image_edit import (
     ImageEditProvider,
@@ -74,6 +75,32 @@ class RenderManager:
             self.text_to_image_provider_error = str(error)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._semaphore = asyncio.Semaphore(settings.render_max_concurrency)
+
+    def _h3_configured(self, task: str) -> bool:
+        if self.settings.h3_backend == "comfyui":
+            return bool(self.settings.comfyui_url and self.settings.comfyui_workflow)
+        return bool(self.settings.h3_fl2va_url if task == "fl2va" else self.settings.h3_ref2va_url)
+
+    def _h3_client(self, endpoint: str | None):
+        if self.settings.h3_backend == "comfyui":
+            if not self.settings.comfyui_url or not self.settings.comfyui_workflow:
+                raise RuntimeError("STUDIO_COMFYUI_URL and STUDIO_COMFYUI_WORKFLOW are required")
+            return ComfyUIH3Client(
+                self.settings.comfyui_url,
+                self.settings.comfyui_workflow,
+                timeout_seconds=self.settings.h3_timeout_seconds,
+                width=self.settings.comfyui_width,
+                height=self.settings.comfyui_height,
+                steps=self.settings.comfyui_steps,
+            )
+        if not endpoint:
+            raise RuntimeError("H3 endpoint is not configured")
+        return H3Client(
+            endpoint,
+            self.settings.h3_timeout_seconds,
+            self.settings.h3_flow_shift,
+            self.settings.h3_quality,
+        )
 
     def submit(self, project_id: str, *, force: bool = False) -> RenderJob:
         project = self.repository.get_project(project_id)
@@ -180,8 +207,8 @@ class RenderManager:
                 )
                 runtime_task = effective_video_task(
                     shot,
-                    ref2va_configured=bool(self.settings.h3_ref2va_url),
-                    fl2va_configured=bool(self.settings.h3_fl2va_url),
+                    ref2va_configured=self._h3_configured("ref2va"),
+                    fl2va_configured=self._h3_configured("fl2va"),
                     continuation_mode=continuation_mode,
                 )
                 is_ref2va_continuation = bool(
@@ -205,15 +232,10 @@ class RenderManager:
                         width,
                         height,
                     )
-                    if not self.settings.h3_fl2va_url:
-                        raise RuntimeError("STUDIO_H3_FL2VA_URL is not configured")
+                    if not self._h3_configured("fl2va"):
+                        raise RuntimeError("H3 FL2VA backend is not configured")
                     self._set_job_service(job, "fl2va")
-                    await H3Client(
-                        self.settings.h3_fl2va_url,
-                        self.settings.h3_timeout_seconds,
-                        self.settings.h3_flow_shift,
-                        self.settings.h3_quality,
-                    ).generate_fl2va(
+                    await self._h3_client(self.settings.h3_fl2va_url).generate_fl2va(
                         shot,
                         prepared_start,
                         output_path,
@@ -225,8 +247,8 @@ class RenderManager:
                         speaker_ids=project_speaker_ids,
                     )
                 elif is_ref2va_continuation:
-                    if not self.settings.h3_ref2va_url:
-                        raise RuntimeError("STUDIO_H3_REF2VA_URL is not configured")
+                    if not self._h3_configured("ref2va"):
+                        raise RuntimeError("H3 Ref2VA backend is not configured")
                     self._set_job_service(job, "ref2va")
                     image, media = await self._continuation_ref2va_inputs(
                         project,
@@ -237,12 +259,7 @@ class RenderManager:
                         output_dir,
                     )
                     request_shot = self._with_continuation_rule(shot)
-                    await H3Client(
-                        self.settings.h3_ref2va_url,
-                        self.settings.h3_timeout_seconds,
-                        self.settings.h3_flow_shift,
-                        self.settings.h3_quality,
-                    ).generate_ref2va(
+                    await self._h3_client(self.settings.h3_ref2va_url).generate_ref2va(
                         request_shot,
                         image,
                         media,
@@ -259,16 +276,11 @@ class RenderManager:
                         speaker_ids=project_speaker_ids,
                     )
                 else:
-                    if not self.settings.h3_ref2va_url:
-                        raise RuntimeError("STUDIO_H3_REF2VA_URL is not configured")
+                    if not self._h3_configured("ref2va"):
+                        raise RuntimeError("H3 Ref2VA backend is not configured")
                     self._set_job_service(job, "ref2va")
                     image, media = self._ref2va_inputs(shot)
-                    await H3Client(
-                        self.settings.h3_ref2va_url,
-                        self.settings.h3_timeout_seconds,
-                        self.settings.h3_flow_shift,
-                        self.settings.h3_quality,
-                    ).generate_ref2va(
+                    await self._h3_client(self.settings.h3_ref2va_url).generate_ref2va(
                         shot,
                         image,
                         media,

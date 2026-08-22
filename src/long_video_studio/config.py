@@ -148,6 +148,12 @@ class Settings:
     gpu_snapshot_max_age_seconds: float = 20.0
     gpu_snapshot_max_bytes: int = 1_048_576
     h3_quality: str = "lossless"
+    h3_backend: str = "http"
+    comfyui_url: str | None = None
+    comfyui_workflow: Path | None = None
+    comfyui_width: int = 864
+    comfyui_height: int = 480
+    comfyui_steps: int = 10
     mcp_enabled: bool = True
     mcp_token: str | None = None
     mcp_path: str = "/mcp"
@@ -197,6 +203,16 @@ class Settings:
             # Keep this configurable; deployments that need a tighter guard
             # can still set STUDIO_H3_TIMEOUT_SECONDS explicitly.
             h3_timeout_seconds=float(os.getenv("STUDIO_H3_TIMEOUT_SECONDS", "7200")),
+            h3_backend=os.getenv("STUDIO_H3_BACKEND", "http").strip().lower(),
+            comfyui_url=os.getenv("STUDIO_COMFYUI_URL") or None,
+            comfyui_workflow=(
+                Path(os.environ["STUDIO_COMFYUI_WORKFLOW"]).expanduser().resolve()
+                if os.getenv("STUDIO_COMFYUI_WORKFLOW")
+                else None
+            ),
+            comfyui_width=max(1, int(os.getenv("STUDIO_COMFYUI_WIDTH", "864"))),
+            comfyui_height=max(1, int(os.getenv("STUDIO_COMFYUI_HEIGHT", "480"))),
+            comfyui_steps=max(1, int(os.getenv("STUDIO_COMFYUI_STEPS", "10"))),
             transition_seconds=float(os.getenv("STUDIO_TRANSITION_SECONDS", "0.12")),
             ffmpeg_binary=os.getenv("STUDIO_FFMPEG", "ffmpeg"),
             ffprobe_binary=os.getenv("STUDIO_FFPROBE", "ffprobe"),
