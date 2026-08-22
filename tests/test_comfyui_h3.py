@@ -143,6 +143,14 @@ def test_ref2va_template_submission(tmp_path: Path, media_files: Path):
     assert graph["141"]["inputs"]["steps"] == 10
     assert graph["154"]["inputs"]["image"] == "ref.png"
     assert graph["155"]["inputs"]["image"] == "ref.png"
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake-video")
+    video_output = tmp_path / "ref-video-shot.mp4"
+    asyncio.run(client.generate_ref2va(shot(15), media_files, video, video_output, width=864, height=480))
+    video_graph = state["payload"]["prompt"]
+    assert video_graph["9002"]["class_type"] == "VHS_LoadVideo"
+    assert video_graph["9002"]["inputs"]["format"] == "AnimateDiff"
+    assert video_graph["153"]["inputs"]["ref_videos.ref_video_0"] == ["9002", 0]
     assert "96" not in graph
     assert "122" not in graph
     assert output.read_bytes() == b"ref-mp4"

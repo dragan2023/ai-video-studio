@@ -129,7 +129,21 @@ class ComfyUIH3Client:
         media_name = _uploaded_name(media_payload)
         suffix = reference_media.suffix.lower()
         if suffix in {".mp4", ".mov", ".webm", ".avi"}:
-            video_node = self._add_node(prompt, "VHS_LoadVideo", {"video": media_name}, "9002")
+            video_node = self._add_node(
+                prompt,
+                "VHS_LoadVideo",
+                {
+                    "video": media_name,
+                    "force_rate": 0,
+                    "custom_width": 0,
+                    "custom_height": 0,
+                    "frame_load_cap": 0,
+                    "skip_first_frames": 0,
+                    "select_every_nth": 1,
+                    "format": "AnimateDiff",
+                },
+                "9002",
+            )
             patch_inputs(prompt, branch.h3, **{"ref_videos.ref_video_0": [video_node, 0]})
         elif suffix in {".wav", ".mp3", ".m4a", ".flac", ".aac"}:
             audio_node = self._add_node(prompt, "LoadAudio", {"audio": media_name}, "9003")
