@@ -12,7 +12,13 @@ except ModuleNotFoundError:  # Python 3.10
 
 
 def _split_paths(value: str) -> tuple[Path, ...]:
-    return tuple(Path(item.strip()).expanduser().resolve() for item in value.split(":") if item.strip())
+    # Windows drive letters contain a colon, so ":" cannot be the separator on
+    # nt. Prefer ";" when present and fall back to os.pathsep (also ";" on nt).
+    if os.name == "nt":
+        separator = ";" if ";" in value else os.pathsep
+    else:
+        separator = ":"
+    return tuple(Path(item.strip()).expanduser().resolve() for item in value.split(separator) if item.strip())
 
 
 def _discover_h3_skills_dir() -> Path | None:
