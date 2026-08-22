@@ -519,6 +519,8 @@ class RenderJob(BaseModel):
     subtitle_path: str | None = None
     error: str | None = None
     force_rerender: bool = False
+    retry_count: int = Field(default=0, ge=0)
+    max_retries: int = Field(default=0, ge=0)
     estimated_seconds: float | None = Field(default=None, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None

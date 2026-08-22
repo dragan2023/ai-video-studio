@@ -131,6 +131,8 @@ class Settings:
     render_fl2va_baseline_seconds: float = 396.2
     render_ref2va_baseline_seconds: float = 1713.8
     render_max_concurrency: int = 2
+    render_retry_attempts: int = 2
+    render_retry_backoff_seconds: float = 3.0
     web_root: str | None = None
     # The hierarchical planner is the default. ``single_pass`` remains an
     # explicit compatibility mode for offline providers and deterministic
@@ -264,6 +266,11 @@ class Settings:
             render_max_concurrency=max(
                 1,
                 int(os.getenv("STUDIO_RENDER_MAX_CONCURRENCY", "2")),
+            ),
+            render_retry_attempts=max(1, int(os.getenv("STUDIO_RENDER_RETRY_ATTEMPTS", "2"))),
+            render_retry_backoff_seconds=max(
+                0.0,
+                float(os.getenv("STUDIO_RENDER_RETRY_BACKOFF_SECONDS", "3")),
             ),
             web_root=os.getenv("STUDIO_WEB_ROOT") or None,
             planner_pipeline_mode=os.getenv("STUDIO_PLANNER_PIPELINE", "hierarchical").strip().lower(),

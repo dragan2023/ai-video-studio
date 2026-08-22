@@ -119,6 +119,7 @@ class RenderManager:
             RenderJob(
                 project_id=project_id,
                 force_rerender=force,
+                max_retries=max(0, self.settings.render_retry_attempts - 1),
                 estimated_seconds=estimate.total_seconds,
             )
         )
@@ -129,6 +130,22 @@ class RenderManager:
         self._tasks[job.id] = task
         task.add_done_callback(lambda _task: self._tasks.pop(job.id, None))
         return job
+
+    async def _with_retries(self, operation, job: RenderJob, shot: ShotSpec):
+        attempts = max(1, self.settings.render_retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await operation()
+            except Exception:
+                if attempt >= attempts:
+                    raise
+                job.retry_count += 1
+                job.message = f"retrying shot {shot.index + 1} ({attempt}/{attempts - 1})"
+                job.updated_at = utc_now()
+                self.repository.save_job(job)
+                delay = self.settings.render_retry_backoff_seconds * attempt
+                if delay > 0:
+                    await asyncio.sleep(delay)
 
     async def _run(self, job_id: str) -> None:
         async with self._semaphore:
@@ -248,16 +265,21 @@ class RenderManager:
                     if not self._h3_configured("fl2va"):
                         raise RuntimeError("H3 FL2VA backend is not configured")
                     self._set_job_service(job, "fl2va")
-                    await self._h3_client(self.settings.h3_fl2va_url).generate_fl2va(
+                    h3_client = self._h3_client(self.settings.h3_fl2va_url)
+                    await self._with_retries(
+                        lambda: h3_client.generate_fl2va(
+                            shot,
+                            prepared_start,
+                            output_path,
+                            width=width,
+                            height=height,
+                            async_job=True,
+                            brief=project.brief,
+                            world_bible=project.world_bible,
+                            speaker_ids=project_speaker_ids,
+                        ),
+                        job,
                         shot,
-                        prepared_start,
-                        output_path,
-                        width=width,
-                        height=height,
-                        async_job=True,
-                        brief=project.brief,
-                        world_bible=project.world_bible,
-                        speaker_ids=project_speaker_ids,
                     )
                 elif is_ref2va_continuation:
                     if not self._h3_configured("ref2va"):
@@ -272,38 +294,48 @@ class RenderManager:
                         output_dir,
                     )
                     request_shot = self._with_continuation_rule(shot)
-                    await self._h3_client(self.settings.h3_ref2va_url).generate_ref2va(
-                        request_shot,
-                        image,
-                        media,
-                        output_path,
-                        width=width,
-                        height=height,
-                        async_job=True,
-                        brief=project.brief,
-                        world_bible=project.world_bible,
-                        previous_shot=next(
-                            (candidate for candidate in ordered_shots if candidate.id == shot.continuity_from_shot_id),
-                            None,
+                    h3_client = self._h3_client(self.settings.h3_ref2va_url)
+                    await self._with_retries(
+                        lambda: h3_client.generate_ref2va(
+                            request_shot,
+                            image,
+                            media,
+                            output_path,
+                            width=width,
+                            height=height,
+                            async_job=True,
+                            brief=project.brief,
+                            world_bible=project.world_bible,
+                            previous_shot=next(
+                                (candidate for candidate in ordered_shots if candidate.id == shot.continuity_from_shot_id),
+                                None,
+                            ),
+                            speaker_ids=project_speaker_ids,
                         ),
-                        speaker_ids=project_speaker_ids,
+                        job,
+                        shot,
                     )
                 else:
                     if not self._h3_configured("ref2va"):
                         raise RuntimeError("H3 Ref2VA backend is not configured")
                     self._set_job_service(job, "ref2va")
                     image, media = self._ref2va_inputs(shot)
-                    await self._h3_client(self.settings.h3_ref2va_url).generate_ref2va(
+                    h3_client = self._h3_client(self.settings.h3_ref2va_url)
+                    await self._with_retries(
+                        lambda: h3_client.generate_ref2va(
+                            shot,
+                            image,
+                            media,
+                            output_path,
+                            width=width,
+                            height=height,
+                            async_job=True,
+                            brief=project.brief,
+                            world_bible=project.world_bible,
+                            speaker_ids=project_speaker_ids,
+                        ),
+                        job,
                         shot,
-                        image,
-                        media,
-                        output_path,
-                        width=width,
-                        height=height,
-                        async_job=True,
-                        brief=project.brief,
-                        world_bible=project.world_bible,
-                        speaker_ids=project_speaker_ids,
                     )
                 shot.selected_take_path = str(output_path)
                 shot.status = ShotStatus.COMPLETE
