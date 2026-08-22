@@ -36,6 +36,17 @@ def shot(duration: float = 5.0) -> ShotSpec:
     )
 
 
+def test_non_executable_workflow_nodes_are_filtered():
+    from long_video_studio.adapters.comfyui_api import load_ui_workflow, ui_workflow_to_api
+    if not WORKFLOW.is_file():
+        pytest.skip(f"workflow not found: {WORKFLOW}")
+    graph = ui_workflow_to_api(load_ui_workflow(WORKFLOW))
+    assert all(node["class_type"] not in {"MarkdownNote", "Fast Groups Bypasser (rgthree)"} for node in graph.values())
+    assert graph["15"]["inputs"]["auto_max_reserved"] == 0
+    assert graph["15"]["inputs"]["clean_gpu_before"] is True
+    assert graph["153"]["inputs"]["ref_image_size"] == "match"
+
+
 def test_black_anchor_png(tmp_path: Path):
     path = write_black_png(tmp_path / "black.png", 864, 480)
     assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -97,6 +108,8 @@ def test_workflow_template_submission(tmp_path: Path, media_files: Path):
     assert graph["87"]["inputs"]["first_frame"] == ["9001", 0]
     assert graph["9001"]["class_type"] == "LoadImage"
     assert graph["9001"]["inputs"]["image"] == "start.png"
+    assert "122" not in graph
+    assert "149" not in graph
     assert output.read_bytes() == b"fake-mp4"
 
 
@@ -130,4 +143,6 @@ def test_ref2va_template_submission(tmp_path: Path, media_files: Path):
     assert graph["141"]["inputs"]["steps"] == 10
     assert graph["154"]["inputs"]["image"] == "ref.png"
     assert graph["155"]["inputs"]["image"] == "ref.png"
+    assert "96" not in graph
+    assert "122" not in graph
     assert output.read_bytes() == b"ref-mp4"

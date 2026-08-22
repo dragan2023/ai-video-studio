@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from long_video_studio.adapters.comfyui_api import load_ui_workflow, patch_inputs, ui_workflow_to_api
+from long_video_studio.adapters.comfyui_api import load_ui_workflow, patch_inputs, prune_to_output, ui_workflow_to_api
 from long_video_studio.domain import ProjectBrief, ShotSpec, WorldBible
 
 
@@ -187,10 +187,11 @@ class ComfyUIH3Client:
     ) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            selected_graph = prune_to_output(prompt, output_node)
             async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=30), transport=self.transport) as client:
                 response = await client.post(
                     f"{self.endpoint}/prompt",
-                    json={"prompt": prompt, "client_id": self.client_id},
+                    json={"prompt": selected_graph, "client_id": self.client_id},
                 )
                 response.raise_for_status()
                 prompt_id = response.json().get("prompt_id")
@@ -223,6 +224,11 @@ class ComfyUIH3Client:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"ComfyUI prompt {prompt_id} exceeded {self.timeout_seconds:g}s")
                     await asyncio.sleep(self.poll_seconds)
+        except httpx.HTTPStatusError as error:
+            detail = error.response.text.strip().replace("\n", " ")[:2000]
+            raise RuntimeError(
+                f"ComfyUI request failed at {self.endpoint}: {error}; detail={detail}"
+            ) from error
         except httpx.HTTPError as error:
             raise RuntimeError(f"ComfyUI request failed at {self.endpoint}: {error}") from error
 
