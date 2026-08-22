@@ -1964,6 +1964,30 @@ select {
   font-size: 11px;
   line-height: 1.6;
 }
+.dialog-file-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 18px;
+  padding: 11px 13px;
+  border: 1px solid rgba(255, 153, 15, 0.2);
+  border-radius: 10px;
+  color: var(--amber-light);
+  background: rgba(255, 153, 15, 0.07);
+}
+.dialog-file-summary strong {
+  overflow: hidden;
+  color: #f1eadf;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dialog-file-summary small {
+  margin-left: auto;
+  color: var(--muted);
+  font-family: "DM Mono", monospace;
+  font-size: 9px;
+}
 .dialog-head > button {
   display: grid;
   width: 30px;

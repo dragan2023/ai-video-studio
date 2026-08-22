@@ -732,7 +732,13 @@ function App() {
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectDraft, setProjectDraft] = useState(null);
   const [dialogSaving, setDialogSaving] = useState(false);
+  const [thickScriptDialog, setThickScriptDialog] = useState(false);
+  const [thickScriptFile, setThickScriptFile] = useState(null);
+  const [thickScriptAssetRoot, setThickScriptAssetRoot] = useState("");
+  const [thickScriptTitle, setThickScriptTitle] = useState("");
+  const [thickScriptSubmitting, setThickScriptSubmitting] = useState(false);
   const fileInput = useRef(null);
+  const thickScriptInput = useRef(null);
   const projectRequest = useRef(0);
   const traceEpoch = useRef(0);
   const traceHiddenBefore = useRef(0);
@@ -1665,6 +1671,48 @@ function App() {
     }
   };
 
+  const openThickScriptDialog = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setThickScriptFile(file);
+    setThickScriptTitle(file.name.replace(/\.(md|markdown|txt)$/i, ""));
+    setThickScriptDialog(true);
+  };
+
+  const submitThickScript = async (event) => {
+    event.preventDefault();
+    if (!thickScriptFile || thickScriptSubmitting) return;
+    setThickScriptSubmitting(true);
+    try {
+      const form = new FormData();
+      form.append("script", thickScriptFile);
+      form.append("asset_root", thickScriptAssetRoot.trim());
+      form.append("title", thickScriptTitle.trim());
+      const result = await api("/api/projects/import-thick-script", {
+        method: "POST",
+        body: form,
+      });
+      await loadProjects();
+      await loadAssets();
+      await loadProject(result.project.id);
+      setThickScriptDialog(false);
+      setNotice(
+        "厚版脚本已导入：" +
+          (result.project.shots?.length || 0) +
+          " 镜；" +
+          (result.missing_codes?.length
+            ? "缺少资产 " + result.missing_codes.join(", ")
+            : "资产映射完整"),
+      );
+      setActiveTab("storyboard");
+    } catch (error) {
+      setNotice("厚版脚本导入失败：" + error.message);
+    } finally {
+      setThickScriptSubmitting(false);
+    }
+  };
+
   const upload = async (event) => {
     const files = [...event.target.files];
     if (!files.length) return;
@@ -2126,6 +2174,19 @@ function App() {
                 onChange={upload}
                 hidden
               />
+              <input
+                ref={thickScriptInput}
+                type="file"
+                accept=".md,.markdown,.txt,text/markdown,text/plain"
+                onChange={openThickScriptDialog}
+                hidden
+              />
+              <button
+                className="outline-button"
+                onClick={() => thickScriptInput.current?.click()}
+              >
+                <Clapperboard size={15} /> 导入厚版
+              </button>
               <button
                 className="outline-button"
                 onClick={() => fileInput.current?.click()}
@@ -2426,6 +2487,87 @@ function App() {
           </span>
         </footer>
       </main>
+      <AnimatePresence>
+        {thickScriptDialog && thickScriptFile ? (
+          <motion.div
+            className="director-dialog-backdrop"
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onMouseDown={() => setThickScriptDialog(false)}
+          >
+            <motion.form
+              className="director-dialog"
+              initial={{ y: 8, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              onSubmit={submitThickScript}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="dialog-head">
+                <div>
+                  <span className="overline">THICK SCRIPT IMPORT</span>
+                  <h2>导入厚版分镜脚本</h2>
+                  <p>
+                    上传 Markdown 后直接建立项目、映射 R/S/P 素材，并生成前 5
+                    镜审阅计划。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setThickScriptDialog(false)}
+                  aria-label="关闭厚版导入"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <div className="dialog-file-summary">
+                <Clapperboard size={16} />
+                <strong>{thickScriptFile.name}</strong>
+                <small>{Math.ceil(thickScriptFile.size / 1024)} KB</small>
+              </div>
+              <label className="dialog-field">
+                <span>项目名称</span>
+                <input
+                  value={thickScriptTitle}
+                  onChange={(event) => setThickScriptTitle(event.target.value)}
+                  placeholder="例如：极乐城·场1"
+                />
+              </label>
+              <label className="dialog-field">
+                <span>资产根目录（可选）</span>
+                <input
+                  value={thickScriptAssetRoot}
+                  onChange={(event) =>
+                    setThickScriptAssetRoot(event.target.value)
+                  }
+                  placeholder="E:\\...\\图像资产"
+                />
+                <small>
+                  服务器本机路径；扫描 R-XX、S-XX、P-XX
+                  文件名。留空也可先建立无素材项目。
+                </small>
+              </label>
+              <div className="dialog-actions">
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => setThickScriptDialog(false)}
+                >
+                  取消
+                </button>
+                <button
+                  className="glow-button"
+                  type="submit"
+                  disabled={thickScriptSubmitting}
+                >
+                  {thickScriptSubmitting ? "导入中…" : "建立项目并预览"}
+                </button>
+              </div>
+            </motion.form>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
       <AnimatePresence>
         {styleDialog ? (
           <motion.div
