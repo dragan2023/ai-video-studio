@@ -11,9 +11,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from long_video_studio.adapters.h3 import H3Client
-from long_video_studio.asset_importer import detect_missing_codes, import_code_assets, scan_asset_codes
 from long_video_studio.anchor_policy import anchor_selected
+from long_video_studio.asset_importer import detect_missing_codes, import_code_assets, scan_asset_codes
 from long_video_studio.domain import (
+    MAX_PROJECT_DURATION_SECONDS,
     AssetKind,
     AssetRecord,
     AssetRole,
@@ -24,7 +25,10 @@ from long_video_studio.domain import (
     DialogueLine,
     ExecutionPlan,
     FilmProject,
+    LLMClient,
     PlannerTraceEvent,
+    PreproductionPlan,
+    PreproductionStatus,
     ProjectBrief,
     ProjectRenderEstimate,
     RenderJob,
@@ -47,8 +51,8 @@ from long_video_studio.plan_exporter import write_plan
 from long_video_studio.planner import PlannerError
 from long_video_studio.planning import PlanningManager
 from long_video_studio.project_builder import build_film_project
-from long_video_studio.script_importer import parse_shot_script
 from long_video_studio.runner import RenderManager
+from long_video_studio.script_importer import parse_shot_script
 from long_video_studio.services import StudioServices
 from long_video_studio.style_registry import public_style_contracts
 
@@ -66,6 +70,43 @@ class ThickScriptImportView(BaseModel):
     missing_codes: list[str] = Field(default_factory=list)
     imported_codes: list[str] = Field(default_factory=list)
     plan_path: str
+
+
+class H3BatchPlanningRequest(BaseModel):
+    profile_id: str = "default"
+    model: str = Field(default="", max_length=200)
+    retry: bool = False
+
+
+class PreproductionRequest(BaseModel):
+    profile_id: str = Field(default="", max_length=64)
+    model: str = Field(default="", max_length=200)
+
+
+class ActivePlannerRequest(BaseModel):
+    profile_id: str = Field(default="default", max_length=64)
+    model: str = Field(default="", max_length=200)
+
+
+class LLMClientCreate(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(default="", max_length=120)
+    base_url: str = Field(default="", max_length=400)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str = Field(default="", max_length=200)
+    wire_api: str = Field(default="chat_completions", max_length=40)
+
+
+class LLMClientUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=120)
+    base_url: str | None = Field(default=None, max_length=400)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
+    wire_api: str | None = Field(default=None, max_length=40)
+
+
+class DefaultLLMClientRequest(BaseModel):
+    model: str = Field(default="", max_length=200)
 
 
 class ShotUpdate(BaseModel):
@@ -105,10 +146,16 @@ class ShotUpdate(BaseModel):
     flow_shift: float | None = None
 
 
+class ShotOrderUpdate(BaseModel):
+    """D7：镜头顺序重排请求——shot_ids 必须恰好包含项目全部镜头，顺序即新时间线顺序。"""
+
+    shot_ids: list[str] = Field(min_length=1)
+
+
 class ProjectBriefUpdate(BaseModel):
     title: str | None = None
     prompt: str | None = Field(default=None, min_length=3)
-    duration_seconds: int | None = Field(default=None, ge=15, le=900)
+    duration_seconds: int | None = Field(default=None, ge=15, le=MAX_PROJECT_DURATION_SECONDS)
     aspect_ratio: Literal["16:9", "9:16", "1:1"] | None = None
     style: str | None = None
     style_preset: str | None = None
@@ -211,10 +258,10 @@ def create_api_router() -> APIRouter:
             "status": "ok",
             "planner": services.settings.planner_wire_api if services.settings.planner_base_url else "heuristic",
             "planner_source": services.settings.planner_source,
-            "planner_model": services.settings.planner_model,
-            "fl2va_configured": bool(services.settings.h3_fl2va_url),
+            "planner_model": services.active_planner_view().get("resolved_model") or services.settings.planner_model,
+            "fl2va_configured": services.settings.h3_configured("fl2va"),
             "fl2va_healthy": healthy.get("fl2va", False),
-            "ref2va_configured": bool(services.settings.h3_ref2va_url),
+            "ref2va_configured": services.settings.h3_configured("ref2va"),
             "ref2va_healthy": healthy.get("ref2va", False),
             "image_edit_provider": services.settings.image_edit_provider,
             "image_edit_configured": capabilities["qwen-image-edit"].available,
@@ -403,7 +450,7 @@ def create_api_router() -> APIRouter:
         )
         services.repository.save_project(draft)
         try:
-            return _project_view(await services.planner.plan(brief, project_id=draft.id))
+            return _project_view(await services.resolve_planner().plan(brief, project_id=draft.id))
         except KeyError as error:
             failed = services.repository.get_project(draft.id) or draft
             failed.status = "failed"
@@ -515,6 +562,48 @@ def create_api_router() -> APIRouter:
         )
         return services.repository.save_project(project)
 
+    @router.patch("/projects/{project_id}/shots/order", response_model=FilmProject)
+    def reorder_shots(request: Request, project_id: str, payload: ShotOrderUpdate) -> FilmProject:
+        """D7：按 shot_ids 顺序重排镜头，重写 index 并触发 timeline 重建。
+
+        与 update_shot 一致，重排重置受影响镜头的渲染状态；磁盘产物不删除。
+        注意：必须声明在 /shots/{shot_id} 之前，避免 "order" 被当作 shot_id 捕获。
+        """
+        services = _services(request)
+        project = services.repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        existing = {shot.id for shot in project.shots}
+        if set(payload.shot_ids) != existing or len(payload.shot_ids) != len(existing):
+            raise HTTPException(status_code=422, detail="shot_ids must include every shot exactly once")
+        by_id = {shot.id: shot for shot in project.shots}
+        reordered = []
+        for index, shot_id in enumerate(payload.shot_ids):
+            shot = by_id[shot_id]
+            reordered.append(
+                shot.model_copy(
+                    update={
+                        "index": index,
+                        "status": ShotStatus.PLANNED,
+                        "selected_take_path": None,
+                        "anchor_frame_path": None,
+                        "boundary_frame_path": None,
+                        "render_started_at": None,
+                        "render_completed_at": None,
+                        "render_duration_seconds": None,
+                    }
+                )
+            )
+        project = FilmProject.model_validate(
+            {
+                **project.model_dump(mode="python"),
+                "shots": reordered,
+                "status": "planned",
+                "updated_at": utc_now(),
+            }
+        )
+        return services.repository.save_project(project)
+
     @router.patch("/projects/{project_id}/shots/{shot_id}", response_model=FilmProject)
     def update_shot(
         request: Request,
@@ -583,6 +672,143 @@ def create_api_router() -> APIRouter:
                 return services.repository.save_project(project)
         raise HTTPException(status_code=404, detail="shot not found")
 
+    @router.get("/planner-profiles")
+    def list_planner_profiles(request: Request) -> dict[str, object]:
+        services = _services(request)
+        return {
+            "profiles": [profile.public() for profile in services.settings.planner_profiles],
+            "active": services.active_planner_view(),
+        }
+
+    @router.get("/llm-clients")
+    def list_llm_clients(request: Request) -> dict[str, object]:
+        services = _services(request)
+        return {
+            "clients": services.list_llm_clients(),
+            "active": services.active_planner_view(),
+        }
+
+    @router.post("/llm-clients", status_code=201)
+    def create_llm_client(request: Request, payload: LLMClientCreate) -> dict[str, object]:
+        services = _services(request)
+        try:
+            return services.create_llm_client(LLMClient(**payload.model_dump()))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @router.put("/llm-clients/{client_id}")
+    def update_llm_client(request: Request, client_id: str, payload: LLMClientUpdate) -> dict[str, object]:
+        services = _services(request)
+        try:
+            return services.update_llm_client(client_id, payload.model_dump(exclude_unset=True))
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="llm client not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @router.delete("/llm-clients/{client_id}")
+    def delete_llm_client(request: Request, client_id: str) -> dict[str, object]:
+        services = _services(request)
+        try:
+            return services.delete_llm_client(client_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="llm client not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @router.post("/llm-clients/{client_id}/default")
+    def set_default_llm_client(
+        request: Request, client_id: str, payload: DefaultLLMClientRequest | None = None,
+    ) -> dict[str, str | bool]:
+        services = _services(request)
+        try:
+            return services.set_default_llm_client(client_id, payload.model if payload else "")
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @router.get("/planner-profile/active")
+    def get_active_planner(request: Request) -> dict[str, str | bool]:
+        return _services(request).active_planner_view()
+
+    @router.put("/planner-profile/active")
+    def set_active_planner(request: Request, payload: ActivePlannerRequest) -> dict[str, str | bool]:
+        services = _services(request)
+        try:
+            services.set_active_planner(payload.profile_id, payload.model)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return services.active_planner_view()
+
+    @router.post("/projects/{project_id}/h3-enrichment", response_model=FilmProject)
+    async def start_h3_enrichment(
+        request: Request, project_id: str, payload: H3BatchPlanningRequest,
+    ) -> FilmProject:
+        try:
+            project = await _planning_manager(request).start_imported_h3(
+                project_id, profile_id=payload.profile_id, model=payload.model, retry=payload.retry,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return _project_view(project)
+
+    @router.post("/projects/{project_id}/preproduction", response_model=PreproductionPlan)
+    async def create_preproduction_plan(
+        request: Request,
+        project_id: str,
+        payload: PreproductionRequest | None = None,
+    ) -> PreproductionPlan:
+        services = _services(request)
+        project = services.repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        if project.batch_planning_run:
+            if project.batch_planning_run.status.value != "complete":
+                raise HTTPException(status_code=409, detail="H3 分镜批处理尚未完成，请等待或重试失败批次")
+        else:
+            try:
+                planner = services.resolve_planner(
+                    profile_id=(payload.profile_id if payload else None),
+                    model=(payload.model if payload else None),
+                )
+                project = await planner.enrich_imported_shots(project)
+            except PlannerError as error:
+                raise HTTPException(status_code=503, detail=str(error)) from error
+            except (httpx.HTTPError, ValueError) as error:
+                raise HTTPException(status_code=422, detail=f"H3 timeline enrichment failed: {error}") from error
+        project.preproduction_plan = services.preproduction.plan(project, services.repository.list_assets())
+        project = services.preproduction_assets.apply_execution_bindings(project)
+        return services.repository.save_project(project).preproduction_plan
+
+    @router.get("/projects/{project_id}/preproduction", response_model=PreproductionPlan)
+    def get_preproduction_plan(request: Request, project_id: str) -> PreproductionPlan:
+        project = _services(request).repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        if not project.preproduction_plan:
+            raise HTTPException(status_code=404, detail="preproduction plan not created")
+        return project.preproduction_plan
+
+    @router.post("/projects/{project_id}/preproduction/approve", response_model=PreproductionPlan)
+    async def approve_preproduction_plan(request: Request, project_id: str) -> PreproductionPlan:
+        services = _services(request)
+        project = services.repository.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        plan = project.preproduction_plan
+        if not plan:
+            raise HTTPException(status_code=409, detail="create and review a preproduction plan first")
+        if plan.blockers:
+            raise HTTPException(status_code=409, detail="resolve preproduction blockers before approval")
+        approved = plan.model_copy(update={"status": PreproductionStatus.APPROVED, "approved_at": utc_now()})
+        if not approved.generated_image_count:
+            project.preproduction_plan = approved.become_ready()
+            return services.repository.save_project(project).preproduction_plan
+        project.preproduction_plan = approved.model_copy(update={"status": PreproductionStatus.GENERATING_ASSETS})
+        project = await services.preproduction_assets.generate_approved_gaps(project)
+        return services.repository.save_project(project).preproduction_plan
+
     @router.post("/projects/{project_id}/compile", response_model=ExecutionPlan)
     def compile_project(request: Request, project_id: str) -> ExecutionPlan:
         services = _services(request)
@@ -604,6 +830,11 @@ def create_api_router() -> APIRouter:
         project = services.repository.get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
+        if project.preproduction_plan and project.preproduction_plan.status != PreproductionStatus.READY:
+            raise HTTPException(
+                status_code=409,
+                detail="preproduction plan must be approved and ready before rendering",
+            )
         missing: list[str] = []
         ordered_shots = sorted(project.shots, key=lambda shot: shot.index)
         pending_shots = (
@@ -627,16 +858,22 @@ def create_api_router() -> APIRouter:
         runtime_tasks = {
             shot.id: effective_video_task(
                 shot,
-                ref2va_configured=bool(services.settings.h3_ref2va_url),
-                fl2va_configured=bool(services.settings.h3_fl2va_url),
+                ref2va_configured=services.settings.h3_configured("ref2va"),
+                fl2va_configured=services.settings.h3_configured("fl2va"),
                 continuation_mode=continuation_modes[shot.id],
             )
             for shot in pending_shots
         }
-        if any(task == ShotTask.FL2VA for task in runtime_tasks.values()) and not services.settings.h3_fl2va_url:
-            missing.append("STUDIO_H3_FL2VA_URL")
-        if any(task == ShotTask.REF2VA for task in runtime_tasks.values()) and not services.settings.h3_ref2va_url:
-            missing.append("STUDIO_H3_REF2VA_URL")
+        if (
+            any(task == ShotTask.FL2VA for task in runtime_tasks.values())
+            and not services.settings.h3_configured("fl2va")
+        ):
+            missing.append("MiniMax-H3 FL2VA backend")
+        if (
+            any(task == ShotTask.REF2VA for task in runtime_tasks.values())
+            and not services.settings.h3_configured("ref2va")
+        ):
+            missing.append("MiniMax-H3 Ref2VA backend")
         preceding_shot_ids: set[str] = set()
         for position, shot in enumerate(ordered_shots):
             if not force and RenderManager.reusable_take_path(shot) is not None:

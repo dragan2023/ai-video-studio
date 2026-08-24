@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import time
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from itertools import combinations
 from typing import Any
@@ -179,6 +180,219 @@ class PlannerService:
             return project
         finally:
             self._active_trace_project_id.reset(trace_token)
+
+    async def enrich_imported_shots(
+        self,
+        project: FilmProject,
+        shot_ids: set[str] | None = None,
+        *,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> FilmProject:
+        """Fill every imported shot's H3 fields through the configured LLM.
+
+        This preserves creator-owned source text, material bindings and runtime
+        settings while requiring the Shot Director contract for all model-facing
+        H3 timeline fields.  It deliberately fails closed when no LLM is
+        configured; imported scripts must not masquerade as H3-ready plans.
+        """
+        if not self._llm_available:
+            raise PlannerError("H3 timeline enrichment requires a configured Planner LLM")
+        asset_ids = set(project.brief.reference_asset_ids)
+        for shot in project.shots:
+            asset_ids.update(shot.reference_asset_ids)
+            if shot.start_frame_asset_id:
+                asset_ids.add(shot.start_frame_asset_id)
+        assets = [asset for asset_id in asset_ids if (asset := self.repository.get_asset(asset_id))]
+        asset_context = self._asset_context(assets)
+        style_contract = style_prompt(project.brief.style_preset, project.brief.style_instructions)
+        h3_rules = self._h3_skill_contract(project.brief.style_preset)
+        all_ordered = sorted(project.shots, key=lambda item: item.index)
+        positions = {shot.id: position for position, shot in enumerate(all_ordered)}
+        ordered = [shot for shot in all_ordered if shot_ids is None or shot.id in shot_ids]
+        blueprints = [self._blueprint_from_shot(shot) for shot in all_ordered]
+        semaphore = asyncio.Semaphore(max(1, self.settings.planner_shot_concurrency))
+
+        async def enrich_one(original: ShotSpec) -> ShotSpec:
+            position = positions[original.id]
+            blueprint = blueprints[position]
+            async with semaphore:
+                prompt = self._shot_director_system_prompt(
+                    project.brief, style_contract, h3_rules, blueprint,
+                    is_first=position == 0,
+                    needs_generated_anchor=not bool(original.start_frame_asset_id),
+                    has_reference_images=bool(original.reference_asset_ids),
+                    world_bible=project.world_bible,
+                )
+                payload = {
+                    "stage": "imported_shot_h3_enrichment",
+                    "brief": project.brief.model_dump(mode="json"),
+                    "world_bible": project.world_bible.model_dump(mode="json"),
+                    "assets": asset_context,
+                    "shot_index": position,
+                    "shot_blueprint": blueprint.model_dump(mode="json"),
+                    "previous_blueprint": blueprints[position - 1].model_dump(mode="json") if position else None,
+                    "next_blueprint": (
+                        blueprints[position + 1].model_dump(mode="json") if position + 1 < len(blueprints) else None
+                    ),
+                }
+                enriched = original
+                async with httpx.AsyncClient(
+                    timeout=self.settings.planner_timeout_seconds,
+                    transport=self._transport,
+                ) as client:
+                    try:
+                        raw = await self._request_json(
+                            client, prompt, payload, schema=self._shot_json_schema(),
+                            schema_name=f"nautilus_imported_h3_{position + 1}",
+                        )
+                    except ValueError as error:
+                        logger.warning(
+                            "imported shot %d could not be H3-enriched (%s); retaining source blueprint fields",
+                            position + 1,
+                            error,
+                        )
+                        enriched = self._complete_missing_h3_fields(original)
+                    else:
+                        try:
+                            enriched = self._coerce_shot_payload(raw, position, blueprint)
+                            self._validate_h3_storyboard_contract(enriched)
+                        except ValueError as validation_error:
+                            invalid_shot = raw.get("shot", raw)
+                            repair_payload = {
+                                "stage": "imported_shot_h3_field_repair",
+                                "shot_index": position,
+                                "validation_error": str(validation_error),
+                                "invalid_shot": invalid_shot,
+                            }
+                            repair_schema = {
+                                "type": "object",
+                                "properties": {"patch": {"type": "object", "additionalProperties": True}},
+                                "required": ["patch"],
+                                "additionalProperties": False,
+                            }
+                            try:
+                                repaired = await self._request_json(
+                                    client,
+                                    "Return only a minimal JSON patch for the invalid fields. Do not regenerate "
+                                    "the shot, "
+                                    "do not alter valid fields, and omit every unaffected field.",
+                                    repair_payload,
+                                    schema=repair_schema,
+                                    schema_name=f"nautilus_imported_h3_repair_{position + 1}",
+                                )
+                                patch = self._h3_repair_patch(repaired, validation_error)
+                                if not patch:
+                                    raise ValueError("repair response contained no usable patch")
+                                patched_shot = dict(invalid_shot)
+                                patched_shot.update(patch)
+                                enriched = self._coerce_shot_payload({"shot": patched_shot}, position, blueprint)
+                                self._validate_h3_storyboard_contract(enriched)
+                            except (ValueError, json.JSONDecodeError):
+                                enriched = self._complete_missing_h3_fields(enriched)
+                                self._validate_h3_storyboard_contract(enriched)
+                # Imported thick-script content is creator-owned. H3 enrichment is
+                # strictly incremental: it fills only the H3 timeline fields the
+                # creator did not author (opening/ending state, handoff,
+                # reference anchors, hook, continuity state), and back-fills a
+                # creator field only when the script left it empty. It must never
+                # replace the script's prompt, beats, dialogue, audio/music,
+                # camera, purpose, or task with the LLM's re-written version.
+                def pick(original_value, fallback_value):
+                    return original_value if original_value else fallback_value
+
+                return original.model_copy(update={
+                    "opening_state": enriched.opening_state,
+                    "ending_state": enriched.ending_state,
+                    "continuity_handoff": enriched.continuity_handoff,
+                    "reference_anchors": enriched.reference_anchors,
+                    "hook": enriched.hook,
+                    "continuity_in": enriched.continuity_in,
+                    "continuity_out": enriched.continuity_out,
+                    "purpose": pick(original.purpose, enriched.purpose),
+                    "task": pick(original.task, enriched.task),
+                    "prompt": pick(original.prompt, enriched.prompt),
+                    "anchor_prompt": pick(original.anchor_prompt, enriched.anchor_prompt),
+                    "audio_prompt": pick(original.audio_prompt, enriched.audio_prompt),
+                    "music_prompt": pick(original.music_prompt, enriched.music_prompt),
+                    "dialogue": pick(original.dialogue, enriched.dialogue),
+                    "visual_beats": pick(original.visual_beats, enriched.visual_beats),
+                    "negative_prompt": pick(original.negative_prompt, enriched.negative_prompt),
+                    "subtitle_text": pick(original.subtitle_text, enriched.subtitle_text),
+                    "camera": pick(original.camera, enriched.camera),
+                })
+
+        if on_progress is None:
+            enriched_shots = list(await asyncio.gather(*(enrich_one(shot) for shot in ordered)))
+        else:
+            # Emit each completed shot so long-running batches show live progress
+            # instead of appearing frozen at 0/N for the whole batch.
+            enriched_shots = []
+            for completed in asyncio.as_completed([enrich_one(shot) for shot in ordered]):
+                shot = await completed
+                enriched_shots.append(shot)
+                await on_progress(shot.id)
+        enriched_by_id = {shot.id: shot for shot in enriched_shots}
+        return project.model_copy(update={
+            "shots": [enriched_by_id.get(shot.id, shot) for shot in project.shots],
+        })
+
+    @staticmethod
+    def _complete_missing_h3_fields(shot: ShotSpec) -> ShotSpec:
+        """Last-resort structural defaults; retain every valid LLM field."""
+        beats = list(shot.visual_beats)
+        timeline_invalid = not beats or beats[0].start_seconds != 0 or beats[-1].end_seconds != shot.duration_seconds
+        if timeline_invalid:
+            beats = [StoryboardBeat(
+                start_seconds=0,
+                end_seconds=shot.duration_seconds,
+                visual_action=shot.visual_beats[0].visual_action if shot.visual_beats else "",
+                state_change=shot.ending_state or "Hold a stable final visible state.",
+                camera=shot.camera,
+                sound=shot.audio_prompt,
+            )]
+        return shot.model_copy(update={
+            "opening_state": shot.opening_state or f"Opening frame: {shot.prompt}",
+            "ending_state": shot.ending_state or "End on a stable, readable final frame.",
+            "continuity_handoff": shot.continuity_handoff or (
+                "Preserve visible identity, wardrobe, props, screen direction, camera axis, lighting, and ambience."
+            ),
+            "reference_anchors": shot.reference_anchors
+            or ["Use the creator script and selected references as canonical visual evidence."],
+            "hook": shot.hook or shot.purpose or shot.title,
+            "visual_beats": beats,
+        })
+
+    @staticmethod
+    def _h3_repair_patch(response: dict[str, Any], validation_error: ValueError) -> dict[str, Any]:
+        """Extract only invalid fields from patch or common proxy envelopes."""
+        candidate: object = response
+        for key in ("patch", "shot", "data", "result", "output"):
+            if isinstance(candidate, dict) and isinstance(candidate.get(key), dict):
+                candidate = candidate[key]
+                if key in {"patch", "shot"}:
+                    break
+        if not isinstance(candidate, dict):
+            return {}
+        error = str(validation_error)
+        fields: set[str] = set()
+        omitted = re.search(r"fields for shot \d+: (.+)$", error)
+        if omitted:
+            fields.update(value.strip() for value in omitted.group(1).split(","))
+        if "visual" in error.lower() or "beat" in error.lower() or "timeline" in error.lower():
+            fields.add("visual_beats")
+        if "opening_state" in error:
+            fields.add("opening_state")
+        if "ending_state" in error:
+            fields.add("ending_state")
+        if "continuity_handoff" in error:
+            fields.add("continuity_handoff")
+        if "reference_anchors" in error:
+            fields.add("reference_anchors")
+        if "hook" in error:
+            fields.add("hook")
+        if not fields and "patch" in response and isinstance(response["patch"], dict):
+            return response["patch"]
+        return {field: candidate[field] for field in fields if field in candidate}
 
     async def _plan_impl(self, brief: ProjectBrief, project_id: str | None = None) -> FilmProject:
         assets = self._retrieve_assets(brief)
@@ -1862,6 +2076,13 @@ Ultra-fast short-drama anchor policy:
             content = response.json()["choices"][0]["message"]["content"]
         parsed = json.loads(self._json_text(content))
         if not isinstance(parsed, dict):
+            if isinstance(parsed, list):
+                # Some OpenAI-compatible providers answer a single-shot request
+                # with a bare JSON array (sometimes the whole storyboard). The
+                # shot-director and imported-shot callers already select the
+                # authoritative shot from a "shots" list, so wrap the array
+                # instead of failing the entire H3 enrichment pass.
+                return {"shots": parsed}
             raise ValueError(f"{schema_name} returned a non-object JSON payload")
         return parsed
 
@@ -2594,9 +2815,26 @@ Ultra-fast short-drama anchor policy:
 
     @staticmethod
     def _json_text(content: str) -> str:
+        """Extract a JSON object from common prose and Markdown wrappers."""
         value = content.strip()
-        fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", value, flags=re.DOTALL | re.IGNORECASE)
-        return fenced.group(1) if fenced else value
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", value, flags=re.DOTALL | re.IGNORECASE)
+        candidate = fenced.group(1).strip() if fenced else value
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(candidate):
+            if character not in "{[":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(parsed, ensure_ascii=False)
+        return candidate
 
     @staticmethod
     def _fit_shot_durations(source_durations: list[float], requested_duration: int) -> list[float]:

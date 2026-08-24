@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS, H3_MIN_SHOT_SECONDS
 
+# Project duration is an aggregate of short H3 shots, not one model request.
+MAX_PROJECT_DURATION_SECONDS = 14_400
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -146,7 +149,7 @@ class AssetView(BaseModel):
 class ProjectBrief(BaseModel):
     title: str = "Untitled film"
     prompt: str = Field(min_length=3)
-    duration_seconds: int = Field(default=60, ge=15, le=900)
+    duration_seconds: int = Field(default=60, ge=15, le=MAX_PROJECT_DURATION_SECONDS)
     aspect_ratio: Literal["16:9", "9:16", "1:1"] = "16:9"
     style: str = "cinematic realism"
     style_preset: str = "cinematic"
@@ -206,6 +209,42 @@ class WorldBible(BaseModel):
     subjects: list[SubjectCard] = Field(default_factory=list)
 
 
+class LLMClient(BaseModel):
+    """A persisted, UI-managed LLM client used by the planner.
+
+    Credentials stay server-side; ``public()`` never exposes ``api_key``.
+    ``available`` requires a base URL and model so the UI can flag clients
+    that cannot be used to call the planner.
+    """
+
+    id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(default="", max_length=120)
+    base_url: str = Field(default="", max_length=400)
+    api_key: str | None = Field(default=None)
+    model: str = Field(default="", max_length=200)
+    wire_api: str = Field(default="chat_completions", max_length=40)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("id")
+    @classmethod
+    def _normalize_id(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not value.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("llm client id may only contain letters, digits, hyphen and underscore")
+        return value
+
+    def public(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name or self.id,
+            "base_url": self.base_url,
+            "model": self.model or "",
+            "wire_api": self.wire_api,
+            "available": bool(self.base_url.strip() and self.model.strip()),
+        }
+
+
 class ShotTask(str, Enum):
     FL2VA = "fl2va"
     REF2VA = "ref2va"
@@ -228,6 +267,117 @@ class ShotStatus(str, Enum):
     RENDERING = "rendering"
     COMPLETE = "complete"
     FAILED = "failed"
+
+
+class StartFrameSource(str, Enum):
+    """Declared origin of a shot's opening frame in a preproduction plan."""
+
+    CREATOR_ASSET = "creator_asset"
+    PREVIOUS_BOUNDARY = "previous_boundary"
+    SYSTEM_BLACK = "system_black"
+    GENERATE_T2I = "generate_t2i"
+    NEEDS_REVIEW = "needs_review"
+
+
+class PreproductionStatus(str, Enum):
+    DRAFT = "draft"
+    AWAITING_APPROVAL = "awaiting_approval"
+    APPROVED = "approved"
+    GENERATING_ASSETS = "generating_assets"
+    READY = "ready"
+    BLOCKED = "blocked"
+
+
+class PreproductionRuntimeProfile(BaseModel):
+    """Fixed, creator-visible runtime settings; never provider configuration."""
+
+    resolution: str = "1536x864"
+    max_concurrency: int = Field(default=1, ge=1, le=1)
+    inference_steps: int = Field(default=12, ge=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)
+
+
+class PreproductionShotPlan(BaseModel):
+    """The reviewable preproduction decision for one storyboard shot."""
+
+    shot_id: str = Field(min_length=1)
+    shot_index: int = Field(ge=0)
+    script_evidence: str = ""
+    transition_kind: TransitionKind = TransitionKind.CONTINUOUS
+    start_frame_source: StartFrameSource = StartFrameSource.NEEDS_REVIEW
+    source_shot_id: str | None = None
+    candidate_asset_ids: list[str] = Field(default_factory=list)
+    selected_asset_id: str | None = None
+    gap_reason: str = ""
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    generation_permitted: bool = False
+    parameter_summary: str = ""
+
+    @model_validator(mode="after")
+    def validate_start_frame_source(self) -> PreproductionShotPlan:
+        if self.start_frame_source == StartFrameSource.PREVIOUS_BOUNDARY:
+            if not self.source_shot_id:
+                raise ValueError("previous_boundary start frames require source_shot_id")
+            if self.source_shot_id == self.shot_id:
+                raise ValueError("previous_boundary source_shot_id must refer to another shot")
+        return self
+
+
+class PreproductionPlan(BaseModel):
+    """Persistent approval record for the visible preproduction workflow."""
+
+    version: int = Field(default=1, ge=1)
+    asset_input_fingerprint: str = ""
+    generated_image_count: int = Field(default=0, ge=0)
+    runtime_profile: PreproductionRuntimeProfile = Field(default_factory=PreproductionRuntimeProfile)
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    approved_at: datetime | None = None
+    status: PreproductionStatus = PreproductionStatus.DRAFT
+    shot_plans: list[PreproductionShotPlan] = Field(default_factory=list)
+
+    @property
+    def shots(self) -> list[PreproductionShotPlan]:
+        """Compatibility-friendly shorthand for consumers displaying plan rows."""
+
+        return self.shot_plans
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> PreproductionPlan:
+        seen_shot_ids: set[str] = set()
+        seen_indexes: set[int] = set()
+        for shot_plan in self.shot_plans:
+            if shot_plan.shot_id in seen_shot_ids:
+                raise ValueError("preproduction plan has duplicate shot_id")
+            if shot_plan.shot_index in seen_indexes:
+                raise ValueError("preproduction plan has duplicate shot_index")
+            seen_shot_ids.add(shot_plan.shot_id)
+            seen_indexes.add(shot_plan.shot_index)
+
+        if self.shot_plans:
+            first_shot = min(self.shot_plans, key=lambda item: item.shot_index)
+            if first_shot.start_frame_source == StartFrameSource.PREVIOUS_BOUNDARY:
+                raise ValueError("the first shot cannot use a previous_boundary start frame")
+
+        if self.status == PreproductionStatus.READY:
+            if self.blockers:
+                raise ValueError("a plan with blockers cannot be ready")
+            if self.approved_at is None:
+                raise ValueError("a ready plan requires approval")
+        return self
+
+    def become_ready(self) -> PreproductionPlan:
+        """Advance an approved asset workflow to ready after its blockers clear."""
+
+        if self.status not in {PreproductionStatus.APPROVED, PreproductionStatus.GENERATING_ASSETS}:
+            raise ValueError("only approved or generating_assets plans may become ready")
+        if self.blockers:
+            raise ValueError("a plan with blockers cannot become ready")
+        if self.approved_at is None:
+            raise ValueError("an approved plan requires approved_at before becoming ready")
+        return type(self).model_validate(
+            {**self.model_dump(mode="python"), "status": PreproductionStatus.READY}
+        )
 
 
 class DialogueLine(BaseModel):
@@ -269,7 +419,8 @@ class StoryboardBeat(BaseModel):
 
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
-    visual_action: str = Field(min_length=1)
+    # A static, black, or sound-led beat may intentionally have no headline action.
+    visual_action: str = ""
     state_change: str = ""
     camera: str = ""
     sound: str = ""
@@ -439,6 +590,33 @@ class PlannerTraceEvent(BaseModel):
     duration_ms: float | None = None
 
 
+class BatchPlanningStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    FAILED = "failed"
+    COMPLETE = "complete"
+
+
+class BatchPlanningRun(BaseModel):
+    """Persisted, credential-free state for imported-script H3 enrichment."""
+
+    status: BatchPlanningStatus = BatchPlanningStatus.QUEUED
+    profile_id: str = "default"
+    model: str = ""
+    batch_size: int = Field(default=6, ge=1, le=24)
+    completed_shot_ids: list[str] = Field(default_factory=list)
+    failed_shot_ids: list[str] = Field(default_factory=list)
+    current_batch_start: int = Field(default=0, ge=0)
+    last_error: str = ""
+    started_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def completed_count(self) -> int:
+        return len(self.completed_shot_ids)
+
+
 class FilmProject(BaseModel):
     id: str = Field(default_factory=lambda: new_id("project"))
     brief: ProjectBrief
@@ -447,6 +625,8 @@ class FilmProject(BaseModel):
     timeline: list[TimelineClip] = Field(default_factory=list)
     status: Literal["planning", "planned", "compiled", "rendering", "complete", "failed"] = "planned"
     planner_trace: list[PlannerTraceEvent] = Field(default_factory=list)
+    preproduction_plan: PreproductionPlan | None = None
+    batch_planning_run: BatchPlanningRun | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

@@ -99,8 +99,8 @@ class FilmCompiler:
                 id="minimax-h3-fl2va",
                 display_name="MiniMax-H3 FL2VA",
                 task="fl2va",
-                endpoint=self.settings.h3_fl2va_url,
-                available=bool(self.settings.h3_fl2va_url),
+                endpoint=self.settings.h3_endpoint("fl2va"),
+                available=self.settings.h3_configured("fl2va"),
                 max_duration_seconds=H3_MAX_SHOT_SECONDS,
                 supports_audio=True,
                 recommended_gpus=8,
@@ -110,8 +110,8 @@ class FilmCompiler:
                 id="minimax-h3-ref2va",
                 display_name="MiniMax-H3 Ref2VA",
                 task="ref2va",
-                endpoint=self.settings.h3_ref2va_url,
-                available=bool(self.settings.h3_ref2va_url),
+                endpoint=self.settings.h3_endpoint("ref2va"),
+                available=self.settings.h3_configured("ref2va"),
                 max_duration_seconds=H3_MAX_SHOT_SECONDS,
                 supports_audio=True,
                 supports_multiple_references=True,
@@ -198,8 +198,8 @@ class FilmCompiler:
             )
             runtime_task = effective_video_task(
                 shot,
-                ref2va_configured=bool(self.settings.h3_ref2va_url),
-                fl2va_configured=bool(self.settings.h3_fl2va_url),
+                ref2va_configured=self.settings.h3_configured("ref2va"),
+                fl2va_configured=self.settings.h3_configured("fl2va"),
                 continuation_mode=continuation_mode,
             )
             is_fl2va = runtime_task == ShotTask.FL2VA

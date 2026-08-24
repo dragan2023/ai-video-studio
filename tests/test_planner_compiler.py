@@ -1285,3 +1285,157 @@ def test_compiler_accepts_h3_maximum_fifteen_second_shot(settings):
 def test_planner_structured_schema_caps_h3_shots_at_fifteen_seconds():
     schema = PlannerService._planner_json_schema()
     assert schema["$defs"]["ShotSpec"]["properties"]["duration_seconds"]["maximum"] == 15
+
+
+def test_imported_shots_receive_complete_llm_h3_timeline(settings, monkeypatch):
+    configured = replace(settings, planner_base_url="http://planner.test/v1", planner_model="test-model")
+    planner = PlannerService(configured, StudioRepository(configured.database_path))
+    source = planner._plan_heuristically(ProjectBrief(prompt="A lantern rises over a river.", duration_seconds=15), [])
+    imported = source.model_copy(deep=True)
+    original = imported.shots[0]
+    imported.shots[0] = original.model_copy(update={
+        "opening_state": "", "ending_state": "", "continuity_handoff": "",
+        "reference_anchors": [], "hook": "", "visual_beats": [],
+    })
+
+    schema_names = []
+
+    async def fake_request_json(_self, _client, _prompt, payload, *, schema, schema_name):
+        del payload, schema
+        schema_names.append(schema_name)
+        if schema_name == "nautilus_imported_h3_repair_1":
+            return {"shot": original.model_dump(mode="json")}
+        assert schema_name == "nautilus_imported_h3_1"
+        result = original.model_dump(mode="json")
+        result["visual_beats"][0]["end_seconds"] = 0
+        return {"shot": result}
+
+    monkeypatch.setattr(PlannerService, "_request_json", fake_request_json)
+    enriched = asyncio.run(planner.enrich_imported_shots(imported))
+    assert schema_names == ["nautilus_imported_h3_1", "nautilus_imported_h3_repair_1"]
+    shot = enriched.shots[0]
+    assert shot.id == imported.shots[0].id
+    assert shot.opening_state and shot.ending_state and shot.continuity_handoff
+    assert shot.reference_anchors and shot.hook and shot.visual_beats
+    assert shot.visual_beats[0].start_seconds == 0
+    assert shot.visual_beats[-1].end_seconds == shot.duration_seconds
+
+
+def test_imported_shot_enrichment_accepts_bare_shot_list_response(settings):
+    configured = replace(
+        settings,
+        planner_base_url="http://planner.test/v1",
+        planner_model="test-model",
+    )
+    planner = PlannerService(configured, StudioRepository(configured.database_path))
+    source = planner._plan_heuristically(
+        ProjectBrief(prompt="A lantern rises over a river.", duration_seconds=15), []
+    )
+    imported = source.model_copy(deep=True)
+    original = imported.shots[0]
+    imported.shots[0] = original.model_copy(update={
+        "opening_state": "", "ending_state": "", "continuity_handoff": "",
+        "reference_anchors": [], "hook": "", "visual_beats": [],
+    })
+    shot_json = original.model_dump(mode="json")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user_payload = json.loads(body["messages"][1]["content"])
+        assert user_payload["stage"] == "imported_shot_h3_enrichment"
+        # The provider answers a single-shot request with a bare JSON array
+        # instead of a ShotSpec object; the planner must recover, not abort.
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps([shot_json])}}]},
+        )
+
+    planner._transport = httpx.MockTransport(handler)
+    enriched = asyncio.run(planner.enrich_imported_shots(imported))
+    shot = enriched.shots[0]
+    assert shot.id == imported.shots[0].id
+    assert shot.opening_state and shot.ending_state and shot.continuity_handoff
+    assert shot.reference_anchors and shot.hook and shot.visual_beats
+    assert shot.visual_beats[0].start_seconds == 0
+    assert shot.visual_beats[-1].end_seconds == shot.duration_seconds
+
+
+def test_imported_shot_enrichment_falls_back_when_provider_returns_scalar(settings):
+    configured = replace(
+        settings,
+        planner_base_url="http://planner.test/v1",
+        planner_model="test-model",
+    )
+    planner = PlannerService(configured, StudioRepository(configured.database_path))
+    source = planner._plan_heuristically(
+        ProjectBrief(prompt="A lantern rises over a river.", duration_seconds=15), []
+    )
+    imported = source.model_copy(deep=True)
+    original = imported.shots[0]
+    imported.shots[0] = original.model_copy(update={
+        "opening_state": "", "ending_state": "", "continuity_handoff": "",
+        "reference_anchors": [], "hook": "", "visual_beats": [],
+    })
+    shot_json = original.model_dump(mode="json")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user_payload = json.loads(body["messages"][1]["content"])
+        assert user_payload["stage"] == "imported_shot_h3_enrichment"
+        # A scalar JSON payload is not recoverable by wrapping; the planner must
+        # retain source blueprint fields instead of aborting the whole plan.
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(shot_json["prompt"])}}]},
+        )
+
+    planner._transport = httpx.MockTransport(handler)
+    enriched = asyncio.run(planner.enrich_imported_shots(imported))
+    shot = enriched.shots[0]
+    assert shot.id == imported.shots[0].id
+    assert shot.opening_state and shot.ending_state and shot.continuity_handoff
+    assert shot.reference_anchors and shot.hook and shot.visual_beats
+    assert shot.visual_beats[0].start_seconds == 0
+    assert shot.visual_beats[-1].end_seconds == shot.duration_seconds
+
+
+def test_planner_extracts_json_from_prose_wrapper():
+    payload = PlannerService._json_text('Provider preface: {\"shot\": {\"index\": 0}} trailing note')
+    assert json.loads(payload) == {"shot": {"index": 0}}
+
+
+def test_imported_h3_enrichment_preserves_creator_prompt_and_beats(settings, monkeypatch):
+    """H3 enrichment must be incremental: it must not overwrite prompt/beats."""
+    configured = replace(settings, planner_base_url="http://planner.test/v1", planner_model="test-model")
+    planner = PlannerService(configured, StudioRepository(configured.database_path))
+    source = planner._plan_heuristically(ProjectBrief(prompt="A lantern rises over a river.", duration_seconds=15), [])
+    imported = source.model_copy(deep=True)
+    original = imported.shots[0]
+    imported.shots[0] = original.model_copy(update={
+        "opening_state": "", "ending_state": "", "continuity_handoff": "",
+        "reference_anchors": [], "hook": "",
+    })
+
+    async def fake_request_json(_self, _client, _prompt, payload, *, schema, schema_name):
+        del payload, schema
+        result = original.model_dump(mode="json")
+        result["prompt"] = "SHORT REWRITTEN PROMPT"
+        result["visual_beats"] = [{"start_seconds": 0, "end_seconds": 15, "visual_action": "one beat"}]
+        result["opening_state"] = "A stable opening frame."
+        result["ending_state"] = "A stable closing frame."
+        result["continuity_handoff"] = "Keep the lantern center frame."
+        result["reference_anchors"] = ["The lantern on the river."]
+        result["hook"] = "The river stills."
+        return {"shot": result}
+
+    monkeypatch.setattr(PlannerService, "_request_json", fake_request_json)
+    enriched = asyncio.run(planner.enrich_imported_shots(imported))
+    shot = enriched.shots[0]
+    assert shot.prompt == original.prompt
+    assert shot.visual_beats == original.visual_beats
+    assert shot.audio_prompt == original.audio_prompt
+    assert shot.opening_state == "A stable opening frame."
+    assert shot.ending_state == "A stable closing frame."
+    assert shot.continuity_handoff == "Keep the lantern center frame."
+    assert shot.reference_anchors == ["The lantern on the river."]
+    assert shot.hook == "The river stills."

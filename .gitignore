@@ -39,6 +39,11 @@ generated/
 !assets/screenshot.webp
 todo.md
 
+# DSH workspace indexes and one-off data dumps.
+.dsh-project-memory/
+import.body
+import.body.*
+
 # Local leases, tunnels, reports, caches, and editor state.
 .codex/
 .claude/

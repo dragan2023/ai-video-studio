@@ -83,6 +83,57 @@ def _codex_planner_defaults() -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class PlannerProfile:
+    """A local planner connection; `api_key` is never returned to the browser."""
+
+    id: str
+    display_name: str
+    base_url: str | None
+    api_key: str | None
+    model: str | None
+    wire_api: str
+
+    def public(self) -> dict[str, str | bool]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "model": self.model or "",
+            "wire_api": self.wire_api,
+            "available": bool(self.base_url and self.api_key and self.model),
+        }
+
+
+def _planner_profiles(
+    default_base_url: str | None,
+    default_api_key: str | None,
+    default_model: str | None,
+    default_wire_api: str,
+) -> tuple[PlannerProfile, ...]:
+    ids = ["default", *(item.strip().lower() for item in os.getenv("STUDIO_PLANNER_PROFILE_IDS", "").split(",") if item.strip())]
+    profiles: list[PlannerProfile] = []
+    for profile_id in dict.fromkeys(ids):
+        if not profile_id.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(f"Invalid STUDIO_PLANNER_PROFILE_IDS value: {profile_id}")
+        prefix = f"STUDIO_PLANNER_{profile_id.upper().replace('-', '_')}"
+        if profile_id == "default":
+            base_url, api_key, model, wire_api = default_base_url, default_api_key, default_model, default_wire_api
+        else:
+            base_url = os.getenv(f"{prefix}_BASE_URL") or None
+            api_key = os.getenv(f"{prefix}_API_KEY") or None
+            model = os.getenv(f"{prefix}_MODEL") or None
+            wire_api = os.getenv(f"{prefix}_WIRE_API", "chat_completions")
+        profiles.append(PlannerProfile(
+            id=profile_id,
+            display_name=os.getenv(f"{prefix}_DISPLAY_NAME", profile_id),
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            wire_api=wire_api,
+        ))
+    return tuple(profiles)
+
+
+@dataclass(frozen=True)
 class Settings:
     data_dir: Path
     database_path: Path
@@ -103,6 +154,7 @@ class Settings:
     transition_seconds: float
     ffmpeg_binary: str
     ffprobe_binary: str
+    planner_profiles: tuple[PlannerProfile, ...] = ()
     image_edit_provider: str = "disabled"
     image_edit_base_url: str | None = None
     image_edit_api_key: str | None = None
@@ -165,6 +217,26 @@ class Settings:
         "testserver",
     )
 
+    def planner_profile(self, profile_id: str) -> PlannerProfile:
+        for profile in self.planner_profiles:
+            if profile.id == profile_id:
+                return profile
+        raise ValueError(f"Unknown planner profile: {profile_id}")
+
+    def h3_endpoint(self, task: str) -> str | None:
+        if self.h3_backend == "comfyui":
+            return self.comfyui_url
+        if task == "fl2va":
+            return self.h3_fl2va_url
+        if task == "ref2va":
+            return self.h3_ref2va_url
+        raise ValueError(f"unsupported H3 task: {task}")
+
+    def h3_configured(self, task: str) -> bool:
+        if self.h3_backend == "comfyui":
+            return bool(self.comfyui_url and self.comfyui_workflow)
+        return bool(self.h3_endpoint(task))
+
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> Settings:
         root = project_root or Path(__file__).resolve().parents[2]
@@ -218,6 +290,7 @@ class Settings:
             transition_seconds=float(os.getenv("STUDIO_TRANSITION_SECONDS", "0.12")),
             ffmpeg_binary=os.getenv("STUDIO_FFMPEG", "ffmpeg"),
             ffprobe_binary=os.getenv("STUDIO_FFPROBE", "ffprobe"),
+            planner_profiles=_planner_profiles(planner_base_url, planner_api_key, planner_model, str(planner_wire_api)),
             image_edit_provider=os.getenv("STUDIO_IMAGE_EDIT_PROVIDER", "disabled").strip().lower(),
             image_edit_base_url=os.getenv("STUDIO_IMAGE_EDIT_BASE_URL") or None,
             image_edit_api_key=os.getenv("STUDIO_IMAGE_EDIT_API_KEY") or None,

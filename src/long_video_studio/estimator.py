@@ -189,8 +189,8 @@ class RenderEstimator:
         )
         return effective_video_task(
             shot,
-            ref2va_configured=bool(self.settings.h3_ref2va_url),
-            fl2va_configured=bool(self.settings.h3_fl2va_url),
+            ref2va_configured=self.settings.h3_configured("ref2va"),
+            fl2va_configured=self.settings.h3_configured("fl2va"),
             continuation_mode=continuation_mode,
         )
 

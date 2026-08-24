@@ -16,6 +16,7 @@ import {
   Pencil,
   Play,
   Plus,
+  RefreshCw,
   Server,
   Settings2,
   Sparkles,
@@ -49,6 +50,33 @@ const api = async (path, options = {}) => {
     });
   }
   return data;
+};
+
+const preproductionStatusLabel = {
+  awaiting_approval: "等待你的确认",
+  generating_assets: "正在补齐首帧",
+  ready: "已就绪，可制作",
+  blocked: "已阻断，需要处理",
+};
+const startFrameSourceLabel = {
+  system_black: "系统黑场（免费）",
+  creator_asset: "已选素材首帧",
+  previous_boundary: "承接上一镜末帧",
+  generate_t2i: "待补首帧（需生图）",
+  needs_review: "需要你确认",
+};
+const planTransitionLabel = {
+  continuous: "连续承接",
+  hard_cut: "硬切",
+  match_cut: "匹配剪辑（视觉硬切）",
+  occlusion_cut: "遮挡转场（视觉硬切）",
+  anchor: "独立起镜",
+};
+const planReasonLabel = {
+  "black/subtitle shot": "黑场或字幕镜，不调用生图。",
+  "creator selected opening frame": "优先使用你选择的首帧素材。",
+  "independent shot has no image reference": "独立镜头缺少首帧；确认后才会补图。",
+  "explicit visual continuity": "承接上一镜最终画面。",
 };
 
 const roleLabel = {
@@ -681,6 +709,11 @@ function App() {
   const [assets, setAssets] = useState([]);
   const [projects, setProjects] = useState([]);
   const [project, setProject] = useState(null);
+  const [preproduction, setPreproduction] = useState(null);
+  const [preproductionError, setPreproductionError] = useState("");
+  const [plannerProfiles, setPlannerProfiles] = useState([]);
+  const [plannerProfileId, setPlannerProfileId] = useState("default");
+  const [plannerModel, setPlannerModel] = useState("");
   const [health, setHealth] = useState(null);
   const [serviceStatus, setServiceStatus] = useState(null);
   const [job, setJob] = useState(null);
@@ -706,6 +739,12 @@ function App() {
   const [uploadRole, setUploadRole] = useState("reference");
   const [uploadTags, setUploadTags] = useState("");
   const [activeTab, setActiveTab] = useState("brief");
+  const [llmClients, setLlmClients] = useState([]);
+  const [llmActive, setLlmActive] = useState(null);
+  const [llmDialog, setLlmDialog] = useState(false);
+  const [editingLlm, setEditingLlm] = useState(null);
+  const [llmDraft, setLlmDraft] = useState({ id: "", display_name: "", base_url: "", api_key: "", model: "", wire_api: "chat_completions" });
+  const [llmSaving, setLlmSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [renderBlocker, setRenderBlocker] = useState("");
@@ -811,6 +850,35 @@ function App() {
     async () => setAssets((await api("/api/assets")) || []),
     [],
   );
+  const loadPlannerProfiles = useCallback(async () => {
+    const value = await api("/api/llm-clients");
+    const clients = value?.clients || [];
+    setLlmClients(clients);
+    setLlmActive(value?.active || null);
+    setPlannerProfiles(clients);
+    if (value?.active) {
+      setPlannerProfileId(value.active.profile_id || "default");
+      setPlannerModel(value.active.model || "");
+    }
+    return clients;
+  }, []);
+  const savePlannerActive = useCallback(async () => {
+    try {
+      const value = await api("/api/planner-profile/active", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: plannerProfileId, model: plannerModel }),
+      });
+      setPlannerProfileId(value.profile_id || plannerProfileId);
+      setPlannerModel(value.model || plannerModel);
+      setNotice("Studio LLM 已切换：" + value.display_name + (value.resolved_model ? " · " + value.resolved_model : ""));
+      await loadPlannerProfiles();
+      return value;
+    } catch (error) {
+      setNotice(error.message);
+      return null;
+    }
+  }, [plannerProfileId, plannerModel, loadPlannerProfiles]);
   const loadProjects = useCallback(async () => {
     const value = (await api("/api/projects")) || [];
     setProjects(value);
@@ -913,6 +981,7 @@ function App() {
       try {
         const [, availableProjects] = await Promise.all([
           loadAssets(),
+          loadPlannerProfiles(),
           loadProjects(),
           loadActiveJobs(),
           loadStylePresets(),
@@ -931,6 +1000,7 @@ function App() {
     };
   }, [
     loadAssets,
+    loadPlannerProfiles,
     loadProjects,
     loadActiveJobs,
     loadStylePresets,
@@ -994,7 +1064,8 @@ function App() {
   }, [job?.id, job?.status, project?.id, loadActiveJobs]);
 
   useEffect(() => {
-    if (project?.status !== "planning" || !project?.id) return undefined;
+    const h3Running = project?.batch_planning_run?.status === "running";
+    if ((project?.status !== "planning" && !h3Running) || !project?.id) return undefined;
     let cancelled = false;
     const refresh = async () => {
       try {
@@ -1004,7 +1075,7 @@ function App() {
         ]);
         if (cancelled) return;
         setProject(next);
-        if (next.status !== "planning") {
+        if (next.status !== "planning" && next.batch_planning_run?.status !== "running") {
           await loadProjects();
           if (next.status === "failed") {
             setPlanningError(
@@ -1012,7 +1083,15 @@ function App() {
             );
           } else {
             setPlanningError("");
-            setNotice("故事板生成完成，可以逐镜头检查和编辑");
+            const batchRun = next.batch_planning_run;
+            const done = batchRun?.completed_shot_ids?.length || 0;
+            const total = next.shots?.length || 0;
+            if (batchRun?.status === "paused" && done < total) {
+              const batchSize = batchRun.batch_size || 6;
+              setNotice(`第 ${Math.floor(done / batchSize) + 1} 批已生成并入库；请审阅本批分镜后点击续生成。`);
+            } else {
+              setNotice("故事板生成完成，可以逐镜头检查和编辑");
+            }
           }
         }
       } catch (error) {
@@ -1199,6 +1278,10 @@ function App() {
 
   const navigateWorkspace = (sectionId) => {
     setActiveTab(sectionId);
+    if (sectionId === "llm") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
     const target =
       document.getElementById(sectionId) ||
       document.getElementById("empty-workspace");
@@ -1621,6 +1704,73 @@ function App() {
     }
   };
 
+  const startH3Enrichment = async (retry = false) => {
+    if (!project?.id) return;
+    setBusy(true);
+    setPreproductionError("");
+    try {
+      const value = await api(`/api/projects/${project.id}/h3-enrichment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: plannerProfileId, model: plannerModel, retry }),
+      });
+      setProject(value);
+      const batchSize = value?.batch_planning_run?.batch_size || 6;
+      const completed = value?.batch_planning_run?.completed_shot_ids?.length || 0;
+      const batchNo = Math.floor(completed / batchSize) + 1;
+      setNotice(
+        retry
+          ? "正在用当前 LLM 重新补全 H3 分镜（会重跑全部镜头）。"
+          : `正在生成第 ${batchNo} 批（本批 ${batchSize} 镜）…完成后会暂停，请审阅后再点击续生成。`,
+      );
+    } catch (error) {
+      setPreproductionError(error.message || String(error));
+      setNotice(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createPreproductionPlan = async () => {
+    if (!project?.id) return;
+    setBusy(true);
+    setPreproductionError("");
+    try {
+      const value = await api(`/api/projects/${project.id}/preproduction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: plannerProfileId, model: plannerModel }),
+      });
+      const enrichedProject = await api(`/api/projects/${project.id}`);
+      setPreproduction(value);
+      setProject(enrichedProject);
+      setNotice("LLM 已补全 H3 时间线，请审阅每镜首帧、转场和 Beat。");
+    } catch (error) {
+      addClientTrace("failed", error.message || String(error), { projectId: project.id, operation: "preproduction" });
+      setDebugOpen(true);
+      setPreproductionError(error.message || String(error));
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approvePreproductionPlan = async () => {
+    if (!project?.id) return;
+    setBusy(true);
+    try {
+      const value = await api(`/api/projects/${project.id}/preproduction/approve`, { method: "POST" });
+      const approvedProject = await api(`/api/projects/${project.id}`);
+      setPreproduction(value);
+      setProject(approvedProject);
+      setNotice(value.status === "ready" ? "预制片计划已锁定，可以开始制作。" : "补图失败，计划已阻断，请检查提示。");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const render = async () => {
     if (!project?.id) return setNotice("先生成故事板，再渲染成片");
     const projectId = project.id;
@@ -1789,6 +1939,194 @@ function App() {
   const runtimeHealthy = serviceStatus
     ? serviceStatus.status === "ready"
     : h3Healthy;
+
+  const openNewLlm = () => {
+    setEditingLlm(null);
+    setLlmDraft({ id: "", display_name: "", base_url: "", api_key: "", model: "", wire_api: "chat_completions" });
+    setLlmDialog(true);
+  };
+  const openEditLlm = (client) => {
+    setEditingLlm(client);
+    setLlmDraft({
+      id: client.id,
+      display_name: client.display_name,
+      base_url: client.base_url || "",
+      api_key: "",
+      model: client.model || "",
+      wire_api: client.wire_api || "chat_completions",
+    });
+    setLlmDialog(true);
+  };
+  const submitLlmClient = async (event) => {
+    event.preventDefault();
+    setLlmSaving(true);
+    try {
+      if (editingLlm) {
+        await api("/api/llm-clients/" + editingLlm.id, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            display_name: llmDraft.display_name,
+            base_url: llmDraft.base_url,
+            api_key: llmDraft.api_key || undefined,
+            model: llmDraft.model,
+            wire_api: llmDraft.wire_api,
+          }),
+        });
+        setNotice("LLM 客户端已更新");
+      } else {
+        await api("/api/llm-clients", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(llmDraft),
+        });
+        setNotice("LLM 客户端已添加");
+      }
+      setLlmDialog(false);
+      await loadPlannerProfiles();
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLlmSaving(false);
+    }
+  };
+  const deleteLlmClient = async (client) => {
+    if (!window.confirm("确认删除 LLM 客户端「" + client.display_name + "」？作为默认的客户端需先取消默认。")) return;
+    try {
+      await api("/api/llm-clients/" + client.id, { method: "DELETE" });
+      setNotice("LLM 客户端已删除");
+      await loadPlannerProfiles();
+    } catch (error) {
+      setNotice(error.message);
+    }
+  };
+  const setDefaultLlmClient = async (client) => {
+    try {
+      const model = client.model || "";
+      const value = await api("/api/llm-clients/" + client.id + "/default", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      setNotice("已设为默认 LLM：" + value.display_name + (value.resolved_model ? " · " + value.resolved_model : ""));
+      await loadPlannerProfiles();
+    } catch (error) {
+      setNotice(error.message);
+    }
+  };
+
+  const renderLlmManager = () => (
+    <section className="llm-page">
+      <div className="section-heading llm-heading">
+        <div>
+          <span className="overline">LLM CLIENT MANAGER</span>
+          <h2>模型管理</h2>
+          <p>管理接入的 LLM 客户端。把某个客户端设为“默认”后，整个软件所有需要 LLM 的地方（故事板构思、H3 分镜补全、预制片规划）都会使用它。</p>
+        </div>
+        <button className="glow-button" onClick={openNewLlm}>
+          <Plus size={15} /> 新增客户端
+        </button>
+      </div>
+
+      {llmClients.length ? (
+        <div className="llm-client-list">
+          {llmClients.map((client) => {
+            const isDefault = llmActive?.profile_id === client.id;
+            const available = client.available;
+            return (
+              <article className={"llm-client-card " + (isDefault ? "default " : "") + (available ? "" : "offline")} key={client.id}>
+                <div className="llm-client-head">
+                  <div className={"llm-client-icon " + (available ? "" : "offline")}>
+                    <Server size={17} />
+                  </div>
+                  <div className="llm-client-title">
+                    <strong>{client.display_name}</strong>
+                    <small>{client.id} · {client.source === "env" ? "环境变量接入" : "本机客户端"}</small>
+                  </div>
+                  {isDefault ? (
+                    <span className="llm-default-badge">默认</span>
+                  ) : (
+                    <button className="outline-button compact" onClick={() => setDefaultLlmClient(client)} disabled={!available}>
+                      设为默认
+                    </button>
+                  )}
+                </div>
+                <dl className="llm-client-meta">
+                  <div><dt>模型</dt><dd>{client.model || "未配置"}</dd></div>
+                  <div><dt>接口</dt><dd>{client.wire_api}</dd></div>
+                  <div><dt>Base URL</dt><dd>{client.base_url || "未配置"}</dd></div>
+                  <div><dt>状态</dt><dd className={available ? "ok" : "err"}>{available ? "可用" : "不可用"}</dd></div>
+                </dl>
+                <div className="llm-client-actions">
+                  <button className="outline-button" onClick={() => openEditLlm(client)}>编辑</button>
+                  {client.source === "db" ? (
+                    <button className="outline-button danger" onClick={() => deleteLlmClient(client)}>删除</button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-library llm-empty">
+          <Server size={20} />
+          <span>还没有接入的 LLM 客户端。点击“新增客户端”添加首个模型。</span>
+        </div>
+      )}
+
+      {llmDialog ? (
+        <motion.div className="director-dialog-backdrop" initial={false} animate={{ opacity: 1 }} onMouseDown={() => setLlmDialog(false)}>
+          <motion.form className="director-dialog" initial={{ y: 8, scale: 0.99 }} animate={{ opacity: 1, y: 0, scale: 1 }} onSubmit={submitLlmClient} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="dialog-head">
+              <div>
+                <span className="overline">{editingLlm ? "EDIT LLM CLIENT" : "ADD LLM CLIENT"}</span>
+                <h2>{editingLlm ? "编辑 LLM 客户端" : "新增 LLM 客户端"}</h2>
+                <p>填写 OpenAI 兼容的接入信息，保存后即可在项目中切换并使用。</p>
+              </div>
+              <button type="button" onClick={() => setLlmDialog(false)} aria-label="关闭">
+                <X size={17} />
+              </button>
+            </div>
+            {editingLlm ? null : (
+              <label className="dialog-field">
+                <span>客户端 ID（唯一标识）</span>
+                <input value={llmDraft.id} onChange={(e) => setLlmDraft((draft) => ({ ...draft, id: e.target.value }))} placeholder="例如：deepseek / qwen / local" />
+                <small className="field-hint">仅允许字母、数字、下划线和连字符。</small>
+              </label>
+            )}
+            <label className="dialog-field">
+              <span>显示名称</span>
+              <input value={llmDraft.display_name} onChange={(e) => setLlmDraft((draft) => ({ ...draft, display_name: e.target.value }))} placeholder="例如：DeepSeek-V3 / 本地 Qwen" />
+            </label>
+            <label className="dialog-field">
+              <span>Base URL</span>
+              <input value={llmDraft.base_url} onChange={(e) => setLlmDraft((draft) => ({ ...draft, base_url: e.target.value }))} placeholder="https://api.example.com/v1" />
+            </label>
+            <label className="dialog-field">
+              <span>API Key</span>
+              <input type="password" value={llmDraft.api_key} onChange={(e) => setLlmDraft((draft) => ({ ...draft, api_key: e.target.value }))} placeholder={editingLlm ? "留空保持不变" : "sk-…"} />
+              <small className="field-hint">仅保存在服务器，不会回传到浏览器。</small>
+            </label>
+            <label className="dialog-field">
+              <span>模型名</span>
+              <input value={llmDraft.model} onChange={(e) => setLlmDraft((draft) => ({ ...draft, model: e.target.value }))} placeholder="例如：deepseek-chat / qwen-plus" />
+            </label>
+            <label className="dialog-field">
+              <span>接口协议</span>
+              <select value={llmDraft.wire_api} onChange={(e) => setLlmDraft((draft) => ({ ...draft, wire_api: e.target.value }))}>
+                <option value="chat_completions">chat_completions</option>
+                <option value="responses">responses</option>
+              </select>
+            </label>
+            <div className="dialog-actions">
+              <button type="button" className="outline-button" onClick={() => setLlmDialog(false)}>取消</button>
+              <button type="submit" className="glow-button" disabled={llmSaving}>{llmSaving ? "保存中…" : "保存客户端"}</button>
+            </div>
+          </motion.form>
+        </motion.div>
+      ) : null}
+    </section>
+  );
   return (
     <div className="nautilus-app">
       <aside className="side-rail">
@@ -1805,6 +2143,7 @@ function App() {
           { id: "library", icon: Library, label: "素材库" },
           { id: "storyboard", icon: Clapperboard, label: "故事板" },
           { id: "render", icon: Aperture, label: "渲染中心" },
+          { id: "llm", icon: Server, label: "模型管理" },
         ].map(({ id, icon: Icon, label }) => (
           <button
             key={id}
@@ -1899,6 +2238,10 @@ function App() {
           </div>
         </header>
 
+        {activeTab === "llm" ? (
+          renderLlmManager()
+        ) : (
+          <>
         <section className="hero-card">
           <div className="hero-orbit orbit-one" />
           <div className="hero-orbit orbit-two" />
@@ -2256,6 +2599,21 @@ function App() {
               </span>
             </div>
             <div className="storyboard-actions-row">
+              <select className="outline-button" value={plannerProfileId} onChange={(event) => setPlannerProfileId(event.target.value)} aria-label="Studio LLM">
+                {plannerProfiles.map((item) => <option key={item.id} value={item.id} disabled={!item.available}>{item.display_name} · {item.model || "未配置"}</option>)}
+              </select>
+              <input className="outline-input" value={plannerModel} onChange={(event) => setPlannerModel(event.target.value)} placeholder="可选：覆盖模型名" aria-label="覆盖 Planner 模型名" />
+              <button className="outline-button" onClick={savePlannerActive} disabled={busy || !plannerProfiles.some((item) => item.id === plannerProfileId && item.available)}>
+                <Settings2 size={14} /> 切换并保存 LLM
+              </button>
+              <button className="outline-button" onClick={() => startH3Enrichment(false)} disabled={busy || !project.shots?.length || !plannerProfiles.some((item) => item.id === plannerProfileId && item.available) || project.batch_planning_run?.status === "complete"}>
+                <Sparkles size={14} /> {project.batch_planning_run?.completed_shot_ids?.length ? "生成下一批 6 镜" : "生成首批 6 镜"}
+              </button>
+              {project.batch_planning_run?.status === "complete" ? (
+                <button className="outline-button" onClick={() => startH3Enrichment(true)} disabled={busy || !project.shots?.length || !plannerProfiles.some((item) => item.id === plannerProfileId && item.available)}>
+                  <RefreshCw size={14} /> 用当前 LLM 重跑 H3
+                </button>
+              ) : null}
               <button className="outline-button" onClick={openProjectEditor}>
                 <Pencil size={13} /> 编辑整体设定
               </button>
@@ -2265,10 +2623,13 @@ function App() {
               >
                 <Play size={14} /> 查看渲染
               </button>
+              <button className="outline-button" onClick={createPreproductionPlan} disabled={busy || !project.shots?.length || (project.batch_planning_run && project.batch_planning_run.status !== "complete")}>
+                <Sparkles size={14} /> 生成预制片计划
+              </button>
               <button
                 className="glow-button storyboard-render-button"
                 onClick={render}
-                disabled={busy || jobActive || !project.shots?.length}
+                disabled={busy || jobActive || !project.shots?.length || (project.preproduction_plan && project.preproduction_plan.status !== "ready")}
               >
                 <Play size={14} />{" "}
                 {jobActive
@@ -2278,6 +2639,32 @@ function App() {
                     : "开始制作"}
               </button>
             </div>
+            {preproductionError ? <section className="planning-error" role="alert"><CircleAlert size={17} /><div><b>预制片计划没有生成</b><span>{preproductionError}</span></div></section> : null}
+            {project.batch_planning_run ? (() => {
+              const batchRun = project.batch_planning_run;
+              const total = project.shots?.length || 0;
+              const done = batchRun.completed_shot_ids?.length || 0;
+              const pending = total - done;
+              const canContinue = ["paused", "failed"].includes(batchRun.status) && pending > 0;
+              return <section className="planning-error">
+                <Sparkles size={17} />
+                <div>
+                  <b>H3 分镜批处理 · {batchRun.status}</b>
+                  <span>已完成 {done} / {total} 镜；{pending > 0 ? `还剩 ${pending} 镜待续生成。` : "本批已完成全部镜头。"}{batchRun.last_error ? " " + batchRun.last_error : ""}</span>
+                </div>
+                {canContinue ? <button className="outline-button" onClick={() => startH3Enrichment(false)} disabled={busy}>{batchRun.status === "failed" ? "重试" : "续生成"}</button> : null}
+              </section>;
+            })() : null}
+            {(preproduction || project.preproduction_plan) ? (() => {
+              const plan = preproduction || project.preproduction_plan;
+              return <section className="preproduction-panel">
+                <span className="overline">05 · PREPRODUCTION</span>
+                <h3>预制片规划 · {preproductionStatusLabel[plan.status] || plan.status}</h3>
+                <p>{plan.generated_image_count ? "需补 " + plan.generated_image_count + " 张独立镜头首帧；确认后才会发起生图。" : "不需要补图；全部首帧已有来源。"} {plan.blockers?.length ? "另有 " + plan.blockers.length + " 项需要处理。" : ""}</p>
+                <details className="preproduction-rows"><summary>查看 {plan.shot_plans?.length || 0} 镜的首帧与转场判定</summary>{(plan.shot_plans || []).map((item) => <article key={item.shot_id}><b>镜头 {item.shot_index + 1}</b><span>{startFrameSourceLabel[item.start_frame_source] || item.start_frame_source} · {planTransitionLabel[item.transition_kind] || item.transition_kind}</span><small>{planReasonLabel[item.gap_reason] || item.gap_reason || item.script_evidence}</small></article>)}</details>
+                {plan.status === "awaiting_approval" ? <button className="glow-button" onClick={approvePreproductionPlan} disabled={busy}>确认计划并补齐 {plan.generated_image_count} 张缺失首帧</button> : null}
+              </section>;
+            })() : null}
             <div className="story-strip">
               {project.status === "planning" &&
               !(project.shots || []).length ? (
@@ -2480,6 +2867,8 @@ function App() {
             <p>先在灵感简报中生成故事板，再回到这里开始制作。</p>
           </section>
         ) : null}
+          </>
+        )}
         <footer className="footer-note">
           <span>NAUTILUS STUDIO · CREATOR-FIRST AI FILM WORKSHOP</span>
           <span>
@@ -2976,6 +3365,38 @@ function App() {
                       }
                     />
                   </label>
+                  <section className="shot-prompt-section">
+                    <div className="shot-prompt-section-head">
+                      <div>
+                        <strong>声音设计</strong>
+                        <small>
+                          环境声、画内音效与观众听到的配乐分开描述。
+                        </small>
+                      </div>
+                    </div>
+                    <label className="dialog-field">
+                      <span>环境声与动作音效 · 角色可听</span>
+                      <textarea
+                        rows="4"
+                        value={shotDraft.audio_prompt}
+                        onChange={(event) =>
+                          updateShotDraft("audio_prompt", event.target.value)
+                        }
+                        placeholder="环境底噪、脚步、衣物、风声、物体碰撞等；不要写对白。"
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>非画内配乐 · 仅观众可听</span>
+                      <textarea
+                        rows="3"
+                        value={shotDraft.music_prompt}
+                        onChange={(event) =>
+                          updateShotDraft("music_prompt", event.target.value)
+                        }
+                        placeholder="留空表示无配乐。"
+                      />
+                    </label>
+                  </section>
                 </div>
                 <div>
                   <div className="dialog-field-row">
@@ -3031,265 +3452,6 @@ function App() {
                       <option value="anchor">新首帧锚点</option>
                     </select>
                   </label>
-                  <section className="shot-prompt-section h3-storyboard-editor">
-                    <div className="shot-prompt-section-head">
-                      <div>
-                        <strong>H3 分镜时间线</strong>
-                        <small>
-                          Agent 生成的可观测状态、连续性与逐拍动作会直接编译进
-                          H3 Prompt。
-                        </small>
-                      </div>
-                    </div>
-                    <label className="dialog-field">
-                      <span>开场状态 · 第一帧可见事实</span>
-                      <textarea
-                        required
-                        rows="3"
-                        value={shotDraft.opening_state}
-                        onChange={(event) =>
-                          updateShotDraft("opening_state", event.target.value)
-                        }
-                      />
-                    </label>
-                    <label className="dialog-field">
-                      <span>收尾状态 · 最后一帧可见事实</span>
-                      <textarea
-                        required
-                        rows="3"
-                        value={shotDraft.ending_state}
-                        onChange={(event) =>
-                          updateShotDraft("ending_state", event.target.value)
-                        }
-                      />
-                    </label>
-                    <label className="dialog-field">
-                      <span>跨镜连续性 Handoff</span>
-                      <textarea
-                        required
-                        rows="3"
-                        value={shotDraft.continuity_handoff}
-                        onChange={(event) =>
-                          updateShotDraft(
-                            "continuity_handoff",
-                            event.target.value,
-                          )
-                        }
-                        placeholder="身份、服装、道具、空间、运动方向、光线、机位与环境声。"
-                      />
-                    </label>
-                    <label className="dialog-field">
-                      <span>本镜 Hook · 单一注意力焦点</span>
-                      <textarea
-                        required
-                        rows="2"
-                        value={shotDraft.hook}
-                        onChange={(event) =>
-                          updateShotDraft("hook", event.target.value)
-                        }
-                      />
-                    </label>
-                    <label className="dialog-field">
-                      <span>语义参考锚点 · 每行一个</span>
-                      <textarea
-                        required
-                        rows="3"
-                        value={(shotDraft.reference_anchors || []).join("\n")}
-                        onChange={(event) =>
-                          updateShotDraft(
-                            "reference_anchors",
-                            event.target.value.split("\n"),
-                          )
-                        }
-                        placeholder="Character identity: …\nScene geography: …\nProp identity: …"
-                      />
-                    </label>
-                    <div className="h3-beat-list">
-                      {(shotDraft.visual_beats || []).map((beat, index) => (
-                        <div
-                          className="dialogue-line-card h3-beat-card"
-                          key={`beat-${index}`}
-                        >
-                          <div className="dialogue-line-title">
-                            <span>
-                              BEAT {String(index + 1).padStart(2, "0")}
-                            </span>
-                            <small>
-                              {Number(beat.start_seconds).toFixed(1)}s–
-                              {Number(beat.end_seconds).toFixed(1)}s
-                            </small>
-                          </div>
-                          <div className="dialog-field-row">
-                            <label className="dialog-field">
-                              <span>开始秒数</span>
-                              <input
-                                required
-                                type="number"
-                                min="0"
-                                step="0.1"
-                                value={beat.start_seconds}
-                                onChange={(event) =>
-                                  updateVisualBeat(
-                                    index,
-                                    "start_seconds",
-                                    event.target.value,
-                                  )
-                                }
-                              />
-                            </label>
-                            <label className="dialog-field">
-                              <span>结束秒数</span>
-                              <input
-                                required
-                                type="number"
-                                min="0.1"
-                                max={shotDraft.duration_seconds}
-                                step="0.1"
-                                value={beat.end_seconds}
-                                onChange={(event) =>
-                                  updateVisualBeat(
-                                    index,
-                                    "end_seconds",
-                                    event.target.value,
-                                  )
-                                }
-                              />
-                            </label>
-                          </div>
-                          <label className="dialog-field">
-                            <span>唯一主动作</span>
-                            <textarea
-                              required
-                              rows="2"
-                              value={beat.visual_action}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "visual_action",
-                                  event.target.value,
-                                )
-                              }
-                            />
-                          </label>
-                          <label className="dialog-field">
-                            <span>状态变化</span>
-                            <textarea
-                              rows="2"
-                              value={beat.state_change}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "state_change",
-                                  event.target.value,
-                                )
-                              }
-                            />
-                          </label>
-                          <label className="dialog-field">
-                            <span>镜头运动 · 类型 / 幅度 / 速度</span>
-                            <input
-                              value={beat.camera}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "camera",
-                                  event.target.value,
-                                )
-                              }
-                            />
-                          </label>
-                          <label className="dialog-field">
-                            <span>与动作同步的声音</span>
-                            <input
-                              value={beat.sound}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "sound",
-                                  event.target.value,
-                                )
-                              }
-                            />
-                          </label>
-                          <label className="dialog-field">
-                            <span>表演与表情</span>
-                            <textarea
-                              rows="2"
-                              value={beat.performance || ""}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "performance",
-                                  event.target.value,
-                                )
-                              }
-                              placeholder="重心、眼神、面部微表情与动作阶段。"
-                            />
-                          </label>
-                          <label className="dialog-field">
-                            <span>屏幕空间锚点</span>
-                            <input
-                              value={beat.spatial_anchor || ""}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "spatial_anchor",
-                                  event.target.value,
-                                )
-                              }
-                              placeholder="左/右位置、固定地标、前中后景。"
-                            />
-                          </label>
-                          <label className="dialog-field">
-                            <span>Beat handoff</span>
-                            <input
-                              value={beat.handoff || ""}
-                              onChange={(event) =>
-                                updateVisualBeat(
-                                  index,
-                                  "handoff",
-                                  event.target.value,
-                                )
-                              }
-                              placeholder="下一拍继承的姿态或道具状态。"
-                            />
-                          </label>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                  <section className="shot-prompt-section">
-                    <div className="shot-prompt-section-head">
-                      <div>
-                        <strong>声音设计</strong>
-                        <small>
-                          环境声、画内音效与观众听到的配乐分开描述。
-                        </small>
-                      </div>
-                    </div>
-                    <label className="dialog-field">
-                      <span>环境声与动作音效 · 角色可听</span>
-                      <textarea
-                        rows="4"
-                        value={shotDraft.audio_prompt}
-                        onChange={(event) =>
-                          updateShotDraft("audio_prompt", event.target.value)
-                        }
-                        placeholder="环境底噪、脚步、衣物、风声、物体碰撞等；不要写对白。"
-                      />
-                    </label>
-                    <label className="dialog-field">
-                      <span>非画内配乐 · 仅观众可听</span>
-                      <textarea
-                        rows="3"
-                        value={shotDraft.music_prompt}
-                        onChange={(event) =>
-                          updateShotDraft("music_prompt", event.target.value)
-                        }
-                        placeholder="留空表示无配乐。"
-                      />
-                    </label>
-                  </section>
                   <section className="shot-prompt-section dialogue-editor">
                     <div className="shot-prompt-section-head">
                       <div>
@@ -3562,6 +3724,233 @@ function App() {
                     </div>
                   </div>
                 </div>
+                <section className="shot-prompt-section h3-storyboard-editor">
+                  <div className="shot-prompt-section-head">
+                    <div>
+                      <strong>H3 分镜时间线</strong>
+                      <small>
+                        Agent 生成的可观测状态、连续性与逐拍动作会直接编译进
+                        H3 Prompt。
+                      </small>
+                    </div>
+                  </div>
+                  <label className="dialog-field">
+                    <span>开场状态 · 第一帧可见事实</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={shotDraft.opening_state}
+                      onChange={(event) =>
+                        updateShotDraft("opening_state", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>收尾状态 · 最后一帧可见事实</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={shotDraft.ending_state}
+                      onChange={(event) =>
+                        updateShotDraft("ending_state", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>跨镜连续性 Handoff</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={shotDraft.continuity_handoff}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "continuity_handoff",
+                          event.target.value,
+                        )
+                      }
+                      placeholder="身份、服装、道具、空间、运动方向、光线、机位与环境声。"
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>本镜 Hook · 单一注意力焦点</span>
+                    <textarea
+                      required
+                      rows="2"
+                      value={shotDraft.hook}
+                      onChange={(event) =>
+                        updateShotDraft("hook", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>语义参考锚点 · 每行一个</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={(shotDraft.reference_anchors || []).join("\n")}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "reference_anchors",
+                          event.target.value.split("\n"),
+                        )
+                      }
+                      placeholder="Character identity: …\nScene geography: …\nProp identity: …"
+                    />
+                  </label>
+                  <div className="h3-beat-list">
+                    {(shotDraft.visual_beats || []).map((beat, index) => (
+                      <div
+                        className="dialogue-line-card h3-beat-card"
+                        key={`beat-${index}`}
+                      >
+                        <div className="dialogue-line-title">
+                          <span>
+                            BEAT {String(index + 1).padStart(2, "0")}
+                          </span>
+                          <small>
+                            {Number(beat.start_seconds).toFixed(1)}s–
+                            {Number(beat.end_seconds).toFixed(1)}s
+                          </small>
+                        </div>
+                        <div className="dialog-field-row">
+                          <label className="dialog-field">
+                            <span>开始秒数</span>
+                            <input
+                              required
+                              type="number"
+                              min="0"
+                              step="0.1"
+                              value={beat.start_seconds}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "start_seconds",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>结束秒数</span>
+                            <input
+                              required
+                              type="number"
+                              min="0.1"
+                              max={shotDraft.duration_seconds}
+                              step="0.1"
+                              value={beat.end_seconds}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "end_seconds",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                        <label className="dialog-field">
+                          <span>唯一主动作</span>
+                          <textarea
+                            required
+                            rows="2"
+                            value={beat.visual_action}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "visual_action",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>状态变化</span>
+                          <textarea
+                            rows="2"
+                            value={beat.state_change}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "state_change",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>镜头运动 · 类型 / 幅度 / 速度</span>
+                          <input
+                            value={beat.camera}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "camera",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>与动作同步的声音</span>
+                          <input
+                            value={beat.sound}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "sound",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>表演与表情</span>
+                          <textarea
+                            rows="2"
+                            value={beat.performance || ""}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "performance",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="重心、眼神、面部微表情与动作阶段。"
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>屏幕空间锚点</span>
+                          <input
+                            value={beat.spatial_anchor || ""}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "spatial_anchor",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="左/右位置、固定地标、前中后景。"
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>Beat handoff</span>
+                          <input
+                            value={beat.handoff || ""}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "handoff",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="下一拍继承的姿态或道具状态。"
+                          />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </section>
               </div>
               <div className="dialog-actions">
                 <button

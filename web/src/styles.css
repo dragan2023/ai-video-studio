@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap");
 
 :root {
+  color-scheme: dark;
   color: #f5f4f0;
   background: #08090a;
   font-family: Manrope, Inter, ui-sans-serif, system-ui, sans-serif;
@@ -646,6 +647,24 @@ button:disabled {
   color: #ffe0ac;
   background: rgba(255, 153, 15, 0.1);
 }
+.outline-input {
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+  outline: none;
+  color: #d4d1c9;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+}
+.outline-input::placeholder {
+  color: #6f726d;
+}
+.outline-input:focus {
+  border-color: var(--line-hot);
+  color: #ffe0ac;
+  background: rgba(255, 153, 15, 0.08);
+}
 .mobile-menu {
   display: none;
 }
@@ -1085,6 +1104,7 @@ select:focus {
 }
 select {
   width: 100%;
+  color-scheme: dark;
   padding: 9px 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
@@ -1092,6 +1112,13 @@ select {
   color: #d4d1ca;
   background: #181a1b;
   font-size: 10px;
+}
+select option {
+  color: #e8e4dc;
+  background: #17191b;
+}
+select option:disabled {
+  color: #6f726d;
 }
 .quality-toggle {
   display: grid;
@@ -2053,6 +2080,29 @@ select {
   grid-template-columns: 1fr 1fr;
   gap: 9px;
 }
+
+.shot-dialog .dialog-columns > .h3-storyboard-editor {
+  grid-column: 1 / -1;
+}
+.shot-dialog .h3-storyboard-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.shot-dialog .h3-storyboard-editor .shot-prompt-section-head,
+.shot-dialog .h3-storyboard-editor .h3-beat-list {
+  grid-column: 1 / -1;
+}
+.shot-dialog .h3-storyboard-editor > .dialog-field {
+  margin-bottom: 0;
+}
+.h3-beat-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
 .shot-prompt-section {
   margin: 4px 0 16px;
   padding: 14px;
@@ -2326,5 +2376,144 @@ select {
   .footer-note {
     gap: 12px;
     flex-direction: column;
+  }
+}
+
+/* ---- LLM client manager ---- */
+.llm-page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+.llm-heading {
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 28px;
+}
+.llm-heading p {
+  max-width: 620px;
+  color: var(--muted, #8b8f9a);
+  margin: 8px 0 0;
+  line-height: 1.6;
+}
+.llm-client-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 18px;
+}
+.llm-client-card {
+  background: var(--panel, rgba(20, 22, 31, 0.78));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.llm-client-card.default {
+  border-color: var(--accent, #7c5cff);
+  box-shadow: 0 0 0 1px var(--accent, #7c5cff), 0 12px 40px rgba(124, 92, 255, 0.18);
+}
+.llm-client-card.offline {
+  opacity: 0.72;
+}
+.llm-client-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.llm-client-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: rgba(124, 92, 255, 0.14);
+  color: var(--accent, #a78bfa);
+  flex-shrink: 0;
+}
+.llm-client-icon.offline {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted, #8b8f9a);
+}
+.llm-client-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.llm-client-title strong {
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.llm-client-title small {
+  color: var(--muted, #8b8f9a);
+  font-size: 12px;
+}
+.llm-default-badge {
+  background: var(--accent, #7c5cff);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.llm-client-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin: 0;
+}
+.llm-client-meta div {
+  min-width: 0;
+}
+.llm-client-meta dt {
+  color: var(--muted, #8b8f9a);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.llm-client-meta dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llm-client-meta dd.ok {
+  color: #34d399;
+}
+.llm-client-meta dd.err {
+  color: #f87171;
+}
+.llm-client-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+.outline-button.danger {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+.outline-button.compact {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.llm-empty {
+  padding: 48px;
+  text-align: center;
+}
+@media (max-width: 720px) {
+  .llm-client-list {
+    grid-template-columns: 1fr;
+  }
+  .llm-heading {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
   }
 }

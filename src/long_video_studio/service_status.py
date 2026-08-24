@@ -5,6 +5,7 @@ import json
 import math
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -174,9 +175,13 @@ class ServiceStatusCollector:
         settings: Settings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        planner_view: Callable[[], dict[str, Any]] | None = None,
     ):
         self.settings = settings
         self.transport = transport
+        # Optional resolver for the *active* LLM client so the runtime status
+        # reflects the model-management default rather than stale env values.
+        self.planner_view = planner_view
         self.gpu_snapshots = GpuSnapshotReader(
             settings.gpu_snapshot_path,
             max_age_seconds=settings.gpu_snapshot_max_age_seconds,
@@ -276,24 +281,32 @@ class ServiceStatusCollector:
             self.settings.text_to_image_provider not in {"", "disabled", "none"}
             and self.settings.text_to_image_base_url
         )
+        comfyui_backend = self.settings.h3_backend == "comfyui"
+        video_provider = "comfyui" if comfyui_backend else "vllm-omni"
+        video_endpoint = self.settings.comfyui_url if comfyui_backend else None
+        video_health_path = "/system_stats" if comfyui_backend else "/health"
         return [
             {
                 "id": "fl2va",
                 "display_name": "MiniMax-H3 FL2VA",
                 "kind": "video",
-                "provider": "vllm-omni",
-                "model": "MiniMax-H3 / FL2VA",
-                "configured": bool(self.settings.h3_fl2va_url),
-                "endpoint": self.settings.h3_fl2va_url,
+                "provider": video_provider,
+                "model": "Work-Fisher MiniMax-H3" if comfyui_backend else "MiniMax-H3 / FL2VA",
+                "configured": self.settings.h3_configured("fl2va"),
+                "endpoint": video_endpoint if comfyui_backend else self.settings.h3_endpoint("fl2va"),
+                "health_path": video_health_path,
+                "metrics_path": None if comfyui_backend else "/metrics",
             },
             {
                 "id": "ref2va",
                 "display_name": "MiniMax-H3 Ref2VA",
                 "kind": "video",
-                "provider": "vllm-omni",
-                "model": "MiniMax-H3 / Ref2VA",
-                "configured": bool(self.settings.h3_ref2va_url),
-                "endpoint": self.settings.h3_ref2va_url,
+                "provider": video_provider,
+                "model": "Work-Fisher MiniMax-H3" if comfyui_backend else "MiniMax-H3 / Ref2VA",
+                "configured": self.settings.h3_configured("ref2va"),
+                "endpoint": video_endpoint if comfyui_backend else self.settings.h3_endpoint("ref2va"),
+                "health_path": video_health_path,
+                "metrics_path": None if comfyui_backend else "/metrics",
             },
             {
                 "id": "image_edit",
@@ -343,9 +356,10 @@ class ServiceStatusCollector:
             return result
 
         root = _service_root(str(spec["endpoint"]))
+        health_path = str(spec.get("health_path") or "/health")
         started = time.perf_counter()
         try:
-            response = await client.get(f"{root}/health")
+            response = await client.get(f"{root}{health_path}")
             result["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
             result["http_status"] = response.status_code
             if response.status_code >= 400:
@@ -365,9 +379,10 @@ class ServiceStatusCollector:
             result["error"] = _safe_error(error) or error.__class__.__name__
             return result
 
+        metrics_path = spec.get("metrics_path", "/metrics")
         try:
-            metrics = await client.get(f"{root}/metrics")
-            if metrics.status_code < 400:
+            metrics = await client.get(f"{root}{metrics_path}") if metrics_path else None
+            if metrics is not None and metrics.status_code < 400:
                 parsed = parse_vllm_omni_metrics(metrics.text)
                 result.update(
                     {
@@ -390,13 +405,22 @@ class ServiceStatusCollector:
         return result
 
     def _planner_status(self, project_ids: list[str], checked_at: datetime) -> dict[str, Any]:
-        configured = bool(self.settings.planner_base_url) or self.settings.planner_allow_fallback
+        if self.planner_view is not None:
+            view = self.planner_view()
+            provider = str(view.get("display_name") or view.get("profile_id") or "Storyboard Planner")
+            model = str(view.get("resolved_model") or "")
+            configured = bool(view.get("available"))
+            model = model or "deterministic fallback"
+        else:
+            configured = bool(self.settings.planner_base_url) or self.settings.planner_allow_fallback
+            provider = self.settings.planner_source
+            model = self.settings.planner_model or "deterministic fallback"
         return {
             "id": "planner",
             "display_name": "Storyboard Planner",
             "kind": "planner",
-            "provider": self.settings.planner_source,
-            "model": self.settings.planner_model or "deterministic fallback",
+            "provider": provider,
+            "model": model,
             "configured": configured,
             "state": "busy" if project_ids else ("ready" if configured else "unconfigured"),
             "healthy": None,

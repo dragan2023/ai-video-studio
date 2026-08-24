@@ -78,9 +78,7 @@ class RenderManager:
         self._semaphore = asyncio.Semaphore(settings.render_max_concurrency)
 
     def _h3_configured(self, task: str) -> bool:
-        if self.settings.h3_backend == "comfyui":
-            return bool(self.settings.comfyui_url and self.settings.comfyui_workflow)
-        return bool(self.settings.h3_fl2va_url if task == "fl2va" else self.settings.h3_ref2va_url)
+        return self.settings.h3_configured(task)
 
     def _h3_client(self, endpoint: str | None):
         if self.settings.h3_backend == "comfyui":
@@ -265,7 +263,7 @@ class RenderManager:
                     if not self._h3_configured("fl2va"):
                         raise RuntimeError("H3 FL2VA backend is not configured")
                     self._set_job_service(job, "fl2va")
-                    h3_client = self._h3_client(self.settings.h3_fl2va_url)
+                    h3_client = self._h3_client(self.settings.h3_endpoint("fl2va"))
                     await self._with_retries(
                         lambda: h3_client.generate_fl2va(
                             shot,
@@ -294,7 +292,7 @@ class RenderManager:
                         output_dir,
                     )
                     request_shot = self._with_continuation_rule(shot)
-                    h3_client = self._h3_client(self.settings.h3_ref2va_url)
+                    h3_client = self._h3_client(self.settings.h3_endpoint("ref2va"))
                     await self._with_retries(
                         lambda: h3_client.generate_ref2va(
                             request_shot,
@@ -320,7 +318,7 @@ class RenderManager:
                         raise RuntimeError("H3 Ref2VA backend is not configured")
                     self._set_job_service(job, "ref2va")
                     image, media = self._ref2va_inputs(shot)
-                    h3_client = self._h3_client(self.settings.h3_ref2va_url)
+                    h3_client = self._h3_client(self.settings.h3_endpoint("ref2va"))
                     await self._with_retries(
                         lambda: h3_client.generate_ref2va(
                             shot,

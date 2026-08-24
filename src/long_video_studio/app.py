@@ -20,7 +20,12 @@ from long_video_studio.services import StudioServices
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
     services = StudioServices.create(resolved)
-    planning_manager = PlanningManager(resolved, services.repository, services.planner)
+    planning_manager = PlanningManager(
+        resolved,
+        services.repository,
+        services.planner,
+        planner_factory=services.resolve_planner,
+    )
     render_manager = RenderManager(
         resolved,
         services.repository,

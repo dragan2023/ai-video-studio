@@ -482,7 +482,12 @@ def test_render_endpoint_schedules_background_job_on_event_loop(settings, monkey
         return None
 
     monkeypatch.setattr(RenderManager, "_run", no_op_run)
-    configured = replace(settings, h3_fl2va_url="http://fl2va.test")
+    configured = replace(
+        settings,
+        h3_backend="comfyui",
+        comfyui_url="http://comfy.test",
+        comfyui_workflow=settings.data_dir / "workflow.json",
+    )
     client = TestClient(create_app(configured))
     upload = client.post(
         "/api/assets/upload",

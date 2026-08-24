@@ -5,7 +5,7 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from long_video_studio.domain import AssetRecord, FilmProject, RenderJob, RenderObservation, utc_now
+from long_video_studio.domain import AssetRecord, FilmProject, LLMClient, RenderJob, RenderObservation, utc_now
 from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS
 
 
@@ -66,6 +66,18 @@ class StudioRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_render_observations_profile_task
                     ON render_observations(render_profile, task, created_at);
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS llm_clients (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
                 """
             )
 
@@ -213,6 +225,80 @@ class StudioRepository:
                 if beats:
                     beats[-1]["end_seconds"] = H3_MAX_SHOT_SECONDS
         return FilmProject.model_validate(data)
+
+    def get_active_planner(self) -> dict[str, str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM settings WHERE key = 'active_planner'"
+            ).fetchone()
+        if not row:
+            return {"profile_id": "default", "model": ""}
+        try:
+            data = json.loads(row["value"])
+        except (TypeError, ValueError):
+            return {"profile_id": "default", "model": ""}
+        return {
+            "profile_id": str(data.get("profile_id", "default")),
+            "model": str(data.get("model", "")),
+        }
+
+    def set_active_planner(self, profile_id: str, model: str = "") -> dict[str, str]:
+        value = json.dumps(
+            {"profile_id": profile_id, "model": model or ""},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO settings(key, value) VALUES ('active_planner', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (value,),
+            )
+        return {"profile_id": profile_id, "model": model or ""}
+
+    def list_llm_clients(self) -> list[LLMClient]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM llm_clients ORDER BY created_at ASC"
+            ).fetchall()
+        return [LLMClient.model_validate_json(row["payload"]) for row in rows]
+
+    def get_llm_client(self, client_id: str) -> LLMClient | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM llm_clients WHERE id = ?", (client_id,)
+            ).fetchone()
+        return LLMClient.model_validate_json(row["payload"]) if row else None
+
+    def save_llm_client(self, client: LLMClient) -> LLMClient:
+        client.updated_at = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO llm_clients(id, created_at, updated_at, payload)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    updated_at=excluded.updated_at,
+                    payload=excluded.payload
+                """,
+                (
+                    client.id,
+                    client.created_at.isoformat(),
+                    client.updated_at.isoformat(),
+                    json.dumps(client.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+        return client
+
+    def delete_llm_client(self, client_id: str) -> LLMClient | None:
+        existing = self.get_llm_client(client_id)
+        if not existing:
+            return None
+        with self._connect() as connection:
+            connection.execute("DELETE FROM llm_clients WHERE id = ?", (client_id,))
+        return existing
 
     def save_job(self, job: RenderJob) -> RenderJob:
         job.updated_at = utc_now()

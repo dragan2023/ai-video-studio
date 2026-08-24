@@ -221,7 +221,7 @@ def _parse_shot_block(block: list[str], position: int) -> RawShot | None:
         beats=beats,
         dialogue=dialogue,
         dialogue_flagged=dialogue_flagged,
-        source_section=f"{shot_no} · {title}",
+        source_section=f"{block[0].strip()}\n{prompt}",
     )
     return shot
 

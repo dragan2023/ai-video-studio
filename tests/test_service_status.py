@@ -273,3 +273,36 @@ def test_service_status_includes_studio_outer_queue_for_all_model_services(setti
         assert service["requests_waiting"] == 1
         assert service["state"] == "busy"
     assert {item["current_service_id"] for item in result["activity"]["render"]["jobs"]} == set(service_ids)
+
+
+def test_service_status_reports_comfyui_backend_ready(settings, tmp_path):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text("{}", encoding="utf-8")
+    configured = replace(
+        settings,
+        h3_backend="comfyui",
+        comfyui_url="http://comfy.test",
+        comfyui_workflow=workflow,
+    )
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/system_stats":
+            return httpx.Response(200, json={"system": {}})
+        return httpx.Response(404)
+
+    result = asyncio.run(
+        ServiceStatusCollector(
+            configured,
+            transport=httpx.MockTransport(handler),
+        ).collect(planning_project_ids=[], active_jobs=[])
+    )
+
+    services = {item["id"]: item for item in result["services"]}
+    for service_id in ("fl2va", "ref2va"):
+        assert services[service_id]["provider"] == "comfyui"
+        assert services[service_id]["model"] == "Work-Fisher MiniMax-H3"
+        assert services[service_id]["state"] == "ready"
+        assert services[service_id]["healthy"] is True
+    assert requests == ["/system_stats", "/system_stats"]

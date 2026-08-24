@@ -71,6 +71,21 @@ continuous clips and composes a new anchor only for the opening shot or a real
 scene cut. This avoids overwriting creator intent and duplicating motion across
 adjacent clips.
 
+## Visible preproduction approval
+
+Before a project renders, the Preproduction Planner presents every shot's source
+script evidence, transition decision, opening-frame source and asset gap in the
+creator UI. User material and explicit start frames remain immutable. Black or
+subtitle shots use a deterministic system black frame; only an approved,
+independent shot with no usable image reference may use the configured T2I
+provider. A matching cut, sound bridge, brightness match or occlusion transition
+is a visual hard cut and therefore never reuses the previous boundary frame.
+
+A GPT Image 2-compatible provider uses the existing `openai-compatible` T2I
+adapter. Configure its base URL, model and API key only in local `.env`; never
+store a key in a project, plan response or client state. The UI must show the
+planned image count and receive one explicit approval before image generation.
+
 ## Qwen model boundary
 
 The original Qwen-Image-Edit checkpoint uses the single-image
