@@ -52,6 +52,7 @@ class VllmOmniTextToImageProvider:
         true_cfg_scale: float,
         guidance_scale: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        openai_compatible: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -71,6 +72,7 @@ class VllmOmniTextToImageProvider:
         self.steps = steps
         self.true_cfg_scale = true_cfg_scale
         self.guidance_scale = guidance_scale
+        self.openai_compatible = openai_compatible
         self.transport = transport
 
     @property
@@ -82,16 +84,29 @@ class VllmOmniTextToImageProvider:
         headers: dict[str, str] = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        payload: dict[str, object] = {
-            "prompt": request.prompt,
-            "n": 1,
-            "size": f"{request.width}x{request.height}",
-            "response_format": "b64_json",
-            "output_format": "png",
-            "num_inference_steps": self.steps,
-            "true_cfg_scale": self.true_cfg_scale,
-            "guidance_scale": self.guidance_scale,
-        }
+        if self.openai_compatible:
+            # OpenAI /images/generations schema（gpt-image-2 等）。
+            if not self.model:
+                raise RuntimeError("openai-compatible text-to-image requires STUDIO_T2I_MODEL")
+            payload: dict[str, object] = {
+                "model": self.model,
+                "prompt": request.prompt,
+                "n": 1,
+                "size": f"{request.width}x{request.height}",
+                "response_format": "b64_json",
+            }
+        else:
+            # vLLM-Omni schema。
+            payload = {
+                "prompt": request.prompt,
+                "n": 1,
+                "size": f"{request.width}x{request.height}",
+                "response_format": "b64_json",
+                "output_format": "png",
+                "num_inference_steps": self.steps,
+                "true_cfg_scale": self.true_cfg_scale,
+                "guidance_scale": self.guidance_scale,
+            }
         if self.model:
             payload["model"] = self.model
         if request.negative_prompt:
@@ -193,4 +208,5 @@ def text_to_image_provider_from_settings(settings: Settings) -> TextToImageProvi
         steps=settings.text_to_image_steps,
         true_cfg_scale=settings.text_to_image_true_cfg_scale,
         guidance_scale=settings.text_to_image_guidance_scale,
+        openai_compatible=settings.text_to_image_provider == "openai-compatible",
     )
