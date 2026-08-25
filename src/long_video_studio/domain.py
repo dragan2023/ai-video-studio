@@ -690,6 +690,8 @@ class ExecutionPlan(BaseModel):
 class RenderJob(BaseModel):
     id: str = Field(default_factory=lambda: new_id("job"))
     project_id: str
+    # D7-M：单镜渲染支持。None=全项目顺序渲染；非空=只渲染这些 shot（其余不动、不组装 final.mp4）。
+    shot_ids: list[str] | None = None
     status: Literal["queued", "running", "complete", "failed"] = "queued"
     progress: float = Field(default=0, ge=0, le=1)
     current_shot_id: str | None = None

@@ -101,7 +101,7 @@ class RenderManager:
             self.settings.h3_quality,
         )
 
-    def submit(self, project_id: str, *, force: bool = False) -> RenderJob:
+    def submit(self, project_id: str, *, force: bool = False, shot_ids: list[str] | None = None) -> RenderJob:
         project = self.repository.get_project(project_id)
         if not project:
             raise KeyError(project_id)
@@ -116,6 +116,7 @@ class RenderManager:
         job = self.repository.save_job(
             RenderJob(
                 project_id=project_id,
+                shot_ids=shot_ids,
                 force_rerender=force,
                 max_retries=max(0, self.settings.render_retry_attempts - 1),
                 estimated_seconds=estimate.total_seconds,
@@ -173,11 +174,15 @@ class RenderManager:
         boundary_frames: dict[str, Path] = {}
         project_speaker_ids = stable_speaker_ids(project.shots, project.world_bible)
         ordered_shots = sorted(project.shots, key=lambda value: value.index)
+        # D7-M：单镜渲染（job.shot_ids 非空）时只处理指定镜头，其余不动。
+        selected_shot_ids = frozenset(job.shot_ids) if job.shot_ids else None
         width, height = self._video_canvas(project.brief.aspect_ratio)
         active_shot: ShotSpec | None = None
         active_started_monotonic: float | None = None
         try:
             for position, shot in enumerate(ordered_shots):
+                if selected_shot_ids is not None and shot.id not in selected_shot_ids:
+                    continue
                 job.current_shot_id = shot.id
                 job.progress = position / max(len(project.shots), 1)
                 job.message = f"rendering shot {position + 1}/{len(project.shots)}"
@@ -352,41 +357,55 @@ class RenderManager:
                 active_shot = None
                 active_started_monotonic = None
 
-            final_path = output_dir / "final.mp4"
-            scene_transitions = self._ultra_fast_scene_transitions(project)
-            continuous_boundaries = (
-                [False] * max(0, len(project.shots) - 1)
-                if scene_transitions is not None
-                else [
-                    bool(shot.continuity_from_shot_id and not shot.start_frame_asset_id) for shot in project.shots[1:]
-                ]
-            )
-            await asyncio.to_thread(
-                self.media.concatenate,
-                rendered,
-                final_path,
-                transition_seconds=(
-                    project.brief.ultra_fast_transition_seconds
+            if selected_shot_ids is None:
+                # 全量渲染：组装 final.mp4 + 字幕 + 项目完成
+                final_path = output_dir / "final.mp4"
+                scene_transitions = self._ultra_fast_scene_transitions(project)
+                continuous_boundaries = (
+                    [False] * max(0, len(project.shots) - 1)
                     if scene_transitions is not None
-                    else self.settings.transition_seconds
-                ),
-                continuous_boundaries=continuous_boundaries,
-                scene_transitions=scene_transitions,
-            )
-            subtitle_path = self._write_sidecar_subtitles(project, output_dir)
-            project.status = "complete"
-            self.repository.save_project(project)
-            job.status = "complete"
-            job.current_service_id = None
-            job.progress = 1
-            job.current_shot_id = None
-            job.message = "render complete"
-            job.output_path = str(final_path)
-            job.subtitle_path = str(subtitle_path) if subtitle_path else None
+                    else [
+                        bool(shot.continuity_from_shot_id and not shot.start_frame_asset_id) for shot in project.shots[1:]
+                    ]
+                )
+                await asyncio.to_thread(
+                    self.media.concatenate,
+                    rendered,
+                    final_path,
+                    transition_seconds=(
+                        project.brief.ultra_fast_transition_seconds
+                        if scene_transitions is not None
+                        else self.settings.transition_seconds
+                    ),
+                    continuous_boundaries=continuous_boundaries,
+                    scene_transitions=scene_transitions,
+                )
+                subtitle_path = self._write_sidecar_subtitles(project, output_dir)
+                project.status = "complete"
+                self.repository.save_project(project)
+                job.status = "complete"
+                job.current_service_id = None
+                job.progress = 1
+                job.current_shot_id = None
+                job.message = "render complete"
+                job.output_path = str(final_path)
+                job.subtitle_path = str(subtitle_path) if subtitle_path else None
+            else:
+                # 单镜渲染：不组装；产物写回该镜，项目恢复 planned，job 指向该镜 mp4
+                shot_output = next((p for p in rendered), None)
+                project.status = "planned"
+                self.repository.save_project(project)
+                job.status = "complete"
+                job.current_service_id = None
+                job.progress = 1
+                job.current_shot_id = None
+                job.message = "shot render complete"
+                job.output_path = str(shot_output) if shot_output else None
+                job.subtitle_path = None
             job.completed_at = utc_now()
             self.repository.save_job(job)
         except Exception as error:  # noqa: BLE001 - background job must persist failures
-            project.status = "failed"
+            project.status = "planned" if selected_shot_ids is not None else "failed"
             for shot in project.shots:
                 if shot.status == ShotStatus.RENDERING:
                     shot.status = ShotStatus.FAILED

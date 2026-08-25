@@ -825,6 +825,7 @@ def create_api_router() -> APIRouter:
         request: Request,
         project_id: str,
         force: bool = Query(False, description="Re-render every shot instead of reusing completed takes"),
+        shot_id: str | None = Query(None, description="单镜渲染：只重渲染这一个镜头，其余不动、不组装 final.mp4"),
     ) -> RenderJob:
         services = _services(request)
         project = services.repository.get_project(project_id)
@@ -835,6 +836,28 @@ def create_api_router() -> APIRouter:
                 status_code=409,
                 detail="preproduction plan must be approved and ready before rendering",
             )
+        if shot_id:
+            # D7-M 单镜渲染：只校验目标镜头（H3 backend），提交渲染指定镜头。
+            shot = next((item for item in project.shots if item.id == shot_id), None)
+            if not shot:
+                raise HTTPException(status_code=404, detail="shot not found")
+            runtime_task = effective_video_task(
+                shot,
+                ref2va_configured=services.settings.h3_configured("ref2va"),
+                fl2va_configured=services.settings.h3_configured("fl2va"),
+                continuation_mode=resolved_continuation_mode(project, shot),
+            )
+            missing_single: list[str] = []
+            if runtime_task == ShotTask.REF2VA and not services.settings.h3_configured("ref2va"):
+                missing_single.append("MiniMax-H3 Ref2VA backend")
+            elif runtime_task == ShotTask.FL2VA and not services.settings.h3_configured("fl2va"):
+                missing_single.append("MiniMax-H3 FL2VA backend")
+            if missing_single:
+                raise HTTPException(status_code=409, detail="制作前置条件未满足：" + "；".join(missing_single))
+            try:
+                return _runner(request).submit(project_id, force=force, shot_ids=[shot_id])
+            except KeyError as error:
+                raise HTTPException(status_code=404, detail="project not found") from error
         missing: list[str] = []
         ordered_shots = sorted(project.shots, key=lambda shot: shot.index)
         pending_shots = (
