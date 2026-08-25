@@ -2708,6 +2708,17 @@ function App() {
                     >
                       <Pencil size={11} /> 编辑镜头
                     </button>
+                    <button
+                      className="shot-canvas-button"
+                      type="button"
+                      onClick={() =>
+                        window.location.assign(
+                          `http://localhost:3000/canvas?nautilus-project=${encodeURIComponent(project.id)}&shot=${encodeURIComponent(shot.id)}`,
+                        )
+                      }
+                    >
+                      画布中重生成
+                    </button>
                   </div>
                   <div className="shot-meta">
                     <span>SHOT {String(index + 1).padStart(2, "0")}</span>

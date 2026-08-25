@@ -124,6 +124,44 @@ def test_single_shot_render_only_renders_target(settings):
     asyncio.run(scenario())
 
 
+def test_single_shot_force_does_not_clear_other_takes_or_final(settings):
+    async def scenario() -> None:
+        repository, project = _build_project(settings)
+        manager, fake_h3 = _make_manager(settings, repository)
+        ordered = sorted(project.shots, key=lambda s: s.index)
+        target = ordered[1]
+        other = ordered[0]
+        output_dir = manager.settings.output_dir / project.id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        other_take = output_dir / "shot-001.mp4"
+        other_boundary = output_dir / "shot-001-boundary.png"
+        old_target_take = output_dir / "shot-002.mp4"
+        final = output_dir / "final.mp4"
+        for path in (other_take, other_boundary, old_target_take, final):
+            path.write_bytes(b"old")
+        other.status = other.status.COMPLETE
+        other.selected_take_path = str(other_take)
+        other.boundary_frame_path = str(other_boundary)
+        target.status = target.status.COMPLETE
+        target.selected_take_path = str(old_target_take)
+        repository.save_project(project)
+
+        job = manager.submit(project.id, force=True, shot_ids=[target.id])
+        await manager._tasks[job.id]
+
+        assert fake_h3.calls == ["fl2va"]
+        persisted = repository.get_project(project.id)
+        by_id = {s.id: s for s in persisted.shots}
+        assert by_id[other.id].status.value == "complete"
+        assert by_id[other.id].selected_take_path == str(other_take)
+        assert other_take.is_file() and other_boundary.is_file()
+        assert final.is_file()  # 单镜 force 不删旧 final；后续全量 render 负责重组装
+        assert by_id[target.id].status.value == "complete"
+        assert by_id[target.id].selected_take_path == str(old_target_take)
+
+    asyncio.run(scenario())
+
+
 def test_full_render_still_assembles(settings):
     async def scenario() -> None:
         repository, project = _build_project(settings)

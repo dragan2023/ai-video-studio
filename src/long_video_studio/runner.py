@@ -165,8 +165,10 @@ class RenderManager:
         self.repository.save_project(project)
         output_dir = self.settings.output_dir / project.id
         output_dir.mkdir(parents=True, exist_ok=True)
+        selected_shot_ids = frozenset(job.shot_ids) if job.shot_ids else None
         if job.force_rerender:
-            self._clear_forced_render_state(project, output_dir)
+            # 单镜 force 只清目标镜；全量 force 才清全项目和 final.mp4。
+            self._clear_forced_render_state(project, output_dir, shot_ids=selected_shot_ids)
             project.updated_at = utc_now()
             self.repository.save_project(project)
         rendered: list[Path] = []
@@ -175,7 +177,6 @@ class RenderManager:
         project_speaker_ids = stable_speaker_ids(project.shots, project.world_bible)
         ordered_shots = sorted(project.shots, key=lambda value: value.index)
         # D7-M：单镜渲染（job.shot_ids 非空）时只处理指定镜头，其余不动。
-        selected_shot_ids = frozenset(job.shot_ids) if job.shot_ids else None
         width, height = self._video_canvas(project.brief.aspect_ratio)
         active_shot: ShotSpec | None = None
         active_started_monotonic: float | None = None
@@ -537,10 +538,20 @@ class RenderManager:
         return path
 
     @staticmethod
-    def _clear_forced_render_state(project: FilmProject, output_dir: Path) -> None:
-        """Make the explicit “again” action visibly and semantically fresh."""
+    def _clear_forced_render_state(
+        project: FilmProject,
+        output_dir: Path,
+        *,
+        shot_ids: frozenset[str] | None = None,
+    ) -> None:
+        """Make an explicit rerender fresh; single-shot mode never disturbs other shots/final cut."""
 
-        for shot in project.shots:
+        ordered_shots = sorted(project.shots, key=lambda value: value.index)
+        selected = shot_ids if shot_ids is not None else {shot.id for shot in ordered_shots}
+        prefixes: set[str] = set()
+        for position, shot in enumerate(ordered_shots):
+            if shot.id not in selected:
+                continue
             shot.status = ShotStatus.PLANNED
             shot.selected_take_path = None
             shot.boundary_frame_path = None
@@ -548,10 +559,13 @@ class RenderManager:
             shot.render_started_at = None
             shot.render_completed_at = None
             shot.render_duration_seconds = None
+            prefixes.add(f"shot-{position + 1:03d}")
         for path in output_dir.iterdir():
             if not path.is_file():
                 continue
-            if path.name.startswith("shot-") or path.name in {"final.mp4", "final.srt", "concat.txt"}:
+            if any(path.name.startswith(prefix) for prefix in prefixes):
+                path.unlink()
+            elif shot_ids is None and path.name in {"final.mp4", "final.srt", "concat.txt"}:
                 path.unlink()
 
     def _start_frame(self, shot, boundary_frames: dict[str, Path]) -> Path:
