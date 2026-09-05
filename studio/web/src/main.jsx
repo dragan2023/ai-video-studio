@@ -1,0 +1,4129 @@
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  Activity,
+  Aperture,
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  CircleAlert,
+  Clapperboard,
+  CloudUpload,
+  Film,
+  Gauge,
+  ImagePlus,
+  Library,
+  Menu,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Server,
+  Settings2,
+  Sparkles,
+  Trash2,
+  WandSparkles,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import "./styles.css";
+
+const api = async (path, options = {}) => {
+  const response = await fetch(path, options);
+  const body = await response.text();
+  let data;
+  try {
+    data = body ? JSON.parse(body) : null;
+  } catch {
+    data = body;
+  }
+  if (!response.ok) {
+    const detail = data?.detail;
+    const message =
+      (typeof detail === "string" ? detail : detail?.message) ||
+      data?.message ||
+      `Request failed (${response.status})`;
+    throw Object.assign(new Error(message), {
+      status: response.status,
+      projectId:
+        typeof detail === "object" && detail ? detail.project_id : null,
+    });
+  }
+  return data;
+};
+
+const preproductionStatusLabel = {
+  awaiting_approval: "等待你的确认",
+  generating_assets: "正在补齐首帧",
+  ready: "已就绪，可制作",
+  blocked: "已阻断，需要处理",
+};
+const startFrameSourceLabel = {
+  system_black: "系统黑场（免费）",
+  creator_asset: "已选素材首帧",
+  previous_boundary: "承接上一镜末帧",
+  generate_t2i: "待补首帧（需生图）",
+  needs_review: "需要你确认",
+};
+const planTransitionLabel = {
+  continuous: "连续承接",
+  hard_cut: "硬切",
+  match_cut: "匹配剪辑（视觉硬切）",
+  occlusion_cut: "遮挡转场（视觉硬切）",
+  anchor: "独立起镜",
+};
+const planReasonLabel = {
+  "black/subtitle shot": "黑场或字幕镜，不调用生图。",
+  "creator selected opening frame": "优先使用你选择的首帧素材。",
+  "independent shot has no image reference": "独立镜头缺少首帧；确认后才会补图。",
+  "explicit visual continuity": "承接上一镜最终画面。",
+};
+
+const roleLabel = {
+  reference: "参考",
+  character: "角色",
+  location: "场景",
+  prop: "道具",
+  style: "画风",
+  start_frame: "首帧",
+  audio: "声音",
+};
+
+const stylePresets = [
+  {
+    id: "cinematic",
+    label: "电影写实",
+    copy: "自然光 · 真实运动",
+    instructions: "电影级自然光，真实生活质感，连续运动，克制的镜头语言。",
+    color: "amber",
+  },
+  {
+    id: "documentary",
+    label: "纪录片",
+    copy: "手持感 · 生活质感",
+    instructions: "轻微手持跟拍，真实环境声，保留偶然性和人物呼吸感。",
+    color: "mint",
+  },
+  {
+    id: "music_video",
+    label: "音乐短片",
+    copy: "节奏感 · 强烈构图",
+    instructions: "节奏鲜明，构图大胆，色彩和动作随情绪推进，但保持主体连续。",
+    color: "violet",
+  },
+  {
+    id: "commercial",
+    label: "品牌广告",
+    copy: "精致光线 · 高级质感",
+    instructions: "精致布光，干净背景，主体清晰，动作有设计感，适合品牌叙事。",
+    color: "rose",
+  },
+  {
+    id: "noir",
+    label: "黑色电影",
+    copy: "低调光 · 悬疑氛围",
+    instructions:
+      "低调光和高反差，局部光源，沉静克制，营造悬疑但不牺牲可读性。",
+    color: "blue",
+  },
+  {
+    id: "animation",
+    label: "手绘动画",
+    copy: "笔触感 · 想象力",
+    instructions: "统一的手绘笔触和角色造型，动作流畅，色彩有童话般的层次。",
+    color: "peach",
+  },
+  {
+    id: "retro",
+    label: "复古胶片",
+    copy: "颗粒感 · 怀旧色调",
+    instructions:
+      "复古胶片颗粒，柔和高光，略微褪色的暖色调，像被保存下来的记忆。",
+    color: "amber",
+  },
+  {
+    id: "surreal",
+    label: "超现实",
+    copy: "梦境感 · 非日常",
+    instructions:
+      "现实空间中加入克制的梦境元素，保持人物身份、空间和动作的连续性。",
+    color: "violet",
+  },
+];
+
+const continuationModeOptions = [
+  {
+    id: "ultra_fast",
+    label: "极速续写",
+    hint: "每镜生成分镜首帧 · FL2VA · 适合约 15 秒短剧分镜",
+    dialogHint: "末帧 Image Edit 成新首帧 + 剪辑转场",
+  },
+  {
+    id: "fast",
+    label: "快速续写",
+    hint: "参考上一镜最后 5 秒 · Ref2VA · 默认更快",
+    dialogHint: "参考上一镜最后 5 秒",
+  },
+  {
+    id: "quality",
+    label: "高质量续写",
+    hint: "参考完整上一镜 · Ref2VA · 上下文最完整",
+    dialogHint: "参考完整上一镜",
+  },
+];
+
+const ultraFastAnchorOptions = [
+  {
+    id: "independent",
+    label: "分镜首帧",
+    hint: "默认 · 首镜按素材/T2I，后续以上一镜末帧 Image Edit 成新场景",
+  },
+  {
+    id: "boundary",
+    label: "末帧承接",
+    hint: "兼容模式 · 上一镜末帧直接作为下一镜首帧",
+  },
+];
+
+const ultraFastTransitionOptions = [
+  { id: "fade_black", label: "黑场淡入淡出" },
+  { id: "dissolve", label: "溶解" },
+  { id: "hard_cut", label: "硬切" },
+  { id: "random", label: "随机" },
+];
+
+const continuationModeMeta = (mode) =>
+  continuationModeOptions.find((item) => item.id === mode) ||
+  continuationModeOptions.find((item) => item.id === "quality");
+
+function loadCustomStyles() {
+  try {
+    const value = JSON.parse(
+      window.localStorage.getItem("nautilus.customStyles") || "[]",
+    );
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+const splitLines = (value) =>
+  String(value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+const joinLines = (value) =>
+  Array.isArray(value) ? value.join("\n") : String(value || "");
+
+function formatDuration(seconds) {
+  if (
+    seconds === null ||
+    seconds === undefined ||
+    Number.isNaN(Number(seconds))
+  )
+    return "—";
+  const rounded = Math.max(0, Math.round(Number(seconds)));
+  const minutes = Math.floor(rounded / 60);
+  const rest = rounded % 60;
+  return minutes ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
+}
+
+function shotRenderTiming(shot, now) {
+  if (
+    shot?.render_duration_seconds !== null &&
+    shot?.render_duration_seconds !== undefined
+  ) {
+    return `生成用时 ${formatDuration(shot.render_duration_seconds)}`;
+  }
+  if (shot?.status === "rendering" && shot?.render_started_at) {
+    const started = Date.parse(shot.render_started_at);
+    if (!Number.isNaN(started)) {
+      return `已用 ${formatDuration(Math.max(0, (now - started) / 1000))}`;
+    }
+  }
+  if (shot?.status === "complete" && shot?.selected_take_path) {
+    return "已完成 · 历史用时未记录";
+  }
+  return "尚未生成";
+}
+
+function resolvedContinuationMode(project, shot) {
+  return (
+    shot?.continuation_mode || project?.brief?.continuation_mode || "quality"
+  );
+}
+
+function ultraFastAnchorStrategy(project) {
+  return project?.brief?.ultra_fast_anchor_strategy || "independent";
+}
+
+function runtimeShotTask(project, shot) {
+  if (shot?.start_frame_asset_id) return "fl2va";
+  if (resolvedContinuationMode(project, shot) === "ultra_fast") return "fl2va";
+  if (shot?.continuity_from_shot_id) {
+    const mode = resolvedContinuationMode(project, shot);
+    return mode === "ultra_fast" ? "fl2va" : "ref2va";
+  }
+  return shot?.task || "fl2va";
+}
+
+function runtimeShotLabel(project, shot) {
+  if (shot.start_frame_asset_id) return "FL2VA · 显式首帧";
+  const task = runtimeShotTask(project, shot);
+  const mode = resolvedContinuationMode(project, shot);
+  if (mode === "ultra_fast") {
+    return ultraFastAnchorStrategy(project) === "independent"
+      ? "FL2VA · 极速短剧"
+      : "FL2VA · 极速承接";
+  }
+  if (shot.continuity_from_shot_id) {
+    return `REF2VA · ${continuationModeMeta(mode).label}`;
+  }
+  return String(task).toUpperCase();
+}
+
+function runtimeShotHint(project, shot) {
+  const mode = resolvedContinuationMode(project, shot);
+  if (mode === "ultra_fast") {
+    if (ultraFastAnchorStrategy(project) === "independent") {
+      return shot?.index === 0
+        ? "素材 Image Edit / 无素材 T2I → FL2VA"
+        : "上一镜末帧 Image Edit → 本镜首帧 → FL2VA";
+    }
+    return "上一镜末帧 → FL2VA";
+  }
+  if (!shot?.continuity_from_shot_id) return "";
+  return continuationModeMeta(mode).hint;
+}
+
+function openingFrameSourceLabel(project, shot, assets) {
+  if (shot.start_frame_asset_id) return "显式首帧";
+  if (shot.continuity_from_shot_id) return runtimeShotHint(project, shot);
+  const imageAssetIds = new Set(
+    assets.filter((asset) => asset.kind === "image").map((asset) => asset.id),
+  );
+  if (
+    (shot.reference_asset_ids || []).some((assetId) =>
+      imageAssetIds.has(assetId),
+    )
+  ) {
+    return "Image Edit 首帧";
+  }
+  return "T2I 首帧";
+}
+
+function transitionLabel(shot) {
+  return (
+    {
+      continuous: "连续动作",
+      camera_move: "同轴镜头运动",
+      match_cut: "匹配剪辑",
+      occlusion_cut: "遮挡转场",
+      hard_cut: "硬切",
+      anchor: "首帧锚点",
+    }[shot?.transition_kind] || "连续动作"
+  );
+}
+
+function frameUrl(projectId, shot, kind) {
+  const path =
+    kind === "anchor" ? shot.anchor_frame_path : shot.boundary_frame_path;
+  const version = encodeURIComponent(path || `${projectId}-${shot.id}`);
+  return `/api/projects/${projectId}/shots/${shot.id}/${kind}?v=${version}`;
+}
+
+function assetRoles(asset) {
+  return (asset.roles?.length ? asset.roles : ["reference"]).map(
+    (role) => roleLabel[role] || role,
+  );
+}
+
+function assetLabel(asset) {
+  return asset.display_name || asset.caption || asset.original_name;
+}
+
+function AssetCard({ asset, selected, onToggle, onEdit }) {
+  const image =
+    asset.kind === "image" ? `/api/assets/${asset.id}/content` : null;
+  return (
+    <motion.article
+      className={`asset-card ${selected ? "selected" : ""}`}
+      whileHover={{ y: -4 }}
+    >
+      <motion.button
+        className="asset-select"
+        whileTap={{ scale: 0.98 }}
+        onClick={() => onToggle(asset.id)}
+      >
+        <div className="asset-visual">
+          {image ? (
+            <img src={image} alt={assetLabel(asset)} />
+          ) : (
+            <div className="asset-file">
+              <Film size={25} />
+            </div>
+          )}
+          <span className="asset-check">
+            {selected ? <Check size={13} /> : <Plus size={13} />}
+          </span>
+        </div>
+        <div className="asset-copy">
+          <strong>{assetLabel(asset)}</strong>
+          <span>{assetRoles(asset).join(" · ")}</span>
+          {asset.tags?.length ? (
+            <small>{asset.tags.slice(0, 2).join("  ·  ")}</small>
+          ) : null}
+        </div>
+      </motion.button>
+      <button
+        className="asset-edit-button"
+        type="button"
+        onClick={() => onEdit(asset)}
+        aria-label={`编辑 ${assetLabel(asset)}`}
+      >
+        <Pencil size={12} />
+        编辑
+      </button>
+    </motion.article>
+  );
+}
+
+const serviceStateCopy = {
+  ready: "在线",
+  busy: "运行中",
+  queued: "排队中",
+  unconfigured: "未配置",
+  unreachable: "无法连接",
+  error: "异常",
+  unknown: "检查中",
+};
+
+function formatMib(value) {
+  if (value == null) return "—";
+  if (value >= 1024)
+    return `${(value / 1024).toFixed(value >= 10240 ? 0 : 1)} GiB`;
+  return `${Math.round(value)} MiB`;
+}
+
+function gpuTelemetryCopy(state, mapped = true) {
+  if (state === "ready") return mapped ? "GPU 遥测在线" : "该服务尚未映射 GPU";
+  if (state === "stale") return "GPU 遥测已过期";
+  if (state === "missing") return "GPU 快照暂不可用";
+  if (state === "invalid") return "GPU 快照格式无效";
+  return "GPU 遥测未接入";
+}
+
+function ServiceStatusRow({ service, telemetryState }) {
+  const gpu = service.gpu;
+  const stateCopy = serviceStateCopy[service.state] || service.state;
+  return (
+    <article className={`runtime-service state-${service.state}`}>
+      <div className="runtime-service-head">
+        <span className="runtime-service-dot" />
+        <div>
+          <strong>{service.display_name}</strong>
+          <small>
+            {service.provider || "provider"}
+            {service.model ? ` · ${service.model}` : ""}
+          </small>
+        </div>
+        <b>{stateCopy}</b>
+      </div>
+      {service.configured ? (
+        <div className="runtime-service-metrics">
+          {service.requests_running != null ? (
+            <span>
+              RUN <b>{service.requests_running}</b>
+            </span>
+          ) : null}
+          {service.requests_waiting != null ? (
+            <span>
+              WAIT <b>{service.requests_waiting}</b>
+            </span>
+          ) : null}
+          {service.latency_ms != null ? (
+            <span>
+              PING <b>{Math.round(service.latency_ms)} ms</b>
+            </span>
+          ) : null}
+          {service.error ? (
+            <span className="runtime-service-error">{service.error}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {gpu ? (
+        <div className={`runtime-gpu state-${gpu.state}`}>
+          <div className="runtime-gpu-summary">
+            <span>GPU UTIL</span>
+            <strong>
+              {gpu.utilization_percent == null
+                ? "—"
+                : `${Math.round(gpu.utilization_percent)}%`}
+            </strong>
+            <small>
+              {formatMib(gpu.memory_used_mib)} /{" "}
+              {formatMib(gpu.memory_total_mib)}
+              {gpu.temperature_c == null
+                ? ""
+                : ` · ${Math.round(gpu.temperature_c)}°C`}
+            </small>
+          </div>
+          <div className="runtime-gpu-bar" aria-hidden="true">
+            <i style={{ width: `${gpu.utilization_percent || 0}%` }} />
+          </div>
+          <div className="runtime-gpu-devices">
+            {gpu.devices.map((device) => (
+              <span key={`${device.node || "gpu"}-${device.index}`}>
+                GPU {device.index}
+                <b>
+                  {device.utilization_percent == null
+                    ? "—"
+                    : `${Math.round(device.utilization_percent)}%`}
+                </b>
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : service.kind !== "planner" ? (
+        <div className="runtime-gpu-empty">
+          {gpuTelemetryCopy(telemetryState, false)}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function RuntimeStatus({ status, job, open, onToggle, onClose }) {
+  const root = useRef(null);
+  const services = status?.services || [];
+  const orderedServices = useMemo(
+    () =>
+      services
+        .map((service, index) => ({ service, index }))
+        .sort(
+          (
+            { service: left, index: leftIndex },
+            { service: right, index: rightIndex },
+          ) => {
+            const leftOnline = ["ready", "busy", "queued"].includes(left.state);
+            const rightOnline = ["ready", "busy", "queued"].includes(
+              right.state,
+            );
+            if (leftOnline !== rightOnline) return leftOnline ? -1 : 1;
+
+            // The planner is useful context, but active model workers are more
+            // actionable while rendering, so keep planner last among online
+            // services. Offline services retain the backend's stable order.
+            if (leftOnline && rightOnline) {
+              const leftPlanner = left.id === "planner";
+              const rightPlanner = right.id === "planner";
+              if (leftPlanner !== rightPlanner) return leftPlanner ? 1 : -1;
+            }
+
+            // Keep the two H3 workers together ahead of planner/image services
+            // whenever they are in the same online/offline group.
+            const h3Rank = (service) =>
+              service.id === "fl2va" || service.id === "ref2va" ? 0 : 1;
+            const leftH3 = h3Rank(left);
+            const rightH3 = h3Rank(right);
+            if (leftH3 !== rightH3) return leftH3 - rightH3;
+            return leftIndex - rightIndex;
+          },
+        )
+        .map(({ service }) => service),
+    [services],
+  );
+  const configured = services.filter((service) => service.configured);
+  const available = configured.filter((service) =>
+    ["ready", "busy", "queued"].includes(service.state),
+  );
+  const running = job?.status === "running" || job?.status === "queued";
+  const degraded = status?.status === "degraded";
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointer = (event) => {
+      if (!root.current?.contains(event.target)) onClose();
+    };
+    const handleKey = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("pointerdown", handlePointer);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointer);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [open, onClose]);
+
+  return (
+    <div className="runtime-status" ref={root}>
+      <button
+        type="button"
+        className={`status-pill ${running ? "working" : degraded ? "degraded" : "ready"}`}
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="status-dot" />
+        {running
+          ? `${Math.round((job.progress || 0) * 100)}% 渲染中`
+          : status
+            ? `${available.length}/${configured.length} 服务在线`
+            : "检查服务"}
+        <ChevronDown size={11} className={open ? "rotate" : ""} />
+      </button>
+      {open ? (
+        <div className="runtime-popover">
+          <div className="runtime-popover-head">
+            <div>
+              <span className="overline">INFRASTRUCTURE</span>
+              <h3>运行状态</h3>
+              <p>
+                {status?.checked_at
+                  ? `更新于 ${new Date(status.checked_at).toLocaleTimeString()}`
+                  : "正在读取服务状态…"}
+              </p>
+            </div>
+            <div
+              className={`runtime-overall ${status ? (degraded ? "degraded" : "ready") : "checking"}`}
+            >
+              <Activity size={14} />
+              {status ? (degraded ? "部分异常" : "系统就绪") : "检查中"}
+            </div>
+          </div>
+          {status ? (
+            <>
+              <div className="runtime-worker-strip">
+                <span>
+                  <Server size={12} /> 渲染任务
+                  <b>{status.activity?.render?.active_count || 0}</b>
+                </span>
+                <span>
+                  并发
+                  <b>
+                    {status.activity?.render?.running_count || 0}/
+                    {status.activity?.render?.max_concurrency || 0}
+                  </b>
+                </span>
+                <span>
+                  构思
+                  <b>{status.activity?.planning?.active_count || 0}</b>
+                </span>
+              </div>
+              <div className="runtime-service-list">
+                {orderedServices.map((service) => (
+                  <ServiceStatusRow
+                    key={service.id}
+                    service={service}
+                    telemetryState={status.gpu_telemetry?.state}
+                  />
+                ))}
+              </div>
+              <div
+                className={`runtime-telemetry state-${status.gpu_telemetry?.state || "unknown"}`}
+              >
+                <span />
+                {status.gpu_telemetry?.state === "ready"
+                  ? `GPU 数据 ${Math.round(status.gpu_telemetry.age_seconds || 0)} 秒前采集`
+                  : status.gpu_telemetry?.state === "stale"
+                    ? "GPU 数据已过期，数值仅供参考"
+                    : `${gpuTelemetryCopy(status.gpu_telemetry?.state)}；服务健康状态仍可用`}
+              </div>
+            </>
+          ) : (
+            <div className="runtime-loading">正在探测 Planner 与模型服务…</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PlannerDebugConsole({ events, open, onToggle, onClear }) {
+  return (
+    <section className={`planner-debug ${open ? "is-open" : ""}`}>
+      <div className="planner-debug-bar">
+        <button type="button" className="text-button" onClick={onToggle}>
+          {open ? "收起 Debug Console" : "打开 Debug Console"} · {events.length}{" "}
+          events
+        </button>
+        {events.length > 0 && (
+          <button type="button" className="text-button muted" onClick={onClear}>
+            清空
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="planner-debug-body">
+          <p className="planner-debug-hint">
+            这里显示浏览器点击、planner 各阶段请求/响应和异常。payload
+            已做长度限制，不包含认证 header。
+          </p>
+          {events.length === 0 ? (
+            <div className="empty-state">
+              还没有 planner 事件。点击“开始构思”后这里会实时更新。
+            </div>
+          ) : (
+            [...events].reverse().map((event) => (
+              <details
+                className={`planner-debug-event status-${event.status}`}
+                key={event.id}
+              >
+                <summary>
+                  <span>{event.stage}</span>
+                  <span>{event.status}</span>
+                  <span>
+                    {event.created_at
+                      ? new Date(event.created_at).toLocaleTimeString()
+                      : ""}
+                  </span>
+                  <strong>{event.message || event.error || ""}</strong>
+                </summary>
+                <div className="planner-debug-content">
+                  {event.error && (
+                    <pre className="debug-error">{event.error}</pre>
+                  )}
+                  {event.request_payload && (
+                    <details>
+                      <summary>raw input</summary>
+                      <pre>{event.request_payload}</pre>
+                    </details>
+                  )}
+                  {event.response_payload && (
+                    <details>
+                      <summary>raw output</summary>
+                      <pre>{event.response_payload}</pre>
+                    </details>
+                  )}
+                </div>
+              </details>
+            ))
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function App() {
+  const [assets, setAssets] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [project, setProject] = useState(null);
+  const [preproduction, setPreproduction] = useState(null);
+  const [preproductionError, setPreproductionError] = useState("");
+  const [plannerProfiles, setPlannerProfiles] = useState([]);
+  const [plannerProfileId, setPlannerProfileId] = useState("default");
+  const [plannerModel, setPlannerModel] = useState("");
+  const [health, setHealth] = useState(null);
+  const [serviceStatus, setServiceStatus] = useState(null);
+  const [job, setJob] = useState(null);
+  const [renderEstimate, setRenderEstimate] = useState(null);
+  const [activeJobs, setActiveJobs] = useState([]);
+  const [projectDeleting, setProjectDeleting] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  const [title, setTitle] = useState("未命名影片");
+  const [duration, setDuration] = useState(60);
+  const [aspect, setAspect] = useState("16:9");
+  const [quality, setQuality] = useState("final");
+  const [continuationMode, setContinuationMode] = useState("quality");
+  const [ultraFastAnchor, setUltraFastAnchor] = useState("independent");
+  const [ultraFastTransition, setUltraFastTransition] = useState("fade_black");
+  const [style, setStyle] = useState("cinematic");
+  const [styleName, setStyleName] = useState(stylePresets[0].label);
+  const [styleInstructions, setStyleInstructions] = useState(
+    stylePresets[0].instructions,
+  );
+  const [registryStyles, setRegistryStyles] = useState(stylePresets);
+  const [customStyles, setCustomStyles] = useState(loadCustomStyles);
+  const [selected, setSelected] = useState(new Set());
+  const [uploadRole, setUploadRole] = useState("reference");
+  const [uploadTags, setUploadTags] = useState("");
+  const [activeTab, setActiveTab] = useState("brief");
+  const [llmClients, setLlmClients] = useState([]);
+  const [llmActive, setLlmActive] = useState(null);
+  const [llmDialog, setLlmDialog] = useState(false);
+  const [editingLlm, setEditingLlm] = useState(null);
+  const [llmDraft, setLlmDraft] = useState({ id: "", display_name: "", base_url: "", api_key: "", model: "", wire_api: "chat_completions" });
+  const [llmSaving, setLlmSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [renderBlocker, setRenderBlocker] = useState("");
+  const [planningError, setPlanningError] = useState("");
+  const [projectLoading, setProjectLoading] = useState(false);
+  const [plannerTrace, setPlannerTrace] = useState([]);
+  const [clientTrace, setClientTrace] = useState([]);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [runtimeStatusOpen, setRuntimeStatusOpen] = useState(false);
+  const [clockNow, setClockNow] = useState(Date.now());
+  const [editingAsset, setEditingAsset] = useState(null);
+  const [assetDraft, setAssetDraft] = useState({
+    display_name: "",
+    caption: "",
+    tags: "",
+    roles: ["reference"],
+  });
+  const [assetSaving, setAssetSaving] = useState(false);
+  const [assetDeleting, setAssetDeleting] = useState(false);
+  const [styleDialog, setStyleDialog] = useState(false);
+  const [styleDraft, setStyleDraft] = useState({ name: "", instructions: "" });
+  const [editingShot, setEditingShot] = useState(null);
+  const [shotDraft, setShotDraft] = useState(null);
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [projectDraft, setProjectDraft] = useState(null);
+  const [dialogSaving, setDialogSaving] = useState(false);
+  const [thickScriptDialog, setThickScriptDialog] = useState(false);
+  const [thickScriptFile, setThickScriptFile] = useState(null);
+  const [thickScriptAssetRoot, setThickScriptAssetRoot] = useState("");
+  const [thickScriptTitle, setThickScriptTitle] = useState("");
+  const [thickScriptSubmitting, setThickScriptSubmitting] = useState(false);
+  const fileInput = useRef(null);
+  const thickScriptInput = useRef(null);
+  const projectRequest = useRef(0);
+  const traceEpoch = useRef(0);
+  const traceHiddenBefore = useRef(0);
+
+  const addClientTrace = useCallback((status, message, payload = null) => {
+    setClientTrace((events) =>
+      [
+        ...events,
+        {
+          id: `client-${Date.now()}-${events.length}`,
+          created_at: new Date().toISOString(),
+          stage: "browser",
+          status: "client",
+          message: `${status}: ${message}`,
+          request_payload: payload ? JSON.stringify(payload, null, 2) : null,
+        },
+      ].slice(-40),
+    );
+  }, []);
+
+  const refreshPlannerTrace = useCallback(async (id) => {
+    if (!id) return;
+    const requestEpoch = traceEpoch.current;
+    try {
+      const value = await api(`/api/projects/${id}/planner-trace`);
+      if (requestEpoch !== traceEpoch.current) return;
+      const hiddenBefore = traceHiddenBefore.current;
+      const visible = (Array.isArray(value) ? value : []).filter((event) => {
+        if (!hiddenBefore || !event.created_at) return true;
+        const createdAt = Date.parse(event.created_at);
+        return Number.isNaN(createdAt) || createdAt >= hiddenBefore;
+      });
+      setPlannerTrace(visible);
+    } catch {
+      if (requestEpoch === traceEpoch.current) setPlannerTrace([]);
+    }
+  }, []);
+
+  const clearDebugTrace = useCallback(() => {
+    // Invalidate in-flight polls and hide the server events that existed at
+    // the moment of the click. Otherwise the next poll immediately restores
+    // the same trace and makes the button appear ineffective.
+    traceEpoch.current += 1;
+    traceHiddenBefore.current = Date.now();
+    setPlannerTrace([]);
+    setClientTrace([]);
+    setNotice("Debug Console 已清空");
+  }, []);
+  const styleRegistryRef = useRef(stylePresets);
+
+  const loadStylePresets = useCallback(async () => {
+    try {
+      const remote = await api("/api/style-presets");
+      if (!Array.isArray(remote) || !remote.length) return;
+      const next = remote.map((item) => ({
+        id: item.id,
+        label: item.label,
+        copy: item.copy,
+        instructions: item.ui_instructions || item.instructions || "",
+        color: item.color,
+      }));
+      styleRegistryRef.current = next;
+      setRegistryStyles(next);
+    } catch {
+      // Source-install fallback keeps the bundled short presets usable.
+    }
+  }, []);
+
+  const loadAssets = useCallback(
+    async () => setAssets((await api("/api/assets")) || []),
+    [],
+  );
+  const loadPlannerProfiles = useCallback(async () => {
+    const value = await api("/api/llm-clients");
+    const clients = value?.clients || [];
+    setLlmClients(clients);
+    setLlmActive(value?.active || null);
+    setPlannerProfiles(clients);
+    if (value?.active) {
+      setPlannerProfileId(value.active.profile_id || "default");
+      setPlannerModel(value.active.model || "");
+    }
+    return clients;
+  }, []);
+  const savePlannerActive = useCallback(async () => {
+    try {
+      const value = await api("/api/planner-profile/active", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: plannerProfileId, model: plannerModel }),
+      });
+      setPlannerProfileId(value.profile_id || plannerProfileId);
+      setPlannerModel(value.model || plannerModel);
+      setNotice("Studio LLM 已切换：" + value.display_name + (value.resolved_model ? " · " + value.resolved_model : ""));
+      await loadPlannerProfiles();
+      return value;
+    } catch (error) {
+      setNotice(error.message);
+      return null;
+    }
+  }, [plannerProfileId, plannerModel, loadPlannerProfiles]);
+  const loadProjects = useCallback(async () => {
+    const value = (await api("/api/projects")) || [];
+    setProjects(value);
+    return value;
+  }, []);
+  const loadActiveJobs = useCallback(async () => {
+    const value = (await api("/api/jobs/active")) || [];
+    setActiveJobs(value);
+    return value;
+  }, []);
+  const loadHealth = useCallback(async () => {
+    try {
+      const value = await api("/api/health");
+      setHealth(value);
+    } catch {
+      setHealth(null);
+    }
+  }, []);
+  const loadServiceStatus = useCallback(async () => {
+    try {
+      const value = await api("/api/services/status");
+      setServiceStatus(value);
+      return value;
+    } catch {
+      // Observability must never block planning or rendering. Preserve the
+      // last valid sample when a probe request itself fails.
+      return null;
+    }
+  }, []);
+
+  const availableStyles = useMemo(
+    () => [...registryStyles, ...customStyles],
+    [registryStyles, customStyles],
+  );
+
+  const loadProject = useCallback(
+    async (id) => {
+      if (!id) return;
+      const requestId = ++projectRequest.current;
+      const traceRequestEpoch = ++traceEpoch.current;
+      traceHiddenBefore.current = 0;
+      setProjectLoading(true);
+      // Clear the previous project before fetching so its video/job cannot be
+      // mistaken for the project the creator just selected.
+      setProject(null);
+      setJob(null);
+      setRenderBlocker("");
+      setRenderEstimate(null);
+      setSelected(new Set());
+      const [value, latest, trace, estimate] = await Promise.all([
+        api(`/api/projects/${id}`),
+        api(`/api/projects/${id}/jobs/latest`),
+        api(`/api/projects/${id}/planner-trace`).catch(() => []),
+        api(`/api/projects/${id}/render-estimate`).catch(() => null),
+      ]).finally(() => {
+        if (requestId === projectRequest.current) setProjectLoading(false);
+      });
+      if (requestId !== projectRequest.current) return;
+      setProject(value);
+      setPlanningError(
+        value.status === "failed" && !value.shots?.length
+          ? "上次构思未完成。项目草稿已保留，可以直接重新构思。"
+          : "",
+      );
+      setPrompt(value.brief.prompt);
+      setTitle(value.brief.title);
+      setDuration(value.brief.duration_seconds);
+      setAspect(value.brief.aspect_ratio);
+      setQuality(value.brief.quality || "final");
+      setContinuationMode(value.brief.continuation_mode || "quality");
+      setUltraFastAnchor(
+        value.brief.ultra_fast_anchor_strategy || "independent",
+      );
+      setUltraFastTransition(value.brief.ultra_fast_transition || "fade_black");
+      setStyle(value.brief.style_preset || "cinematic");
+      const loadedStyle = [...styleRegistryRef.current, ...customStyles].find(
+        (item) => item.id === (value.brief.style_preset || "cinematic"),
+      );
+      setStyleName(value.brief.style || loadedStyle?.label || "电影写实");
+      setStyleInstructions(
+        value.brief.style_instructions || loadedStyle?.instructions || "",
+      );
+      // Material selection belongs to the next planning request, not to the
+      // project being viewed.  Never repopulate the composer from a project's
+      // historical references during refresh/project switching; creators must
+      // explicitly opt assets into a new request.
+      setJob(latest);
+      setRenderEstimate(estimate);
+      if (traceRequestEpoch === traceEpoch.current) {
+        setPlannerTrace(Array.isArray(trace) ? trace : []);
+      }
+      setClientTrace([]);
+    },
+    [customStyles],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [, availableProjects] = await Promise.all([
+          loadAssets(),
+          loadPlannerProfiles(),
+          loadProjects(),
+          loadActiveJobs(),
+          loadStylePresets(),
+          loadHealth(),
+          loadServiceStatus(),
+        ]);
+        if (!cancelled && availableProjects.length)
+          await loadProject(availableProjects[0].id);
+      } catch (error) {
+        if (!cancelled) setNotice(error.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      projectRequest.current += 1;
+    };
+  }, [
+    loadAssets,
+    loadPlannerProfiles,
+    loadProjects,
+    loadActiveJobs,
+    loadStylePresets,
+    loadHealth,
+    loadServiceStatus,
+    loadProject,
+  ]);
+
+  useEffect(() => {
+    let inFlight = false;
+    const refresh = async () => {
+      if (document.visibilityState === "hidden" || inFlight) return;
+      inFlight = true;
+      try {
+        await loadServiceStatus();
+      } finally {
+        inFlight = false;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    const timer = window.setInterval(refresh, 5000);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [loadServiceStatus]);
+
+  useEffect(() => {
+    const projectId = project?.id;
+    const jobId = job?.id;
+    const jobStatus = job?.status;
+    if (!projectId || !jobId || !["running", "queued"].includes(jobStatus))
+      return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const [next, nextProject, nextEstimate] = await Promise.all([
+          api(`/api/jobs/${jobId}`),
+          api(`/api/projects/${projectId}`),
+          api(`/api/projects/${projectId}/render-estimate`).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setJob(next);
+        setProject(nextProject);
+        setRenderEstimate(nextEstimate);
+        void loadActiveJobs();
+        if (next.status === "complete") setNotice("成片已完成，可以开始预览");
+      } catch (error) {
+        if (!cancelled) setNotice(error.message);
+      }
+    };
+    void refresh();
+    const timer = setInterval(refresh, 3500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [job?.id, job?.status, project?.id, loadActiveJobs]);
+
+  useEffect(() => {
+    const h3Running = project?.batch_planning_run?.status === "running";
+    if ((project?.status !== "planning" && !h3Running) || !project?.id) return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const [next] = await Promise.all([
+          api(`/api/projects/${project.id}`),
+          refreshPlannerTrace(project.id),
+        ]);
+        if (cancelled) return;
+        setProject(next);
+        if (next.status !== "planning" && next.batch_planning_run?.status !== "running") {
+          await loadProjects();
+          if (next.status === "failed") {
+            setPlanningError(
+              "这次构思没有完成。项目草稿已保留，可以重新构思。",
+            );
+          } else {
+            setPlanningError("");
+            const batchRun = next.batch_planning_run;
+            const done = batchRun?.completed_shot_ids?.length || 0;
+            const total = next.shots?.length || 0;
+            if (batchRun?.status === "paused" && done < total) {
+              const batchSize = batchRun.batch_size || 6;
+              setNotice(`第 ${Math.floor(done / batchSize) + 1} 批已生成并入库；请审阅本批分镜后点击续生成。`);
+            } else {
+              setNotice("故事板生成完成，可以逐镜头检查和编辑");
+            }
+          }
+        }
+      } catch (error) {
+        if (!cancelled) setNotice(error.message);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [project?.id, project?.status, refreshPlannerTrace, loadProjects]);
+
+  useEffect(() => {
+    const refresh = () =>
+      Promise.all([loadProjects(), loadActiveJobs()]).catch(() => null);
+    const timer = window.setInterval(refresh, 3500);
+    return () => window.clearInterval(timer);
+  }, [loadProjects, loadActiveJobs]);
+
+  useEffect(() => {
+    if (!project?.id || project.status === "planning") return undefined;
+    let cancelled = false;
+    api(`/api/projects/${project.id}/render-estimate`)
+      .then((value) => {
+        if (!cancelled) setRenderEstimate(value);
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id, project?.status, project?.updated_at]);
+
+  useEffect(() => {
+    if (!job || !["running", "queued"].includes(job.status)) return undefined;
+    const timer = setInterval(() => setClockNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [job?.status]);
+
+  const selectedAssets = useMemo(
+    () => assets.filter((asset) => selected.has(asset.id)),
+    [assets, selected],
+  );
+  const toggleAsset = (id) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const openAssetEditor = (asset) => {
+    setEditingAsset(asset);
+    setAssetDraft({
+      display_name:
+        asset.display_name || asset.caption || asset.original_name || "",
+      caption: asset.caption || "",
+      tags: (asset.tags || []).join(", "),
+      roles: asset.roles?.length ? [...asset.roles] : ["reference"],
+    });
+  };
+
+  const toggleDraftRole = (role) =>
+    setAssetDraft((current) => ({
+      ...current,
+      roles: current.roles.includes(role)
+        ? current.roles.filter((value) => value !== role)
+        : [...current.roles, role],
+    }));
+
+  const saveAsset = async (event) => {
+    event.preventDefault();
+    if (!editingAsset) return;
+    setAssetSaving(true);
+    try {
+      await api(`/api/assets/${editingAsset.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          display_name: assetDraft.display_name.trim(),
+          caption: assetDraft.caption.trim(),
+          tags: [
+            ...new Set(
+              assetDraft.tags
+                .split(",")
+                .map((item) => item.trim().toLowerCase())
+                .filter(Boolean),
+            ),
+          ],
+          roles: assetDraft.roles.length ? assetDraft.roles : ["reference"],
+        }),
+      });
+      await loadAssets();
+      setEditingAsset(null);
+      setNotice("素材信息已更新，Agent 会使用新的角色和标签");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setAssetSaving(false);
+    }
+  };
+
+  const deleteAsset = async () => {
+    if (!editingAsset) return;
+    if (!window.confirm(`确认删除素材“${assetLabel(editingAsset)}”？`)) return;
+    setAssetDeleting(true);
+    try {
+      await api(`/api/assets/${editingAsset.id}`, { method: "DELETE" });
+      setSelected((current) => {
+        const next = new Set(current);
+        next.delete(editingAsset.id);
+        return next;
+      });
+      await loadAssets();
+      setEditingAsset(null);
+      setNotice("素材已删除");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setAssetDeleting(false);
+    }
+  };
+
+  const newProject = () => {
+    projectRequest.current += 1;
+    setProject(null);
+    setJob(null);
+    setRenderEstimate(null);
+    setPrompt("");
+    setTitle("未命名影片");
+    setDuration(60);
+    setAspect("16:9");
+    setQuality("final");
+    setContinuationMode("quality");
+    setUltraFastAnchor("independent");
+    setUltraFastTransition("fade_black");
+    setStyle("cinematic");
+    setStyleName(stylePresets[0].label);
+    setStyleInstructions(stylePresets[0].instructions);
+    setSelected(new Set());
+    setActiveTab("brief");
+    setPlanningError("");
+    traceEpoch.current += 1;
+    traceHiddenBefore.current = 0;
+    setPlannerTrace([]);
+    setClientTrace([]);
+  };
+
+  const deleteProject = async () => {
+    if (!project?.id || projectDeleting) return;
+    const active = activeJobs.find((item) => item.project_id === project.id);
+    if (active && ["queued", "running"].includes(active.status)) {
+      setNotice("这个项目正在渲染，完成或失败后才能删除");
+      return;
+    }
+    if (
+      !window.confirm(
+        `删除「${project.brief?.title || "未命名影片"}」及其生成视频？素材库不会被删除。`,
+      )
+    ) {
+      return;
+    }
+    const deletedId = project.id;
+    setProjectDeleting(true);
+    try {
+      await api(`/api/projects/${deletedId}`, { method: "DELETE" });
+      projectRequest.current += 1;
+      const remaining = await loadProjects();
+      await loadActiveJobs();
+      newProject();
+      if (remaining.length) {
+        await loadProject(remaining[0].id);
+      } else {
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+      setNotice("项目和生成结果已删除；共享素材仍保留在素材库");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setProjectDeleting(false);
+    }
+  };
+
+  const navigateWorkspace = (sectionId) => {
+    setActiveTab(sectionId);
+    if (sectionId === "llm") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    const target =
+      document.getElementById(sectionId) ||
+      document.getElementById("empty-workspace");
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (sectionId === "storyboard" && !project)
+      setNotice("先生成故事板，再查看分镜");
+    if (sectionId === "render" && !job)
+      setNotice(
+        project
+          ? "点击开始制作，渲染区会显示实时进度"
+          : "先生成故事板，再开始制作",
+      );
+  };
+
+  const makeBrief = () => ({
+    title,
+    prompt,
+    duration_seconds: Number(duration),
+    aspect_ratio: aspect,
+    style: styleName || "cinematic realism",
+    style_preset: style,
+    style_instructions: styleInstructions,
+    quality,
+    continuation_mode: continuationMode,
+    ultra_fast_anchor_strategy: ultraFastAnchor,
+    ultra_fast_transition: ultraFastTransition,
+    language: "zh-CN",
+    audience: "general",
+    reference_asset_ids: [...selected],
+    subtitle_mode: "none",
+  });
+
+  const selectStyle = (item) => {
+    setStyle(item.id);
+    setStyleName(item.label);
+    setStyleInstructions(item.instructions || "");
+  };
+
+  const openStyleEditor = () => {
+    setStyleDraft({ name: styleName, instructions: styleInstructions });
+    setStyleDialog(true);
+  };
+
+  const applyStyleDraft = () => {
+    setStyleName(styleDraft.name.trim() || "自定义视觉气质");
+    setStyleInstructions(styleDraft.instructions.trim());
+    setStyleDialog(false);
+  };
+
+  const saveCustomStyle = () => {
+    const name = styleDraft.name.trim() || "自定义视觉气质";
+    const id = `custom-${Date.now()}`;
+    const item = {
+      id,
+      label: name,
+      copy: "我的导演模板",
+      instructions: styleDraft.instructions.trim(),
+      color: "peach",
+    };
+    const next = [...customStyles, item];
+    setCustomStyles(next);
+    window.localStorage.setItem("nautilus.customStyles", JSON.stringify(next));
+    setStyle(id);
+    setStyleName(name);
+    setStyleInstructions(item.instructions);
+    setStyleDialog(false);
+    setNotice("自定义视觉气质已保存");
+  };
+
+  const openProjectEditor = () => {
+    if (!project) return;
+    setProjectDraft({
+      brief: {
+        title: project.brief.title || "",
+        prompt: project.brief.prompt || "",
+        style: project.brief.style || styleName,
+        style_preset: project.brief.style_preset || style,
+        style_instructions:
+          project.brief.style_instructions || styleInstructions,
+        duration_seconds: project.brief.duration_seconds,
+        aspect_ratio: project.brief.aspect_ratio,
+        quality: project.brief.quality,
+        continuation_mode: project.brief.continuation_mode || "quality",
+        ultra_fast_anchor_strategy:
+          project.brief.ultra_fast_anchor_strategy || "independent",
+        ultra_fast_transition:
+          project.brief.ultra_fast_transition || "fade_black",
+        subtitle_mode: project.brief.subtitle_mode || "none",
+      },
+      world_bible: {
+        logline: project.world_bible?.logline || "",
+        visual_style: project.world_bible?.visual_style || "",
+        character_notes: joinLines(project.world_bible?.character_notes),
+        location_notes: joinLines(project.world_bible?.location_notes),
+        prop_notes: joinLines(project.world_bible?.prop_notes),
+        audio_notes: joinLines(project.world_bible?.audio_notes),
+        continuity_rules: joinLines(project.world_bible?.continuity_rules),
+      },
+    });
+    setProjectDialog(true);
+  };
+
+  const updateProjectDraft = (section, key, value) =>
+    setProjectDraft((current) => ({
+      ...current,
+      [section]: { ...current[section], [key]: value },
+    }));
+
+  const saveProjectDialog = async (event) => {
+    event.preventDefault();
+    if (!project || !projectDraft) return;
+    setDialogSaving(true);
+    try {
+      const payload = {
+        brief: {
+          ...projectDraft.brief,
+          duration_seconds: Number(projectDraft.brief.duration_seconds),
+        },
+        world_bible: {
+          ...projectDraft.world_bible,
+          character_notes: splitLines(projectDraft.world_bible.character_notes),
+          location_notes: splitLines(projectDraft.world_bible.location_notes),
+          prop_notes: splitLines(projectDraft.world_bible.prop_notes),
+          audio_notes: splitLines(projectDraft.world_bible.audio_notes),
+          continuity_rules: splitLines(
+            projectDraft.world_bible.continuity_rules,
+          ),
+        },
+      };
+      const value = await api(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setProject(value);
+      setJob(null);
+      setTitle(value.brief.title);
+      setPrompt(value.brief.prompt);
+      setStyle(value.brief.style_preset || style);
+      setStyleName(value.brief.style || styleName);
+      setStyleInstructions(value.brief.style_instructions || styleInstructions);
+      setDuration(value.brief.duration_seconds);
+      setAspect(value.brief.aspect_ratio);
+      setQuality(value.brief.quality || "final");
+      setContinuationMode(value.brief.continuation_mode || "quality");
+      setUltraFastAnchor(
+        value.brief.ultra_fast_anchor_strategy || "independent",
+      );
+      setUltraFastTransition(value.brief.ultra_fast_transition || "fade_black");
+      await loadProjects();
+      setProjectDialog(false);
+      setNotice("整体设定已保存，旧镜头输出已标记为待重新制作");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setDialogSaving(false);
+    }
+  };
+
+  const changeContinuationMode = async (mode) => {
+    setContinuationMode(mode);
+    if (!project) return;
+    try {
+      const value = await api(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brief: { continuation_mode: mode } }),
+      });
+      setProject(value);
+      setJob(null);
+      await loadProjects();
+      const selectedMode = continuationModeMeta(mode);
+      setNotice(`已切换为${selectedMode.label}：${selectedMode.hint}`);
+    } catch (error) {
+      setNotice(`续写模式保存失败：${error.message}`);
+    }
+  };
+
+  const changeUltraFastSetting = async (field, value) => {
+    if (field === "ultra_fast_anchor_strategy") setUltraFastAnchor(value);
+    if (field === "ultra_fast_transition") setUltraFastTransition(value);
+    if (!project) return;
+    try {
+      const updated = await api(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brief: { [field]: value } }),
+      });
+      setProject(updated);
+      setJob(null);
+      await loadProjects();
+      setNotice("极速分镜设置已保存");
+    } catch (error) {
+      setNotice(`极速分镜设置保存失败：${error.message}`);
+    }
+  };
+
+  const openShotEditor = (shot) => {
+    setEditingShot(shot);
+    setShotDraft({
+      ...shot,
+      reference_asset_ids: [...(shot.reference_asset_ids || [])],
+      duration_seconds: shot.duration_seconds,
+      anchor_prompt: shot.anchor_prompt || "",
+      audio_prompt: shot.audio_prompt || "",
+      music_prompt: shot.music_prompt || "",
+      dialogue: (shot.dialogue || []).map((line) => ({ ...line })),
+      opening_state: shot.opening_state || "",
+      ending_state: shot.ending_state || "",
+      continuity_handoff: shot.continuity_handoff || "",
+      transition_kind: shot.transition_kind || "continuous",
+      reference_anchors: [...(shot.reference_anchors || [])],
+      hook: shot.hook || "",
+      visual_beats: (shot.visual_beats || []).map((beat) => ({ ...beat })),
+      subtitle_text: shot.subtitle_text || "",
+    });
+  };
+
+  const updateShotDraft = (key, value) =>
+    setShotDraft((current) => ({ ...current, [key]: value }));
+
+  const addDialogueLine = () =>
+    setShotDraft((current) => ({
+      ...current,
+      dialogue: [
+        ...(current.dialogue || []),
+        {
+          speaker: "",
+          text: "",
+          language: "Chinese",
+          delivery: "自然",
+          mode: "on_screen",
+          start_seconds: null,
+          end_seconds: null,
+        },
+      ],
+    }));
+
+  const updateDialogueLine = (index, key, value) =>
+    setShotDraft((current) => ({
+      ...current,
+      dialogue: current.dialogue.map((line, lineIndex) =>
+        lineIndex === index ? { ...line, [key]: value } : line,
+      ),
+    }));
+
+  const removeDialogueLine = (index) =>
+    setShotDraft((current) => ({
+      ...current,
+      dialogue: current.dialogue.filter((_, lineIndex) => lineIndex !== index),
+    }));
+
+  const updateVisualBeat = (index, key, value) =>
+    setShotDraft((current) => ({
+      ...current,
+      visual_beats: current.visual_beats.map((beat, beatIndex) =>
+        beatIndex === index ? { ...beat, [key]: value } : beat,
+      ),
+    }));
+
+  const updateShotTask = (value) =>
+    setShotDraft((current) => {
+      if (!current?.continuity_from_shot_id) {
+        return { ...current, task: value };
+      }
+      return {
+        ...current,
+        task: "fl2va",
+        continuation_mode: value === "ref2va" ? "quality" : "ultra_fast",
+      };
+    });
+
+  const toggleShotReference = (assetId) =>
+    setShotDraft((current) => ({
+      ...current,
+      reference_asset_ids: current.reference_asset_ids.includes(assetId)
+        ? current.reference_asset_ids.filter((id) => id !== assetId)
+        : [...current.reference_asset_ids, assetId],
+    }));
+
+  const saveShotDialog = async (event) => {
+    event.preventDefault();
+    if (!project || !editingShot || !shotDraft) return;
+    setDialogSaving(true);
+    try {
+      const value = await api(
+        `/api/projects/${project.id}/shots/${editingShot.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: shotDraft.title,
+            purpose: shotDraft.purpose,
+            duration_seconds: Number(shotDraft.duration_seconds),
+            task: shotDraft.task,
+            continuation_mode: shotDraft.continuation_mode || null,
+            anchor_prompt: shotDraft.anchor_prompt,
+            prompt: shotDraft.prompt,
+            audio_prompt: shotDraft.audio_prompt,
+            music_prompt: shotDraft.music_prompt,
+            dialogue: (shotDraft.dialogue || []).map((line) => ({
+              speaker: line.speaker.trim(),
+              text: line.text.trim(),
+              language: (line.language || "Chinese").trim(),
+              delivery: (line.delivery || "自然").trim(),
+              mode: line.mode || "on_screen",
+              start_seconds:
+                line.start_seconds === "" || line.start_seconds == null
+                  ? null
+                  : Number(line.start_seconds),
+              end_seconds:
+                line.end_seconds === "" || line.end_seconds == null
+                  ? null
+                  : Number(line.end_seconds),
+            })),
+            opening_state: shotDraft.opening_state,
+            ending_state: shotDraft.ending_state,
+            continuity_handoff: shotDraft.continuity_handoff,
+            transition_kind: shotDraft.transition_kind || "continuous",
+            reference_anchors: shotDraft.reference_anchors
+              .map((value) => value.trim())
+              .filter(Boolean),
+            hook: shotDraft.hook,
+            visual_beats: (shotDraft.visual_beats || []).map((beat) => ({
+              start_seconds: Number(beat.start_seconds),
+              end_seconds: Number(beat.end_seconds),
+              visual_action: beat.visual_action.trim(),
+              state_change: beat.state_change.trim(),
+              camera: beat.camera.trim(),
+              sound: beat.sound.trim(),
+              performance: (beat.performance || "").trim(),
+              spatial_anchor: (beat.spatial_anchor || "").trim(),
+              handoff: (beat.handoff || "").trim(),
+            })),
+            negative_prompt: shotDraft.negative_prompt,
+            subtitle_text: shotDraft.subtitle_text || null,
+            camera: shotDraft.camera,
+            reference_asset_ids: shotDraft.reference_asset_ids,
+            start_frame_asset_id: shotDraft.start_frame_asset_id || null,
+            audio_asset_id: shotDraft.audio_asset_id || null,
+            continuity_from_shot_id: shotDraft.continuity_from_shot_id || null,
+            seed: Number(shotDraft.seed),
+            fps: Number(shotDraft.fps),
+            inference_steps: Number(shotDraft.inference_steps),
+            flow_shift: Number(shotDraft.flow_shift),
+          }),
+        },
+      );
+      setProject(value);
+      setJob(null);
+      setEditingShot(null);
+      setNotice("镜头已保存，生成新的成片前会重新渲染这一镜");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setDialogSaving(false);
+    }
+  };
+
+  const plan = async () => {
+    addClientTrace("click", "开始构思 clicked", {
+      promptLength: prompt.trim().length,
+    });
+    if (projectLoading) {
+      addClientTrace("skipped", "project is still loading");
+      setDebugOpen(true);
+      return setNotice("项目仍在加载，请稍候再开始构思");
+    }
+    if (prompt.trim().length < 3) {
+      addClientTrace("skipped", "prompt is shorter than 3 characters");
+      setDebugOpen(true);
+      return setNotice("先写一句你想拍的故事");
+    }
+    const requestId = ++projectRequest.current;
+    setPlanningError("");
+    traceEpoch.current += 1;
+    traceHiddenBefore.current = Date.now();
+    setPlannerTrace([]);
+    setBusy(true);
+    const brief = makeBrief();
+    addClientTrace("request", "POST /api/projects/plan-async", brief);
+    try {
+      const value = await api("/api/projects/plan-async", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(brief),
+      });
+      addClientTrace("response", "planner task accepted", {
+        projectId: value?.id,
+        shotCount: value?.shots?.length || 0,
+      });
+      if (requestId !== projectRequest.current) return;
+      await loadProjects();
+      if (requestId !== projectRequest.current) return;
+      setProject(value);
+      setJob(null);
+      setRenderEstimate(null);
+      setActiveTab("storyboard");
+      setNotice("构思任务已启动；可以切换项目或新建另一部影片");
+      window.requestAnimationFrame(() =>
+        document
+          .getElementById("storyboard")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      );
+    } catch (error) {
+      addClientTrace("failed", error.message || String(error), {
+        projectId: error.projectId || null,
+      });
+      setDebugOpen(true);
+      if (requestId !== projectRequest.current) return;
+      if (error.projectId) {
+        await loadProjects();
+        await loadProject(error.projectId);
+      }
+      setPlanningError(error.message);
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+      if (project?.id) refreshPlannerTrace(project.id);
+    }
+  };
+
+  const startH3Enrichment = async (retry = false) => {
+    if (!project?.id) return;
+    setBusy(true);
+    setPreproductionError("");
+    try {
+      const value = await api(`/api/projects/${project.id}/h3-enrichment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: plannerProfileId, model: plannerModel, retry }),
+      });
+      setProject(value);
+      const batchSize = value?.batch_planning_run?.batch_size || 6;
+      const completed = value?.batch_planning_run?.completed_shot_ids?.length || 0;
+      const batchNo = Math.floor(completed / batchSize) + 1;
+      setNotice(
+        retry
+          ? "正在用当前 LLM 重新补全 H3 分镜（会重跑全部镜头）。"
+          : `正在生成第 ${batchNo} 批（本批 ${batchSize} 镜）…完成后会暂停，请审阅后再点击续生成。`,
+      );
+    } catch (error) {
+      setPreproductionError(error.message || String(error));
+      setNotice(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createPreproductionPlan = async () => {
+    if (!project?.id) return;
+    setBusy(true);
+    setPreproductionError("");
+    try {
+      const value = await api(`/api/projects/${project.id}/preproduction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: plannerProfileId, model: plannerModel }),
+      });
+      const enrichedProject = await api(`/api/projects/${project.id}`);
+      setPreproduction(value);
+      setProject(enrichedProject);
+      setNotice("LLM 已补全 H3 时间线，请审阅每镜首帧、转场和 Beat。");
+    } catch (error) {
+      addClientTrace("failed", error.message || String(error), { projectId: project.id, operation: "preproduction" });
+      setDebugOpen(true);
+      setPreproductionError(error.message || String(error));
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const approvePreproductionPlan = async () => {
+    if (!project?.id) return;
+    setBusy(true);
+    try {
+      const value = await api(`/api/projects/${project.id}/preproduction/approve`, { method: "POST" });
+      const approvedProject = await api(`/api/projects/${project.id}`);
+      setPreproduction(value);
+      setProject(approvedProject);
+      setNotice(value.status === "ready" ? "预制片计划已锁定，可以开始制作。" : "补图失败，计划已阻断，请检查提示。");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const render = async () => {
+    if (!project?.id) return setNotice("先生成故事板，再渲染成片");
+    const projectId = project.id;
+    const forceRerender = job?.status === "complete";
+    setBusy(true);
+    setRenderBlocker("");
+    try {
+      const value = await api(
+        `/api/projects/${projectId}/render${forceRerender ? "?force=true" : ""}`,
+        {
+          method: "POST",
+        },
+      );
+      setJob(value);
+      setRenderBlocker("");
+      if (forceRerender) {
+        setProject((current) => ({
+          ...current,
+          status: "rendering",
+          shots: (current.shots || []).map((shot) => ({
+            ...shot,
+            status: "planned",
+            selected_take_path: null,
+            boundary_frame_path: null,
+            anchor_frame_path: null,
+            render_started_at: null,
+            render_completed_at: null,
+            render_duration_seconds: null,
+          })),
+        }));
+      }
+      const estimate = await api(
+        `/api/projects/${projectId}/render-estimate`,
+      ).catch(() => null);
+      setRenderEstimate(estimate);
+      void loadActiveJobs();
+      setActiveTab("render");
+      setNotice(
+        forceRerender
+          ? "已开始重新生成全部镜头，不会复用上一版成片"
+          : "渲染已开始，期间可以继续编辑项目",
+      );
+    } catch (error) {
+      setRenderBlocker(error.message);
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openThickScriptDialog = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setThickScriptFile(file);
+    setThickScriptTitle(file.name.replace(/\.(md|markdown|txt)$/i, ""));
+    setThickScriptDialog(true);
+  };
+
+  const submitThickScript = async (event) => {
+    event.preventDefault();
+    if (!thickScriptFile || thickScriptSubmitting) return;
+    setThickScriptSubmitting(true);
+    try {
+      const form = new FormData();
+      form.append("script", thickScriptFile);
+      form.append("asset_root", thickScriptAssetRoot.trim());
+      form.append("title", thickScriptTitle.trim());
+      const result = await api("/api/projects/import-thick-script", {
+        method: "POST",
+        body: form,
+      });
+      await loadProjects();
+      await loadAssets();
+      await loadProject(result.project.id);
+      setThickScriptDialog(false);
+      setNotice(
+        "厚版脚本已导入：" +
+          (result.project.shots?.length || 0) +
+          " 镜；" +
+          (result.missing_codes?.length
+            ? "缺少资产 " + result.missing_codes.join(", ")
+            : "资产映射完整"),
+      );
+      setActiveTab("storyboard");
+    } catch (error) {
+      setNotice("厚版脚本导入失败：" + error.message);
+    } finally {
+      setThickScriptSubmitting(false);
+    }
+  };
+
+  const upload = async (event) => {
+    const files = [...event.target.files];
+    if (!files.length) return;
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    form.append("roles", uploadRole);
+    form.append("tags", uploadTags);
+    try {
+      await api("/api/assets/upload", { method: "POST", body: form });
+      await loadAssets();
+      setNotice(
+        `${files.length} 份素材已加入素材库（${roleLabel[uploadRole] || uploadRole}）`,
+      );
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const estimatedSeconds =
+    renderEstimate?.total_seconds || job?.estimated_seconds || 0;
+  const elapsedSeconds = job?.started_at
+    ? Math.max(
+        0,
+        (Math.min(
+          clockNow,
+          job.completed_at ? Date.parse(job.completed_at) : clockNow,
+        ) -
+          Date.parse(job.started_at)) /
+          1000,
+      )
+    : 0;
+  const remainingSeconds =
+    renderEstimate?.remaining_seconds ?? estimatedSeconds;
+  const estimatedProgress = estimatedSeconds
+    ? Math.min(
+        0.99,
+        Math.max(0, (estimatedSeconds - remainingSeconds) / estimatedSeconds),
+      )
+    : 0;
+  const progress =
+    job?.status === "complete"
+      ? 100
+      : Math.round(
+          Math.max((job?.progress || 0) * 100, estimatedProgress * 100),
+        );
+  const currentShot = project?.shots?.find(
+    (shot) => shot.id === job?.current_shot_id,
+  );
+  const jobActive = job && ["running", "queued"].includes(job.status);
+  const debugEvents = [...plannerTrace, ...clientTrace].sort(
+    (left, right) =>
+      Date.parse(left.created_at || 0) - Date.parse(right.created_at || 0),
+  );
+  const h3Healthy = Boolean(health?.fl2va_healthy && health?.ref2va_healthy);
+  const runtimeServices = serviceStatus?.services || [];
+  const configuredRuntimeServices = runtimeServices.filter(
+    (item) => item.configured,
+  );
+  const availableRuntimeServices = configuredRuntimeServices.filter((item) =>
+    ["ready", "busy", "queued"].includes(item.state),
+  );
+  const gpuUtilization = runtimeServices
+    .flatMap((item) => item.gpu?.devices || [])
+    .map((item) => item.utilization_percent)
+    .filter((value) => value != null);
+  const averageGpuUtilization = gpuUtilization.length
+    ? Math.round(
+        gpuUtilization.reduce((sum, value) => sum + value, 0) /
+          gpuUtilization.length,
+      )
+    : null;
+  const runtimeHealthy = serviceStatus
+    ? serviceStatus.status === "ready"
+    : h3Healthy;
+
+  const openNewLlm = () => {
+    setEditingLlm(null);
+    setLlmDraft({ id: "", display_name: "", base_url: "", api_key: "", model: "", wire_api: "chat_completions" });
+    setLlmDialog(true);
+  };
+  const openEditLlm = (client) => {
+    setEditingLlm(client);
+    setLlmDraft({
+      id: client.id,
+      display_name: client.display_name,
+      base_url: client.base_url || "",
+      api_key: "",
+      model: client.model || "",
+      wire_api: client.wire_api || "chat_completions",
+    });
+    setLlmDialog(true);
+  };
+  const submitLlmClient = async (event) => {
+    event.preventDefault();
+    setLlmSaving(true);
+    try {
+      if (editingLlm) {
+        await api("/api/llm-clients/" + editingLlm.id, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            display_name: llmDraft.display_name,
+            base_url: llmDraft.base_url,
+            api_key: llmDraft.api_key || undefined,
+            model: llmDraft.model,
+            wire_api: llmDraft.wire_api,
+          }),
+        });
+        setNotice("LLM 客户端已更新");
+      } else {
+        await api("/api/llm-clients", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(llmDraft),
+        });
+        setNotice("LLM 客户端已添加");
+      }
+      setLlmDialog(false);
+      await loadPlannerProfiles();
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLlmSaving(false);
+    }
+  };
+  const deleteLlmClient = async (client) => {
+    if (!window.confirm("确认删除 LLM 客户端「" + client.display_name + "」？作为默认的客户端需先取消默认。")) return;
+    try {
+      await api("/api/llm-clients/" + client.id, { method: "DELETE" });
+      setNotice("LLM 客户端已删除");
+      await loadPlannerProfiles();
+    } catch (error) {
+      setNotice(error.message);
+    }
+  };
+  const setDefaultLlmClient = async (client) => {
+    try {
+      const model = client.model || "";
+      const value = await api("/api/llm-clients/" + client.id + "/default", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      setNotice("已设为默认 LLM：" + value.display_name + (value.resolved_model ? " · " + value.resolved_model : ""));
+      await loadPlannerProfiles();
+    } catch (error) {
+      setNotice(error.message);
+    }
+  };
+
+  const renderLlmManager = () => (
+    <section className="llm-page">
+      <div className="section-heading llm-heading">
+        <div>
+          <span className="overline">LLM CLIENT MANAGER</span>
+          <h2>模型管理</h2>
+          <p>管理接入的 LLM 客户端。把某个客户端设为“默认”后，整个软件所有需要 LLM 的地方（故事板构思、H3 分镜补全、预制片规划）都会使用它。</p>
+        </div>
+        <button className="glow-button" onClick={openNewLlm}>
+          <Plus size={15} /> 新增客户端
+        </button>
+      </div>
+
+      {llmClients.length ? (
+        <div className="llm-client-list">
+          {llmClients.map((client) => {
+            const isDefault = llmActive?.profile_id === client.id;
+            const available = client.available;
+            return (
+              <article className={"llm-client-card " + (isDefault ? "default " : "") + (available ? "" : "offline")} key={client.id}>
+                <div className="llm-client-head">
+                  <div className={"llm-client-icon " + (available ? "" : "offline")}>
+                    <Server size={17} />
+                  </div>
+                  <div className="llm-client-title">
+                    <strong>{client.display_name}</strong>
+                    <small>{client.id} · {client.source === "env" ? "环境变量接入" : "本机客户端"}</small>
+                  </div>
+                  {isDefault ? (
+                    <span className="llm-default-badge">默认</span>
+                  ) : (
+                    <button className="outline-button compact" onClick={() => setDefaultLlmClient(client)} disabled={!available}>
+                      设为默认
+                    </button>
+                  )}
+                </div>
+                <dl className="llm-client-meta">
+                  <div><dt>模型</dt><dd>{client.model || "未配置"}</dd></div>
+                  <div><dt>接口</dt><dd>{client.wire_api}</dd></div>
+                  <div><dt>Base URL</dt><dd>{client.base_url || "未配置"}</dd></div>
+                  <div><dt>状态</dt><dd className={available ? "ok" : "err"}>{available ? "可用" : "不可用"}</dd></div>
+                </dl>
+                <div className="llm-client-actions">
+                  <button className="outline-button" onClick={() => openEditLlm(client)}>编辑</button>
+                  {client.source === "db" ? (
+                    <button className="outline-button danger" onClick={() => deleteLlmClient(client)}>删除</button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-library llm-empty">
+          <Server size={20} />
+          <span>还没有接入的 LLM 客户端。点击“新增客户端”添加首个模型。</span>
+        </div>
+      )}
+
+      {llmDialog ? (
+        <motion.div className="director-dialog-backdrop" initial={false} animate={{ opacity: 1 }} onMouseDown={() => setLlmDialog(false)}>
+          <motion.form className="director-dialog" initial={{ y: 8, scale: 0.99 }} animate={{ opacity: 1, y: 0, scale: 1 }} onSubmit={submitLlmClient} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="dialog-head">
+              <div>
+                <span className="overline">{editingLlm ? "EDIT LLM CLIENT" : "ADD LLM CLIENT"}</span>
+                <h2>{editingLlm ? "编辑 LLM 客户端" : "新增 LLM 客户端"}</h2>
+                <p>填写 OpenAI 兼容的接入信息，保存后即可在项目中切换并使用。</p>
+              </div>
+              <button type="button" onClick={() => setLlmDialog(false)} aria-label="关闭">
+                <X size={17} />
+              </button>
+            </div>
+            {editingLlm ? null : (
+              <label className="dialog-field">
+                <span>客户端 ID（唯一标识）</span>
+                <input value={llmDraft.id} onChange={(e) => setLlmDraft((draft) => ({ ...draft, id: e.target.value }))} placeholder="例如：deepseek / qwen / local" />
+                <small className="field-hint">仅允许字母、数字、下划线和连字符。</small>
+              </label>
+            )}
+            <label className="dialog-field">
+              <span>显示名称</span>
+              <input value={llmDraft.display_name} onChange={(e) => setLlmDraft((draft) => ({ ...draft, display_name: e.target.value }))} placeholder="例如：DeepSeek-V3 / 本地 Qwen" />
+            </label>
+            <label className="dialog-field">
+              <span>Base URL</span>
+              <input value={llmDraft.base_url} onChange={(e) => setLlmDraft((draft) => ({ ...draft, base_url: e.target.value }))} placeholder="https://api.example.com/v1" />
+            </label>
+            <label className="dialog-field">
+              <span>API Key</span>
+              <input type="password" value={llmDraft.api_key} onChange={(e) => setLlmDraft((draft) => ({ ...draft, api_key: e.target.value }))} placeholder={editingLlm ? "留空保持不变" : "sk-…"} />
+              <small className="field-hint">仅保存在服务器，不会回传到浏览器。</small>
+            </label>
+            <label className="dialog-field">
+              <span>模型名</span>
+              <input value={llmDraft.model} onChange={(e) => setLlmDraft((draft) => ({ ...draft, model: e.target.value }))} placeholder="例如：deepseek-chat / qwen-plus" />
+            </label>
+            <label className="dialog-field">
+              <span>接口协议</span>
+              <select value={llmDraft.wire_api} onChange={(e) => setLlmDraft((draft) => ({ ...draft, wire_api: e.target.value }))}>
+                <option value="chat_completions">chat_completions</option>
+                <option value="responses">responses</option>
+              </select>
+            </label>
+            <div className="dialog-actions">
+              <button type="button" className="outline-button" onClick={() => setLlmDialog(false)}>取消</button>
+              <button type="submit" className="glow-button" disabled={llmSaving}>{llmSaving ? "保存中…" : "保存客户端"}</button>
+            </div>
+          </motion.form>
+        </motion.div>
+      ) : null}
+    </section>
+  );
+  return (
+    <div className="nautilus-app">
+      <aside className="side-rail">
+        <div className="nav-logo">
+          <span>N</span>
+          <div>
+            <b>NAUTILUS</b>
+            <small>AI FILM WORKSHOP</small>
+          </div>
+        </div>
+        <div className="rail-section-label">WORKSPACE</div>
+        {[
+          { id: "brief", icon: Sparkles, label: "灵感简报" },
+          { id: "library", icon: Library, label: "素材库" },
+          { id: "storyboard", icon: Clapperboard, label: "故事板" },
+          { id: "render", icon: Aperture, label: "渲染中心" },
+          { id: "llm", icon: Server, label: "模型管理" },
+        ].map(({ id, icon: Icon, label }) => (
+          <button
+            key={id}
+            className={`rail-link ${activeTab === id ? "active" : ""}`}
+            onClick={() => navigateWorkspace(id)}
+          >
+            <Icon size={17} />
+            <span>{label}</span>
+            {id === "render" && activeJobs.length ? <i /> : null}
+          </button>
+        ))}
+        <div className="rail-spacer" />
+        <button
+          type="button"
+          className="engine-card"
+          onClick={() => setRuntimeStatusOpen(true)}
+        >
+          <div className="engine-icon">
+            <WandSparkles size={16} />
+          </div>
+          <div>
+            <strong>海螺引擎</strong>
+            <span>
+              {serviceStatus
+                ? `${availableRuntimeServices.length}/${configuredRuntimeServices.length} 服务${averageGpuUtilization == null ? "" : ` · GPU ${averageGpuUtilization}%`}`
+                : h3Healthy
+                  ? "H3 · 在线"
+                  : "等待连接 H3"}
+            </span>
+          </div>
+          <span className={`engine-dot ${runtimeHealthy ? "on" : ""}`} />
+        </button>
+      </aside>
+
+      <main className="main-canvas">
+        <header className="workspace-header">
+          <div className="mobile-menu">
+            <Menu size={19} />
+          </div>
+          <div className="crumb project-picker">
+            <span>PROJECT</span>
+            <select
+              value={project?.id || ""}
+              onChange={(event) => {
+                if (!event.target.value) return newProject();
+                loadProject(event.target.value).catch((error) =>
+                  setNotice(error.message),
+                );
+              }}
+              aria-label="选择项目"
+            >
+              <option value="">NEW FILM</option>
+              {projects.map((item) => {
+                const active = activeJobs.find(
+                  (jobItem) => jobItem.project_id === item.id,
+                );
+                const activity =
+                  item.status === "planning"
+                    ? " · 构思中"
+                    : active
+                      ? ` · ${active.status === "queued" ? "排队" : `${Math.round((active.progress || 0) * 100)}%`}`
+                      : "";
+                return (
+                  <option key={item.id} value={item.id}>
+                    {item.brief.title}
+                    {activity}
+                  </option>
+                );
+              })}
+            </select>
+            <button
+              className="project-delete"
+              onClick={deleteProject}
+              disabled={!project?.id || projectDeleting}
+              title="删除当前项目"
+              aria-label="删除当前项目"
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
+          <div className="header-actions">
+            <RuntimeStatus
+              status={serviceStatus}
+              job={job}
+              open={runtimeStatusOpen}
+              onToggle={() => setRuntimeStatusOpen((value) => !value)}
+              onClose={() => setRuntimeStatusOpen(false)}
+            />
+            <button className="header-new" onClick={newProject}>
+              <Plus size={15} /> 新项目
+            </button>
+          </div>
+        </header>
+
+        {activeTab === "llm" ? (
+          renderLlmManager()
+        ) : (
+          <>
+        <section className="hero-card">
+          <div className="hero-orbit orbit-one" />
+          <div className="hero-orbit orbit-two" />
+          <div className="hero-content">
+            <div className="overline">
+              <Sparkles size={13} /> DIRECTOR'S BRIEF
+            </div>
+            <h1>
+              把一个念头，<em>拍成一部片</em>
+            </h1>
+            <p>
+              一句话、几张参考素材。Nautilus
+              会把你的灵感拆成故事、镜头和一条可观看的时间线。
+            </p>
+          </div>
+          <div className="hero-stat">
+            <span>CREATIVE ENGINE</span>
+            <strong>H3 / OMNI</strong>
+            <small>连续镜头渲染</small>
+          </div>
+        </section>
+
+        <div className="studio-grid">
+          <section className="composer glass-panel" id="brief">
+            <div className="section-heading">
+              <div>
+                <span className="overline">01 · STORY SEED</span>
+                <h2>你的故事</h2>
+              </div>
+              <span className="counter">{prompt.length}/2000</span>
+            </div>
+            <input
+              className="title-input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="给这部片一个名字"
+            />
+            <textarea
+              className="story-prompt"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="例如：一位女孩在雨夜的旧车站等待一封迟到的信……"
+              maxLength={2000}
+            />
+            <div className="composer-footer">
+              <div className="hint">
+                <Sparkles size={14} /> Agent 会自动生成完整分镜
+              </div>
+              <button
+                className="glow-button"
+                onClick={plan}
+                disabled={
+                  busy || projectLoading || project?.status === "planning"
+                }
+              >
+                <span>
+                  {projectLoading
+                    ? "正在加载项目…"
+                    : project?.status === "planning"
+                      ? "后台构思中…"
+                      : busy
+                        ? "正在提交…"
+                        : "开始构思"}
+                </span>
+                <ArrowUpRight size={16} />
+              </button>
+            </div>
+            {planningError ||
+            (project?.status === "failed" && !project.shots?.length) ? (
+              <div className="planning-error" role="alert">
+                <CircleAlert size={17} />
+                <div>
+                  <b>这次构思没有完成</b>
+                  <span>
+                    {planningError ||
+                      "项目草稿已保留。检查故事内容后，可以直接重新构思。"}
+                  </span>
+                </div>
+                <button
+                  className="outline-button compact"
+                  type="button"
+                  onClick={plan}
+                  disabled={busy || project?.status === "planning"}
+                >
+                  重新构思
+                </button>
+              </div>
+            ) : null}
+            <PlannerDebugConsole
+              events={debugEvents}
+              open={debugOpen}
+              onToggle={() => setDebugOpen((value) => !value)}
+              onClear={clearDebugTrace}
+            />
+          </section>
+
+          <section className="controls glass-panel">
+            <div className="section-heading">
+              <div>
+                <span className="overline">02 · DIRECTION</span>
+                <h2>导演选择</h2>
+              </div>
+              <Gauge size={18} className="muted-icon" />
+            </div>
+            <label className="field-label">视觉气质</label>
+            <div className="preset-list">
+              {availableStyles.map((item) => (
+                <button
+                  key={item.id}
+                  className={`preset ${style === item.id ? "selected" : ""} ${item.color}`}
+                  onClick={() => selectStyle(item)}
+                >
+                  <span className="preset-swatch" />
+                  <div>
+                    <b>{item.label}</b>
+                    <small>{item.copy}</small>
+                  </div>
+                  {style === item.id ? <Check size={15} /> : null}
+                </button>
+              ))}
+              <button className="preset-add" onClick={openStyleEditor}>
+                <Plus size={14} />
+                <span>
+                  <b>新增视觉气质</b>
+                  <small>写下你的导演规则</small>
+                </span>
+              </button>
+            </div>
+            <div className="direction-summary">
+              <div>
+                <span>当前视觉气质</span>
+                <strong>{styleName}</strong>
+              </div>
+              <button
+                className="outline-button compact"
+                onClick={openStyleEditor}
+              >
+                <Settings2 size={13} /> 编辑说明
+              </button>
+            </div>
+            <div className="control-row">
+              <label>
+                <span>时长</span>
+                <select
+                  value={duration}
+                  onChange={(event) => setDuration(event.target.value)}
+                >
+                  <option value="15">15 秒（H3 单镜上限）</option>
+                  <option value="30">30 秒</option>
+                  <option value="60">1 分钟</option>
+                  <option value="120">2 分钟</option>
+                </select>
+              </label>
+              <label>
+                <span>画幅</span>
+                <select
+                  value={aspect}
+                  onChange={(event) => setAspect(event.target.value)}
+                >
+                  <option>16:9</option>
+                  <option>9:16</option>
+                  <option>1:1</option>
+                </select>
+              </label>
+            </div>
+            <div className="quality-toggle">
+              <span>渲染质量</span>
+              <div>
+                {["draft", "final"].map((item) => (
+                  <button
+                    key={item}
+                    className={quality === item ? "active" : ""}
+                    onClick={() => setQuality(item)}
+                  >
+                    {item === "draft" ? "草稿 · 12 steps" : "最终 · 50 steps"}
+                  </button>
+                ))}
+              </div>
+              <small className="quality-hint">
+                {quality === "draft"
+                  ? "12 steps · 更快确认节奏"
+                  : "50 steps · 通常更稳，但耗时更长"}
+              </small>
+            </div>
+            <div className="quality-toggle">
+              <span>镜头续写</span>
+              <div>
+                {continuationModeOptions.map((item) => (
+                  <button
+                    key={item.id}
+                    className={continuationMode === item.id ? "active" : ""}
+                    onClick={() => changeContinuationMode(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <small className="quality-hint">
+                {continuationModeMeta(continuationMode).hint}
+              </small>
+            </div>
+            {continuationMode === "ultra_fast" && (
+              <div className="ultra-fast-settings">
+                <div className="ultra-fast-setting-row">
+                  <span>首帧策略</span>
+                  <div className="segmented-options">
+                    {ultraFastAnchorOptions.map((item) => (
+                      <button
+                        key={item.id}
+                        className={ultraFastAnchor === item.id ? "active" : ""}
+                        onClick={() =>
+                          changeUltraFastSetting(
+                            "ultra_fast_anchor_strategy",
+                            item.id,
+                          )
+                        }
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                  <small>
+                    {
+                      ultraFastAnchorOptions.find(
+                        (item) => item.id === ultraFastAnchor,
+                      )?.hint
+                    }
+                  </small>
+                </div>
+                {ultraFastAnchor === "independent" && (
+                  <div className="ultra-fast-setting-row">
+                    <span>镜间转场</span>
+                    <div className="segmented-options transition-options">
+                      {ultraFastTransitionOptions.map((item) => (
+                        <button
+                          key={item.id}
+                          className={
+                            ultraFastTransition === item.id ? "active" : ""
+                          }
+                          onClick={() =>
+                            changeUltraFastSetting(
+                              "ultra_fast_transition",
+                              item.id,
+                            )
+                          }
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <section className="library-section" id="library">
+          <div className="section-heading wide">
+            <div>
+              <span className="overline">03 · MATERIAL LIBRARY</span>
+              <h2>
+                素材库 <small>{assets.length} assets</small>
+              </h2>
+            </div>
+            <div className="heading-actions">
+              <span>{selectedAssets.length} 已编入片单</span>
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                accept="image/*,video/*,audio/*"
+                onChange={upload}
+                hidden
+              />
+              <input
+                ref={thickScriptInput}
+                type="file"
+                accept=".md,.markdown,.txt,text/markdown,text/plain"
+                onChange={openThickScriptDialog}
+                hidden
+              />
+              <button
+                className="outline-button"
+                onClick={() => thickScriptInput.current?.click()}
+              >
+                <Clapperboard size={15} /> 导入厚版
+              </button>
+              <button
+                className="outline-button"
+                onClick={() => fileInput.current?.click()}
+              >
+                <CloudUpload size={15} /> 导入素材
+              </button>
+            </div>
+          </div>
+          <p className="library-permission-hint">
+            只有明确勾选的素材会进入本项目的 Agent
+            与模型请求；未勾选素材不会被自动检索或引用。
+          </p>
+          <div className="upload-meta">
+            <label>
+              素材用途
+              <select
+                value={uploadRole}
+                onChange={(event) => setUploadRole(event.target.value)}
+                aria-label="上传素材用途"
+              >
+                {Object.entries(roleLabel).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              标签
+              <input
+                value={uploadTags}
+                onChange={(event) => setUploadTags(event.target.value)}
+                placeholder="人物、客厅、夜景"
+                aria-label="上传素材标签"
+              />
+            </label>
+          </div>
+          <div className="asset-ribbon">
+            {assets.slice(0, 8).map((asset) => (
+              <AssetCard
+                key={asset.id}
+                asset={asset}
+                selected={selected.has(asset.id)}
+                onToggle={toggleAsset}
+                onEdit={openAssetEditor}
+              />
+            ))}
+            {!assets.length ? (
+              <div className="empty-library">
+                <ImagePlus size={20} />
+                <span>导入第一份素材，开始建立你的世界</span>
+              </div>
+            ) : null}
+          </div>
+        </section>
+
+        {project ? (
+          <section className="project-section" id="storyboard">
+            <div className="section-heading wide storyboard-heading">
+              <div className="storyboard-heading-copy">
+                <span className="overline">04 · STORYBOARD</span>
+                <h2>{project.world_bible?.logline || "故事板"}</h2>
+              </div>
+              <span className="storyboard-meta">
+                {project.shots?.length || 0} shots ·{" "}
+                {formatDuration(project.brief.duration_seconds)}
+              </span>
+            </div>
+            <div className="storyboard-actions-row">
+              <select className="outline-button" value={plannerProfileId} onChange={(event) => setPlannerProfileId(event.target.value)} aria-label="Studio LLM">
+                {plannerProfiles.map((item) => <option key={item.id} value={item.id} disabled={!item.available}>{item.display_name} · {item.model || "未配置"}</option>)}
+              </select>
+              <input className="outline-input" value={plannerModel} onChange={(event) => setPlannerModel(event.target.value)} placeholder="可选：覆盖模型名" aria-label="覆盖 Planner 模型名" />
+              <button className="outline-button" onClick={savePlannerActive} disabled={busy || !plannerProfiles.some((item) => item.id === plannerProfileId && item.available)}>
+                <Settings2 size={14} /> 切换并保存 LLM
+              </button>
+              <button className="outline-button" onClick={() => startH3Enrichment(false)} disabled={busy || !project.shots?.length || !plannerProfiles.some((item) => item.id === plannerProfileId && item.available) || project.batch_planning_run?.status === "complete"}>
+                <Sparkles size={14} /> {project.batch_planning_run?.completed_shot_ids?.length ? "生成下一批 6 镜" : "生成首批 6 镜"}
+              </button>
+              {project.batch_planning_run?.status === "complete" ? (
+                <button className="outline-button" onClick={() => startH3Enrichment(true)} disabled={busy || !project.shots?.length || !plannerProfiles.some((item) => item.id === plannerProfileId && item.available)}>
+                  <RefreshCw size={14} /> 用当前 LLM 重跑 H3
+                </button>
+              ) : null}
+              <button className="outline-button" onClick={openProjectEditor}>
+                <Pencil size={13} /> 编辑整体设定
+              </button>
+              <button
+                className="outline-button"
+                onClick={() => navigateWorkspace("render")}
+              >
+                <Play size={14} /> 查看渲染
+              </button>
+              <button className="outline-button" onClick={createPreproductionPlan} disabled={busy || !project.shots?.length || (project.batch_planning_run && project.batch_planning_run.status !== "complete")}>
+                <Sparkles size={14} /> 生成预制片计划
+              </button>
+              <button
+                className="glow-button storyboard-render-button"
+                onClick={render}
+                disabled={busy || jobActive || !project.shots?.length || (project.preproduction_plan && project.preproduction_plan.status !== "ready")}
+              >
+                <Play size={14} />{" "}
+                {jobActive
+                  ? "制作中…"
+                  : job?.status === "complete"
+                    ? "再次制作"
+                    : "开始制作"}
+              </button>
+            </div>
+            {preproductionError ? <section className="planning-error" role="alert"><CircleAlert size={17} /><div><b>预制片计划没有生成</b><span>{preproductionError}</span></div></section> : null}
+            {project.batch_planning_run ? (() => {
+              const batchRun = project.batch_planning_run;
+              const total = project.shots?.length || 0;
+              const done = batchRun.completed_shot_ids?.length || 0;
+              const pending = total - done;
+              const canContinue = ["paused", "failed"].includes(batchRun.status) && pending > 0;
+              return <section className="planning-error">
+                <Sparkles size={17} />
+                <div>
+                  <b>H3 分镜批处理 · {batchRun.status}</b>
+                  <span>已完成 {done} / {total} 镜；{pending > 0 ? `还剩 ${pending} 镜待续生成。` : "本批已完成全部镜头。"}{batchRun.last_error ? " " + batchRun.last_error : ""}</span>
+                </div>
+                {canContinue ? <button className="outline-button" onClick={() => startH3Enrichment(false)} disabled={busy}>{batchRun.status === "failed" ? "重试" : "续生成"}</button> : null}
+              </section>;
+            })() : null}
+            {(preproduction || project.preproduction_plan) ? (() => {
+              const plan = preproduction || project.preproduction_plan;
+              return <section className="preproduction-panel">
+                <span className="overline">05 · PREPRODUCTION</span>
+                <h3>预制片规划 · {preproductionStatusLabel[plan.status] || plan.status}</h3>
+                <p>{plan.generated_image_count ? "需补 " + plan.generated_image_count + " 张独立镜头首帧；确认后才会发起生图。" : "不需要补图；全部首帧已有来源。"} {plan.blockers?.length ? "另有 " + plan.blockers.length + " 项需要处理。" : ""}</p>
+                <details className="preproduction-rows"><summary>查看 {plan.shot_plans?.length || 0} 镜的首帧与转场判定</summary>{(plan.shot_plans || []).map((item) => <article key={item.shot_id}><b>镜头 {item.shot_index + 1}</b><span>{startFrameSourceLabel[item.start_frame_source] || item.start_frame_source} · {planTransitionLabel[item.transition_kind] || item.transition_kind}</span><small>{planReasonLabel[item.gap_reason] || item.gap_reason || item.script_evidence}</small></article>)}</details>
+                {plan.status === "awaiting_approval" ? <button className="glow-button" onClick={approvePreproductionPlan} disabled={busy}>确认计划并补齐 {plan.generated_image_count} 张缺失首帧</button> : null}
+              </section>;
+            })() : null}
+            <div className="story-strip">
+              {project.status === "planning" &&
+              !(project.shots || []).length ? (
+                <div className="planning-placeholder">
+                  <Sparkles size={20} />
+                  <div>
+                    <strong>导演组正在并行完善故事与分镜</strong>
+                    <small>
+                      这个任务会在后台继续；你可以切换项目或新建另一部影片。
+                    </small>
+                  </div>
+                </div>
+              ) : null}
+              {(project.shots || []).map((shot, index) => (
+                <motion.article
+                  key={shot.id}
+                  className="shot-tile"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: index * 0.05 }}
+                >
+                  <div className="shot-image">
+                    {shot.anchor_frame_path ? (
+                      <img
+                        src={frameUrl(project.id, shot, "anchor")}
+                        alt="anchor"
+                      />
+                    ) : shot.boundary_frame_path ? (
+                      <img
+                        src={frameUrl(project.id, shot, "boundary")}
+                        alt="boundary"
+                      />
+                    ) : (
+                      <span>{String(index + 1).padStart(2, "0")}</span>
+                    )}
+                    <small>{formatDuration(shot.duration_seconds)}</small>
+                    <button
+                      className="shot-edit-button"
+                      type="button"
+                      onClick={() => openShotEditor(shot)}
+                    >
+                      <Pencil size={11} /> 编辑镜头
+                    </button>
+                    <button
+                      className="shot-canvas-button"
+                      type="button"
+                      onClick={() =>
+                        window.location.assign(
+                          `http://localhost:3000/canvas?nautilus-project=${encodeURIComponent(project.id)}&shot=${encodeURIComponent(shot.id)}`,
+                        )
+                      }
+                    >
+                      画布中重生成
+                    </button>
+                  </div>
+                  <div className="shot-meta">
+                    <span>SHOT {String(index + 1).padStart(2, "0")}</span>
+                    <b>{shot.title}</b>
+                    <p>{shot.purpose}</p>
+                    <small>
+                      {runtimeShotLabel(project, shot)} · {shot.inference_steps}{" "}
+                      steps · {openingFrameSourceLabel(project, shot, assets)} ·{" "}
+                      {transitionLabel(shot)} · {shot.camera}
+                    </small>
+                    <small className="shot-render-timing">
+                      <Gauge size={11} /> {shotRenderTiming(shot, clockNow)}
+                    </small>
+                  </div>
+                </motion.article>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <section className="empty-workspace" id="empty-workspace">
+            <div className="empty-icon">
+              <Film size={25} />
+            </div>
+            <span className="overline">YOUR CANVAS IS READY</span>
+            <h2>先写下一个故事</h2>
+            <p>
+              {activeTab === "render"
+                ? "生成故事板并点击开始制作，渲染进度会在这里实时显示。"
+                : activeTab === "storyboard"
+                  ? "点击开始构思，AI Agent 会先生成可编辑的分镜故事板。"
+                  : "故事板、素材锚点和渲染预览会在这里展开。"}
+            </p>
+          </section>
+        )}
+
+        {project &&
+          (job ? (
+            <section className="render-section" id="render">
+              <div className="render-head">
+                <div>
+                  <span className="overline">05 · FINAL CUT</span>
+                  <h2>渲染中心</h2>
+                </div>
+                <div className={`render-state ${job.status}`}>
+                  <span />
+                  {job.status === "complete"
+                    ? "已完成"
+                    : job.status === "failed"
+                      ? "失败"
+                      : job.status === "queued"
+                        ? "排队中"
+                        : "渲染中"}
+                </div>
+              </div>
+              <div className="render-body">
+                <div className="render-progress">
+                  <div className="progress-numbers">
+                    <strong>{progress}%</strong>
+                    <span>{job.message}</span>
+                  </div>
+                  <div className="progress-line">
+                    <motion.i animate={{ width: `${progress}%` }} />
+                  </div>
+                  <div className="render-metrics">
+                    <div>
+                      <small>预计总时长</small>
+                      <b>{formatDuration(estimatedSeconds)}</b>
+                    </div>
+                    <div>
+                      <small>已用时间</small>
+                      <b>{formatDuration(elapsedSeconds)}</b>
+                    </div>
+                    <div>
+                      <small>{jobActive ? "预计剩余" : "最终用时"}</small>
+                      <b>
+                        {formatDuration(
+                          jobActive ? remainingSeconds : elapsedSeconds,
+                        )}
+                      </b>
+                    </div>
+                  </div>
+                  <small>
+                    {currentShot ? `当前：${currentShot.title}` : "等待下一步"}
+                  </small>
+                  {renderEstimate ? (
+                    <small className="estimate-source">
+                      {renderEstimate.source === "configured"
+                        ? "暂无同配置历史，使用部署基线"
+                        : `基于 ${renderEstimate.sample_count} 个同配置历史镜头的中位数校准`}
+                    </small>
+                  ) : null}
+                </div>
+                {job.status === "complete" ? (
+                  <div className="result-wrap">
+                    <video
+                      className="result-video"
+                      controls
+                      src={`/api/jobs/${job.id}/output`}
+                    />
+                    <a
+                      className="download-link"
+                      href={`/api/jobs/${job.id}/output?download=true`}
+                    >
+                      下载成片
+                    </a>
+                  </div>
+                ) : null}
+                {job.status === "failed" ? (
+                  <div className="error-box">{job.error}</div>
+                ) : null}
+              </div>
+            </section>
+          ) : (
+            <section className="render-section empty-render" id="render">
+              <div className="render-head">
+                <div>
+                  <span className="overline">05 · FINAL CUT</span>
+                  <h2>渲染中心</h2>
+                </div>
+                <div className="render-state">
+                  <span />
+                  {renderBlocker ? "等待配置" : "尚未开始"}
+                </div>
+              </div>
+              <div className="empty-render-body">
+                <Aperture size={22} />
+                <p>
+                  {renderBlocker ||
+                    "当前项目还没有制作任务。确认故事板后，点击开始制作即可看到实时进度、倒计时和每一镜的锚点更新。"}
+                </p>
+                {renderEstimate ? (
+                  <small>
+                    当前预计总时长{" "}
+                    {formatDuration(renderEstimate.total_seconds)} ·{" "}
+                    {renderEstimate.sample_count
+                      ? `${renderEstimate.sample_count} 个历史镜头校准`
+                      : "部署基线"}
+                  </small>
+                ) : null}
+                <button
+                  className="glow-button"
+                  onClick={render}
+                  disabled={busy}
+                >
+                  <Play size={14} /> 开始制作
+                </button>
+              </div>
+            </section>
+          ))}
+        {!project ? (
+          <section className="empty-workspace" id="render">
+            <div className="empty-icon">
+              <Aperture size={25} />
+            </div>
+            <span className="overline">RENDER WORKSPACE</span>
+            <h2>还没有可制作的故事板</h2>
+            <p>先在灵感简报中生成故事板，再回到这里开始制作。</p>
+          </section>
+        ) : null}
+          </>
+        )}
+        <footer className="footer-note">
+          <span>NAUTILUS STUDIO · CREATOR-FIRST AI FILM WORKSHOP</span>
+          <span>
+            海螺引擎 <i>●</i>
+          </span>
+        </footer>
+      </main>
+      <AnimatePresence>
+        {thickScriptDialog && thickScriptFile ? (
+          <motion.div
+            className="director-dialog-backdrop"
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onMouseDown={() => setThickScriptDialog(false)}
+          >
+            <motion.form
+              className="director-dialog"
+              initial={{ y: 8, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              onSubmit={submitThickScript}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="dialog-head">
+                <div>
+                  <span className="overline">THICK SCRIPT IMPORT</span>
+                  <h2>导入厚版分镜脚本</h2>
+                  <p>
+                    上传 Markdown 后直接建立项目、映射 R/S/P 素材，并生成前 5
+                    镜审阅计划。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setThickScriptDialog(false)}
+                  aria-label="关闭厚版导入"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <div className="dialog-file-summary">
+                <Clapperboard size={16} />
+                <strong>{thickScriptFile.name}</strong>
+                <small>{Math.ceil(thickScriptFile.size / 1024)} KB</small>
+              </div>
+              <label className="dialog-field">
+                <span>项目名称</span>
+                <input
+                  value={thickScriptTitle}
+                  onChange={(event) => setThickScriptTitle(event.target.value)}
+                  placeholder="例如：极乐城·场1"
+                />
+              </label>
+              <label className="dialog-field">
+                <span>资产根目录（可选）</span>
+                <input
+                  value={thickScriptAssetRoot}
+                  onChange={(event) =>
+                    setThickScriptAssetRoot(event.target.value)
+                  }
+                  placeholder="E:\\...\\图像资产"
+                />
+                <small>
+                  服务器本机路径；扫描 R-XX、S-XX、P-XX
+                  文件名。留空也可先建立无素材项目。
+                </small>
+              </label>
+              <div className="dialog-actions">
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => setThickScriptDialog(false)}
+                >
+                  取消
+                </button>
+                <button
+                  className="glow-button"
+                  type="submit"
+                  disabled={thickScriptSubmitting}
+                >
+                  {thickScriptSubmitting ? "导入中…" : "建立项目并预览"}
+                </button>
+              </div>
+            </motion.form>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {styleDialog ? (
+          <motion.div
+            className="director-dialog-backdrop"
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onMouseDown={() => setStyleDialog(false)}
+          >
+            <motion.div
+              className="director-dialog"
+              initial={{ y: 8, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="dialog-head">
+                <div>
+                  <span className="overline">DIRECTOR'S DIRECTION</span>
+                  <h2>视觉气质编辑器</h2>
+                  <p>
+                    模板只是起点。把光线、镜头、节奏和禁用项写成自己的导演规则。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setStyleDialog(false)}
+                  aria-label="关闭视觉气质编辑器"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <label className="dialog-field">
+                <span>气质名称</span>
+                <input
+                  value={styleDraft.name}
+                  onChange={(event) =>
+                    setStyleDraft((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="例如：东方悬疑胶片"
+                />
+              </label>
+              <label className="dialog-field">
+                <span>视觉与导演说明</span>
+                <textarea
+                  rows="7"
+                  value={styleDraft.instructions}
+                  onChange={(event) =>
+                    setStyleDraft((current) => ({
+                      ...current,
+                      instructions: event.target.value,
+                    }))
+                  }
+                  placeholder="描述光线、色彩、镜头、动作节奏、声音和需要避免的内容…"
+                />
+              </label>
+              <div className="dialog-actions">
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={applyStyleDraft}
+                >
+                  仅应用到当前项目
+                </button>
+                <button
+                  className="glow-button"
+                  type="button"
+                  onClick={saveCustomStyle}
+                >
+                  <Plus size={14} /> 保存为自定义模板
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {projectDialog && projectDraft ? (
+          <motion.div
+            className="director-dialog-backdrop"
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onMouseDown={() => setProjectDialog(false)}
+          >
+            <motion.form
+              className="director-dialog wide-dialog"
+              initial={{ y: 8, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              onSubmit={saveProjectDialog}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="dialog-head">
+                <div>
+                  <span className="overline">PROJECT BIBLE</span>
+                  <h2>编辑整体设定</h2>
+                  <p>这是 Agent 和每个镜头共同使用的创作底稿。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setProjectDialog(false)}
+                  aria-label="关闭项目设定"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <div className="dialog-columns">
+                <div>
+                  <label className="dialog-field">
+                    <span>片名</span>
+                    <input
+                      value={projectDraft.brief.title}
+                      onChange={(event) =>
+                        updateProjectDraft("brief", "title", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>故事简介 / 原始念头</span>
+                    <textarea
+                      rows="4"
+                      value={projectDraft.brief.prompt}
+                      onChange={(event) =>
+                        updateProjectDraft(
+                          "brief",
+                          "prompt",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>视觉气质说明</span>
+                    <textarea
+                      rows="4"
+                      value={projectDraft.brief.style_instructions}
+                      onChange={(event) =>
+                        updateProjectDraft(
+                          "brief",
+                          "style_instructions",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>镜头续写策略</span>
+                    <select
+                      value={projectDraft.brief.continuation_mode || "quality"}
+                      onChange={(event) =>
+                        updateProjectDraft(
+                          "brief",
+                          "continuation_mode",
+                          event.target.value,
+                        )
+                      }
+                    >
+                      {continuationModeOptions.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label}（{item.dialogHint}）
+                        </option>
+                      ))}
+                    </select>
+                    <small className="field-hint">
+                      极速模式会影响每个没有显式首帧的镜头；显式首帧始终优先。
+                    </small>
+                  </label>
+                  {projectDraft.brief.continuation_mode === "ultra_fast" && (
+                    <>
+                      <label className="dialog-field">
+                        <span>极速首帧策略</span>
+                        <select
+                          value={
+                            projectDraft.brief.ultra_fast_anchor_strategy ||
+                            "independent"
+                          }
+                          onChange={(event) =>
+                            updateProjectDraft(
+                              "brief",
+                              "ultra_fast_anchor_strategy",
+                              event.target.value,
+                            )
+                          }
+                        >
+                          {ultraFastAnchorOptions.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.label}（{item.hint}）
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {(projectDraft.brief.ultra_fast_anchor_strategy ||
+                        "independent") === "independent" && (
+                        <label className="dialog-field">
+                          <span>镜间转场</span>
+                          <select
+                            value={
+                              projectDraft.brief.ultra_fast_transition ||
+                              "fade_black"
+                            }
+                            onChange={(event) =>
+                              updateProjectDraft(
+                                "brief",
+                                "ultra_fast_transition",
+                                event.target.value,
+                              )
+                            }
+                          >
+                            {ultraFastTransitionOptions.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div>
+                  <label className="dialog-field">
+                    <span>Logline / 一句话介绍</span>
+                    <textarea
+                      rows="3"
+                      value={projectDraft.world_bible.logline}
+                      onChange={(event) =>
+                        updateProjectDraft(
+                          "world_bible",
+                          "logline",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>人物设定（每行一个）</span>
+                    <textarea
+                      rows="3"
+                      value={projectDraft.world_bible.character_notes}
+                      onChange={(event) =>
+                        updateProjectDraft(
+                          "world_bible",
+                          "character_notes",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>场景 / 道具 / 声音（每行一个）</span>
+                    <textarea
+                      rows="4"
+                      value={`${projectDraft.world_bible.location_notes}\n${projectDraft.world_bible.prop_notes}\n${projectDraft.world_bible.audio_notes}`.trim()}
+                      onChange={(event) => {
+                        const lines = splitLines(event.target.value);
+                        updateProjectDraft(
+                          "world_bible",
+                          "location_notes",
+                          lines.slice(0, 2).join("\n"),
+                        );
+                        updateProjectDraft(
+                          "world_bible",
+                          "prop_notes",
+                          lines.slice(2, 4).join("\n"),
+                        );
+                        updateProjectDraft(
+                          "world_bible",
+                          "audio_notes",
+                          lines.slice(4).join("\n"),
+                        );
+                      }}
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>连续性规则（每行一个）</span>
+                    <textarea
+                      rows="3"
+                      value={projectDraft.world_bible.continuity_rules}
+                      onChange={(event) =>
+                        updateProjectDraft(
+                          "world_bible",
+                          "continuity_rules",
+                          event.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+              <div className="dialog-actions">
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => setProjectDialog(false)}
+                >
+                  取消
+                </button>
+                <button
+                  className="glow-button"
+                  type="submit"
+                  disabled={dialogSaving}
+                >
+                  {dialogSaving ? "保存中…" : "保存整体设定"}
+                </button>
+              </div>
+            </motion.form>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {editingShot && shotDraft ? (
+          <motion.div
+            className="director-dialog-backdrop"
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onMouseDown={() => setEditingShot(null)}
+          >
+            <motion.form
+              className="director-dialog wide-dialog shot-dialog"
+              initial={{ y: 8, scale: 0.99 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              onSubmit={saveShotDialog}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="dialog-head">
+                <div>
+                  <span className="overline">
+                    SHOT {String((editingShot.index || 0) + 1).padStart(2, "0")}
+                  </span>
+                  <h2>编辑镜头</h2>
+                  <p>完整修改会让该镜重新进入待制作状态。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingShot(null)}
+                  aria-label="关闭镜头编辑"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <div className="dialog-columns">
+                <div>
+                  <label className="dialog-field">
+                    <span>镜头标题</span>
+                    <input
+                      value={shotDraft.title}
+                      onChange={(event) =>
+                        updateShotDraft("title", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>镜头目的</span>
+                    <textarea
+                      rows="3"
+                      value={shotDraft.purpose}
+                      onChange={(event) =>
+                        updateShotDraft("purpose", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>首帧构图 Prompt · 仅零秒静态画面</span>
+                    <textarea
+                      rows="7"
+                      maxLength={1000}
+                      value={shotDraft.anchor_prompt}
+                      onChange={(event) =>
+                        updateShotDraft("anchor_prompt", event.target.value)
+                      }
+                      placeholder="人物、场景、服装、位置关系、表情、构图、光线；不要写动作过程、镜头运动、对白或音效。"
+                    />
+                    <small>
+                      {shotDraft.start_frame_asset_id
+                        ? "已指定首帧素材，本 Prompt 会保留但不会调用图像生成服务。"
+                        : `${openingFrameSourceLabel(project, shotDraft, assets)}；由 Planner 生成并直接作为首帧合成指令。选择图片参考时走 Image Edit，零素材时走 T2I。最多 1000 字符（当前 ${shotDraft.anchor_prompt.length}/1000）。`}
+                    </small>
+                  </label>
+                  <label className="dialog-field">
+                    <span>视频画面与动作 Prompt · 非对白</span>
+                    <textarea
+                      rows="8"
+                      value={shotDraft.prompt}
+                      onChange={(event) =>
+                        updateShotDraft("prompt", event.target.value)
+                      }
+                      placeholder="描述主体、环境、动作发展、表演、构图和镜头运动；不要把台词写在这里。"
+                    />
+                    <small>
+                      这部分会被明确标记为非语音指令，角色不会朗读。
+                    </small>
+                  </label>
+                  <label className="dialog-field">
+                    <span>负面提示词</span>
+                    <textarea
+                      rows="3"
+                      value={shotDraft.negative_prompt || ""}
+                      onChange={(event) =>
+                        updateShotDraft("negative_prompt", event.target.value)
+                      }
+                    />
+                  </label>
+                  <section className="shot-prompt-section">
+                    <div className="shot-prompt-section-head">
+                      <div>
+                        <strong>声音设计</strong>
+                        <small>
+                          环境声、画内音效与观众听到的配乐分开描述。
+                        </small>
+                      </div>
+                    </div>
+                    <label className="dialog-field">
+                      <span>环境声与动作音效 · 角色可听</span>
+                      <textarea
+                        rows="4"
+                        value={shotDraft.audio_prompt}
+                        onChange={(event) =>
+                          updateShotDraft("audio_prompt", event.target.value)
+                        }
+                        placeholder="环境底噪、脚步、衣物、风声、物体碰撞等；不要写对白。"
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>非画内配乐 · 仅观众可听</span>
+                      <textarea
+                        rows="3"
+                        value={shotDraft.music_prompt}
+                        onChange={(event) =>
+                          updateShotDraft("music_prompt", event.target.value)
+                        }
+                        placeholder="留空表示无配乐。"
+                      />
+                    </label>
+                  </section>
+                </div>
+                <div>
+                  <div className="dialog-field-row">
+                    <label className="dialog-field">
+                      <span>任务</span>
+                      <select
+                        value={runtimeShotTask(project, shotDraft)}
+                        onChange={(event) => updateShotTask(event.target.value)}
+                      >
+                        <option value="fl2va">FL2VA · 首帧/末帧生视频</option>
+                        <option value="ref2va">Ref2VA · 参考视频续写</option>
+                      </select>
+                    </label>
+                    <label className="dialog-field">
+                      <span>时长（秒）</span>
+                      <input
+                        type="number"
+                        min="4"
+                        max="15"
+                        step="0.001"
+                        value={shotDraft.duration_seconds}
+                        onChange={(event) =>
+                          updateShotDraft(
+                            "duration_seconds",
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                  <label className="dialog-field">
+                    <span>摄影机</span>
+                    <input
+                      value={shotDraft.camera || ""}
+                      onChange={(event) =>
+                        updateShotDraft("camera", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>边界策略</span>
+                    <select
+                      value={shotDraft.transition_kind || "continuous"}
+                      onChange={(event) =>
+                        updateShotDraft("transition_kind", event.target.value)
+                      }
+                    >
+                      <option value="continuous">连续动作</option>
+                      <option value="camera_move">同轴镜头运动</option>
+                      <option value="match_cut">匹配剪辑</option>
+                      <option value="occlusion_cut">遮挡转场</option>
+                      <option value="hard_cut">硬切 / 新场景</option>
+                      <option value="anchor">新首帧锚点</option>
+                    </select>
+                  </label>
+                  <section className="shot-prompt-section dialogue-editor">
+                    <div className="shot-prompt-section-head">
+                      <div>
+                        <strong>角色对白</strong>
+                        <small>
+                          只有这里的原文会被角色说出来；留空即强制无对白、无旁白。
+                        </small>
+                      </div>
+                      <button type="button" onClick={addDialogueLine}>
+                        <Plus size={13} /> 添加对白
+                      </button>
+                    </div>
+                    {(shotDraft.dialogue || []).length ? (
+                      shotDraft.dialogue.map((line, index) => (
+                        <div
+                          className="dialogue-line-card"
+                          key={`dialogue-${index}`}
+                        >
+                          <div className="dialogue-line-title">
+                            <span>
+                              对白 {String(index + 1).padStart(2, "0")}
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`删除对白 ${index + 1}`}
+                              onClick={() => removeDialogueLine(index)}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                          <div className="dialog-field-row">
+                            <label className="dialog-field">
+                              <span>说话人</span>
+                              <input
+                                required
+                                value={line.speaker}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "speaker",
+                                    event.target.value,
+                                  )
+                                }
+                                placeholder="角色名"
+                              />
+                            </label>
+                            <label className="dialog-field">
+                              <span>语言</span>
+                              <input
+                                required
+                                value={line.language}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "language",
+                                    event.target.value,
+                                  )
+                                }
+                                placeholder="Chinese"
+                              />
+                            </label>
+                          </div>
+                          <label className="dialog-field">
+                            <span>准确原文 · 不要写角色名或动作</span>
+                            <textarea
+                              required
+                              rows="3"
+                              value={line.text}
+                              onChange={(event) =>
+                                updateDialogueLine(
+                                  index,
+                                  "text",
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="只填写需要被说出的原句。"
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>说话方式</span>
+                            <input
+                              required
+                              value={line.delivery}
+                              onChange={(event) =>
+                                updateDialogueLine(
+                                  index,
+                                  "delivery",
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="克制、兴奋、低声警惕……"
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>声音来源</span>
+                            <select
+                              value={line.mode || "on_screen"}
+                              onChange={(event) =>
+                                updateDialogueLine(
+                                  index,
+                                  "mode",
+                                  event.target.value,
+                                )
+                              }
+                            >
+                              <option value="on_screen">
+                                画内角色说话 · 对口型
+                              </option>
+                              <option value="off_screen">
+                                画外角色说话 · 画内人物闭嘴
+                              </option>
+                              <option value="voice_over">
+                                旁白 / 内心声 · 画内人物闭嘴
+                              </option>
+                            </select>
+                          </label>
+                          <div className="dialog-field-row">
+                            <label className="dialog-field">
+                              <span>开始秒数（可选）</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.1"
+                                value={line.start_seconds ?? ""}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "start_seconds",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </label>
+                            <label className="dialog-field">
+                              <span>结束秒数（可选）</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max={shotDraft.duration_seconds}
+                                step="0.1"
+                                value={line.end_seconds ?? ""}
+                                onChange={(event) =>
+                                  updateDialogueLine(
+                                    index,
+                                    "end_seconds",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="dialogue-empty">
+                        本镜头无对白，H3 将被明确要求保持无语音。
+                      </div>
+                    )}
+                  </section>
+                  <div className="dialog-field-row">
+                    <label className="dialog-field">
+                      <span>Steps</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={shotDraft.inference_steps}
+                        onChange={(event) =>
+                          updateShotDraft("inference_steps", event.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="dialog-field">
+                      <span>Seed</span>
+                      <input
+                        type="number"
+                        value={shotDraft.seed}
+                        onChange={(event) =>
+                          updateShotDraft("seed", event.target.value)
+                        }
+                      />
+                    </label>
+                  </div>
+                  <label className="dialog-field">
+                    <span>承接上一镜</span>
+                    <select
+                      value={shotDraft.continuity_from_shot_id || ""}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "continuity_from_shot_id",
+                          event.target.value || null,
+                        )
+                      }
+                    >
+                      <option value="">不承接 / 独立起镜</option>
+                      {(project.shots || [])
+                        .filter((shot) => shot.index < editingShot.index)
+                        .map((shot) => (
+                          <option key={shot.id} value={shot.id}>
+                            {String(shot.index + 1).padStart(2, "0")} ·{" "}
+                            {shot.title}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label className="dialog-field">
+                    <span>续写方式（留空继承项目设定）</span>
+                    <select
+                      value={shotDraft.continuation_mode || ""}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "continuation_mode",
+                          event.target.value || null,
+                        )
+                      }
+                    >
+                      <option value="">继承项目设定</option>
+                      {continuationModeOptions.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label} · {item.dialogHint}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="dialog-field">
+                    <span>显式首帧（优先于自动合成）</span>
+                    <select
+                      value={shotDraft.start_frame_asset_id || ""}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "start_frame_asset_id",
+                          event.target.value || null,
+                        )
+                      }
+                    >
+                      <option value="">
+                        未指定：有图片走 Image Edit，无图片走 T2I
+                      </option>
+                      {assets
+                        .filter((asset) => asset.kind === "image")
+                        .map((asset) => (
+                          <option key={asset.id} value={asset.id}>
+                            {assetLabel(asset)}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <div className="shot-reference-picker">
+                    <span>本镜参考素材</span>
+                    <div>
+                      {assets.map((asset) => (
+                        <button
+                          type="button"
+                          key={asset.id}
+                          className={
+                            shotDraft.reference_asset_ids.includes(asset.id)
+                              ? "selected"
+                              : ""
+                          }
+                          onClick={() => toggleShotReference(asset.id)}
+                        >
+                          {shotDraft.reference_asset_ids.includes(asset.id) ? (
+                            <Check size={12} />
+                          ) : (
+                            <Plus size={12} />
+                          )}
+                          {assetLabel(asset)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <section className="shot-prompt-section h3-storyboard-editor">
+                  <div className="shot-prompt-section-head">
+                    <div>
+                      <strong>H3 分镜时间线</strong>
+                      <small>
+                        Agent 生成的可观测状态、连续性与逐拍动作会直接编译进
+                        H3 Prompt。
+                      </small>
+                    </div>
+                  </div>
+                  <label className="dialog-field">
+                    <span>开场状态 · 第一帧可见事实</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={shotDraft.opening_state}
+                      onChange={(event) =>
+                        updateShotDraft("opening_state", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>收尾状态 · 最后一帧可见事实</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={shotDraft.ending_state}
+                      onChange={(event) =>
+                        updateShotDraft("ending_state", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>跨镜连续性 Handoff</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={shotDraft.continuity_handoff}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "continuity_handoff",
+                          event.target.value,
+                        )
+                      }
+                      placeholder="身份、服装、道具、空间、运动方向、光线、机位与环境声。"
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>本镜 Hook · 单一注意力焦点</span>
+                    <textarea
+                      required
+                      rows="2"
+                      value={shotDraft.hook}
+                      onChange={(event) =>
+                        updateShotDraft("hook", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="dialog-field">
+                    <span>语义参考锚点 · 每行一个</span>
+                    <textarea
+                      required
+                      rows="3"
+                      value={(shotDraft.reference_anchors || []).join("\n")}
+                      onChange={(event) =>
+                        updateShotDraft(
+                          "reference_anchors",
+                          event.target.value.split("\n"),
+                        )
+                      }
+                      placeholder="Character identity: …\nScene geography: …\nProp identity: …"
+                    />
+                  </label>
+                  <div className="h3-beat-list">
+                    {(shotDraft.visual_beats || []).map((beat, index) => (
+                      <div
+                        className="dialogue-line-card h3-beat-card"
+                        key={`beat-${index}`}
+                      >
+                        <div className="dialogue-line-title">
+                          <span>
+                            BEAT {String(index + 1).padStart(2, "0")}
+                          </span>
+                          <small>
+                            {Number(beat.start_seconds).toFixed(1)}s–
+                            {Number(beat.end_seconds).toFixed(1)}s
+                          </small>
+                        </div>
+                        <div className="dialog-field-row">
+                          <label className="dialog-field">
+                            <span>开始秒数</span>
+                            <input
+                              required
+                              type="number"
+                              min="0"
+                              step="0.1"
+                              value={beat.start_seconds}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "start_seconds",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="dialog-field">
+                            <span>结束秒数</span>
+                            <input
+                              required
+                              type="number"
+                              min="0.1"
+                              max={shotDraft.duration_seconds}
+                              step="0.1"
+                              value={beat.end_seconds}
+                              onChange={(event) =>
+                                updateVisualBeat(
+                                  index,
+                                  "end_seconds",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
+                        <label className="dialog-field">
+                          <span>唯一主动作</span>
+                          <textarea
+                            required
+                            rows="2"
+                            value={beat.visual_action}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "visual_action",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>状态变化</span>
+                          <textarea
+                            rows="2"
+                            value={beat.state_change}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "state_change",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>镜头运动 · 类型 / 幅度 / 速度</span>
+                          <input
+                            value={beat.camera}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "camera",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>与动作同步的声音</span>
+                          <input
+                            value={beat.sound}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "sound",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>表演与表情</span>
+                          <textarea
+                            rows="2"
+                            value={beat.performance || ""}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "performance",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="重心、眼神、面部微表情与动作阶段。"
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>屏幕空间锚点</span>
+                          <input
+                            value={beat.spatial_anchor || ""}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "spatial_anchor",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="左/右位置、固定地标、前中后景。"
+                          />
+                        </label>
+                        <label className="dialog-field">
+                          <span>Beat handoff</span>
+                          <input
+                            value={beat.handoff || ""}
+                            onChange={(event) =>
+                              updateVisualBeat(
+                                index,
+                                "handoff",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="下一拍继承的姿态或道具状态。"
+                          />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </div>
+              <div className="dialog-actions">
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => setEditingShot(null)}
+                >
+                  取消
+                </button>
+                <button
+                  className="glow-button"
+                  type="submit"
+                  disabled={dialogSaving}
+                >
+                  {dialogSaving ? "保存中…" : "保存镜头"}
+                </button>
+              </div>
+            </motion.form>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {editingAsset ? (
+          <motion.div
+            className="asset-modal-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onMouseDown={() => setEditingAsset(null)}
+          >
+            <motion.form
+              className="asset-modal"
+              initial={{ opacity: 0, scale: 0.97, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98 }}
+              onSubmit={saveAsset}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <div className="asset-modal-head">
+                <div>
+                  <span className="overline">MATERIAL METADATA</span>
+                  <h2>编辑素材</h2>
+                  <small>{editingAsset.original_name}</small>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingAsset(null)}
+                  aria-label="关闭素材编辑"
+                >
+                  <X size={17} />
+                </button>
+              </div>
+              <label className="asset-modal-field">
+                <span>素材名称 / 角色名</span>
+                <input
+                  value={assetDraft.display_name}
+                  onChange={(event) =>
+                    setAssetDraft((current) => ({
+                      ...current,
+                      display_name: event.target.value,
+                    }))
+                  }
+                  placeholder="例如：白鹿、孟子义、太和殿"
+                />
+              </label>
+              <label className="asset-modal-field">
+                <span>描述（可选）</span>
+                <input
+                  value={assetDraft.caption}
+                  onChange={(event) =>
+                    setAssetDraft((current) => ({
+                      ...current,
+                      caption: event.target.value,
+                    }))
+                  }
+                  placeholder="例如：女主角正面定妆照，红色宫装"
+                />
+              </label>
+              <label className="asset-modal-field">
+                <span>标签</span>
+                <input
+                  value={assetDraft.tags}
+                  onChange={(event) =>
+                    setAssetDraft((current) => ({
+                      ...current,
+                      tags: event.target.value,
+                    }))
+                  }
+                  placeholder="用逗号分隔，例如：女主、红衣、夜景"
+                />
+              </label>
+              <fieldset className="asset-role-field">
+                <legend>素材角色（可多选）</legend>
+                <div>
+                  {Object.entries(roleLabel).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={
+                        assetDraft.roles.includes(value) ? "selected" : ""
+                      }
+                      onClick={() => toggleDraftRole(value)}
+                    >
+                      {assetDraft.roles.includes(value) ? (
+                        <Check size={13} />
+                      ) : (
+                        <Plus size={13} />
+                      )}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+              <div className="asset-modal-actions">
+                <button
+                  className="outline-button asset-delete-button"
+                  type="button"
+                  onClick={deleteAsset}
+                  disabled={assetDeleting || assetSaving}
+                >
+                  <Trash2 size={14} />
+                  {assetDeleting ? "删除中…" : "删除素材"}
+                </button>
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => setEditingAsset(null)}
+                  disabled={assetSaving || assetDeleting}
+                >
+                  取消
+                </button>
+                <button
+                  className="glow-button"
+                  type="submit"
+                  disabled={assetSaving || assetDeleting}
+                >
+                  {assetSaving ? "保存中…" : "保存素材"}
+                </button>
+              </div>
+            </motion.form>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {notice ? (
+          <motion.div
+            className="toast"
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            onAnimationComplete={() => setTimeout(() => setNotice(""), 3600)}
+          >
+            <Sparkles size={15} />
+            {notice}
+            <button onClick={() => setNotice("")}>
+              <X size={14} />
+            </button>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")).render(<App />);

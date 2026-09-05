@@ -1,0 +1,67 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.whl
+*.tar.gz
+.coverage
+htmlcov/
+# Local runtime state and generated media. Keep the directories themselves
+# available through .gitkeep files only if a future contributor needs them.
+data/*
+!data/.gitkeep
+assets/*
+!assets/.gitkeep
+outputs/
+generated/
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.mp4
+*.mov
+*.webm
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+# Keep the reviewed public README screenshot while ignoring runtime media.
+!assets/screenshot.webp
+todo.md
+
+# DSH workspace indexes and one-off data dumps.
+.dsh-project-memory/
+import.body
+import.body.*
+
+# Local leases, tunnels, reports, caches, and editor state.
+.codex/
+.claude/
+.mypy_cache/
+.pyright/
+.cache/
+.coverage.*
+*.pid
+*.sock
+*.tmp
+*.swp
+web/node_modules/
+web/dist/
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# 本地开发文档与测试不入库（2026-09 约定，本地保留）
+/docs/
+/tests/

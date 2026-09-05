@@ -1,0 +1,445 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import time
+from base64 import b64encode
+from pathlib import Path
+
+import httpx
+
+from long_video_studio.dialogue_harness import (
+    prepare_dialogue,
+    validate_active_speakers,
+)
+from long_video_studio.domain import ProjectBrief, ShotSpec, ShotTask, WorldBible
+from long_video_studio.h3_limits import H3_MAX_SHOT_SECONDS
+from long_video_studio.h3_prompt import H3Reference, render_h3_prompt
+
+
+class H3Client:
+    def __init__(
+        self,
+        endpoint: str,
+        timeout_seconds: float = 7200,
+        flow_shift: float = 12.0,
+        quality: str = "lossless",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        self.endpoint = self._normalize_endpoint(endpoint)
+        self.timeout_seconds = timeout_seconds
+        self.timeout = httpx.Timeout(timeout_seconds, connect=30)
+        self.flow_shift = flow_shift
+        self.quality = quality if quality in {"lossless", "high"} else "lossless"
+        self.transport = transport
+
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        value = endpoint.rstrip("/")
+        if not value.endswith("/v1/videos/sync"):
+            value += "/v1/videos/sync"
+        return value
+
+    async def health(self) -> bool:
+        base_url = self.endpoint.removesuffix("/v1/videos/sync")
+        try:
+            async with httpx.AsyncClient(timeout=10, transport=self.transport) as client:
+                response = await client.get(base_url + "/health")
+            return response.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    def unavailable_error(self, task: str, error: BaseException) -> RuntimeError:
+        base_url = self.endpoint.removesuffix("/v1/videos/sync")
+        return RuntimeError(
+            f"H3 {task} endpoint is unavailable at {base_url}; "
+            "start the selected service before rendering. "
+            f"Underlying error: {error}"
+        )
+
+    async def generate_fl2va(
+        self,
+        shot: ShotSpec,
+        start_frame: Path,
+        output_path: Path,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        async_job: bool = False,
+        brief: ProjectBrief | None = None,
+        world_bible: WorldBible | None = None,
+        previous_shot: ShotSpec | None = None,
+        speaker_ids: dict[str, str] | None = None,
+    ) -> Path:
+        self._validate_duration(shot)
+        shot = self._prepare_dialogue_request(shot, world_bible)
+        extra_params = {
+            "task": "fl2va",
+            "duration": shot.duration_seconds,
+            "frame_indices": [0],
+            "audio_flow_shift": 3.0,
+        }
+        data = self._common_data(
+            shot,
+            extra_params,
+            width=width,
+            height=height,
+            task=ShotTask.FL2VA,
+            brief=brief,
+            world_bible=world_bible,
+            previous_shot=previous_shot,
+            speaker_ids=speaker_ids,
+        )
+        post = self._post_async_job if async_job else self._post
+        return await post(
+            data,
+            files={
+                "input_reference": (
+                    start_frame.name,
+                    start_frame,
+                    self._media_type(start_frame),
+                )
+            },
+            output_path=output_path,
+        )
+
+    async def generate_ref2va(
+        self,
+        shot: ShotSpec,
+        reference_image: Path,
+        reference_media: Path,
+        output_path: Path,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        async_job: bool = False,
+        brief: ProjectBrief | None = None,
+        world_bible: WorldBible | None = None,
+        previous_shot: ShotSpec | None = None,
+        speaker_ids: dict[str, str] | None = None,
+    ) -> Path:
+        self._validate_duration(shot)
+        shot = self._prepare_dialogue_request(shot, world_bible)
+        extra_params = {
+            "task": "ref2va",
+            "duration": shot.duration_seconds,
+            "ref_images_pixels_shape": [[-1, -1]],
+            "audio_flow_shift": 3.0,
+        }
+        is_audio = reference_media.suffix.lower() in {
+            ".wav",
+            ".mp3",
+            ".m4a",
+            ".flac",
+            ".aac",
+        }
+        media_kind = "audio" if is_audio else "video"
+        media_label = "Audio 1" if is_audio else "Video 1"
+        data = self._common_data(
+            shot,
+            extra_params,
+            width=width,
+            height=height,
+            references=(
+                H3Reference(
+                    kind="picture",
+                    label="Picture 1",
+                    description=(
+                        f"Use {reference_image.name} as the exact first-frame/keyframe image for the target clip. "
+                        "Preserve its composition, subject identities, screen positions, wardrobe, props, and "
+                        "lighting for the first 0.5 to 1.0 seconds before advancing into the new action."
+                    ),
+                    role="first_frame",
+                    relationship="keyframe",
+                ),
+                H3Reference(
+                    kind=media_kind,
+                    label=media_label,
+                    description=(
+                        f"Use {reference_media.name} as the {media_kind} reference and preserve its relevant "
+                        "continuity, motion, scene, style, and synchronized sound characteristics."
+                    ),
+                    role="voice_timbre" if is_audio else "continuation",
+                    relationship="reference" if is_audio else "fully_preserved",
+                ),
+            ),
+            task=ShotTask.REF2VA,
+            brief=brief,
+            world_bible=world_bible,
+            previous_shot=previous_shot,
+            speaker_ids=speaker_ids,
+        )
+        if is_audio:
+            media_type = self._media_type(reference_media)
+            encoded = b64encode(reference_media.read_bytes()).decode("ascii")
+            data["audio_reference"] = json.dumps({"audio_url": f"data:{media_type};base64,{encoded}"})
+            files = {
+                "input_reference": (
+                    reference_image.name,
+                    reference_image,
+                    self._media_type(reference_image),
+                )
+            }
+        else:
+            # Video Ref2VA carries its own visual and audio conditioning.  The
+            # current H3 API consumes it through the plural reference field.
+            files = [
+                (
+                    "input_references",
+                    (
+                        reference_image.name,
+                        reference_image,
+                        self._media_type(reference_image),
+                    ),
+                ),
+                (
+                    "input_references",
+                    (
+                        reference_media.name,
+                        reference_media,
+                        self._media_type(reference_media),
+                    ),
+                ),
+            ]
+        post = self._post_async_job if async_job else self._post
+        return await post(
+            data,
+            files=files,
+            output_path=output_path,
+        )
+
+    @staticmethod
+    def _validate_duration(shot: ShotSpec) -> None:
+        if shot.duration_seconds > H3_MAX_SHOT_SECONDS:
+            raise ValueError(f"H3 output-duration ceiling is {H3_MAX_SHOT_SECONDS:g} seconds per shot")
+
+    @staticmethod
+    def _prepare_dialogue_request(shot: ShotSpec, world_bible: WorldBible | None) -> ShotSpec:
+        """Run the same deterministic dialogue preflight at the adapter edge."""
+
+        if not shot.dialogue:
+            return shot
+        legacy_dialogue = world_bible is None or not world_bible.subjects
+        prepared = prepare_dialogue(shot.dialogue, shot.duration_seconds, world_bible)
+        active_subject_ids = shot.continuity_in.active_subject_ids
+        if legacy_dialogue and not active_subject_ids and not shot.continuity_in.characters:
+            active_subject_ids = [
+                line.subject_id for line in prepared.lines if line.mode == "on_screen" and line.subject_id
+            ]
+        validate_active_speakers(
+            prepared.lines,
+            prepared.world_bible,
+            shot.continuity_in.characters,
+            active_subject_ids=active_subject_ids,
+            shot_index=shot.index,
+        )
+        continuity_in = shot.continuity_in.model_copy(update={"active_subject_ids": active_subject_ids})
+        return shot.model_copy(update={"dialogue": list(prepared.lines), "continuity_in": continuity_in})
+
+    def _common_data(
+        self,
+        shot: ShotSpec,
+        extra_params: dict[str, object],
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        references: tuple[H3Reference, ...] = (),
+        task: ShotTask | None = None,
+        brief: ProjectBrief | None = None,
+        world_bible: WorldBible | None = None,
+        previous_shot: ShotSpec | None = None,
+        speaker_ids: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        prompt = render_h3_prompt(
+            shot,
+            references,
+            task=task,
+            brief=brief,
+            world_bible=world_bible,
+            previous_shot=previous_shot,
+            speaker_ids=speaker_ids,
+        )
+        data = {
+            "prompt": prompt,
+            # ``seconds`` is the public VideoGenerationRequest field used by
+            # provider metadata and audio scheduling. Keep ``duration`` in
+            # extra_params for the current H3 pipeline, but do not rely on the
+            # implementation-specific field alone.
+            "seconds": self._seconds_form_value(shot.duration_seconds),
+            "fps": str(shot.fps),
+            "num_inference_steps": str(shot.inference_steps),
+            "seed": str(shot.seed),
+            "flow_shift": str(self.flow_shift),
+            "quality": self.quality,
+            "extra_params": json.dumps(extra_params, ensure_ascii=False),
+        }
+        # Width/height are top-level VideoGenerationRequest fields. Putting
+        # them only inside extra_params is silently ignored by vLLM-Omni's
+        # sampling resolver, which then falls back to its 16:9 default.
+        if width is not None and height is not None:
+            data.update({"width": str(int(width)), "height": str(int(height))})
+        return data
+
+    @staticmethod
+    def _seconds_form_value(duration_seconds: float) -> str:
+        """Encode the OpenAI-compatible integer ``seconds`` form field.
+
+        MiniMax-H3 keeps the exact request duration in ``extra_params``.  The
+        public vLLM-Omni ``seconds`` field is nevertheless schema-constrained
+        to an integer string, so ``10.0`` is invalid even though it is
+        numerically integral. For fractional requests use a conservative
+        ceiling in this metadata field; the exact float remains in the model
+        specific ``duration`` extra parameter.
+        """
+
+        value = float(duration_seconds)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"duration_seconds must be positive and finite, got {duration_seconds!r}")
+        if value.is_integer():
+            return str(int(value))
+        return str(math.ceil(value))
+
+    @staticmethod
+    def _raise_response_error(response: httpx.Response, task: str) -> None:
+        if not response.is_error:
+            return
+        detail = response.text.strip().replace("\n", " ")[:1000]
+        raise RuntimeError(
+            f"H3 {task} endpoint rejected the request with HTTP {response.status_code}: {detail or 'no response body'}"
+        )
+
+    async def _post(
+        self,
+        data: dict[str, str],
+        files: dict[str, tuple[str, Path, str]] | list[tuple[str, tuple[str, Path, str]]],
+        output_path: Path,
+    ) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        handles = []
+        multipart: list[tuple[str, tuple[str, object, str]]] = []
+        try:
+            entries = files.items() if isinstance(files, dict) else files
+            for field, (filename, path, media_type) in entries:
+                handle = path.open("rb")
+                handles.append(handle)
+                multipart.append((field, (filename, handle, media_type)))
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+                    response = await client.post(self.endpoint, data=data, files=multipart)
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                self._raise_response_error(response, task)
+            except httpx.RequestError as error:
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                raise self.unavailable_error(task, error) from error
+            content_type = response.headers.get("content-type", "")
+            if "video" not in content_type and not response.content.startswith(b"\x00\x00"):
+                raise RuntimeError(
+                    f"H3 endpoint returned unexpected content type {content_type}: {response.text[:500]}"
+                )
+            temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+            temporary.write_bytes(response.content)
+            os.replace(temporary, output_path)
+            return output_path
+        finally:
+            for handle in handles:
+                handle.close()
+
+    async def _post_async_job(
+        self,
+        data: dict[str, str],
+        files: dict[str, tuple[str, Path, str]] | list[tuple[str, tuple[str, Path, str]]],
+        output_path: Path,
+    ) -> Path:
+        """Submit a durable video job, poll it, then download the result."""
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        handles = []
+        multipart: list[tuple[str, tuple[str, object, str]]] = []
+        base_url = self.endpoint.removesuffix("/sync")
+        try:
+            entries = files.items() if isinstance(files, dict) else files
+            for field, (filename, path, media_type) in entries:
+                handle = path.open("rb")
+                handles.append(handle)
+                multipart.append((field, (filename, handle, media_type)))
+            client = httpx.AsyncClient(timeout=self.timeout, transport=self.transport)
+            try:
+                response = await client.post(base_url, data=data, files=multipart)
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                self._raise_response_error(response, task)
+            except httpx.RequestError as error:
+                task = json.loads(data.get("extra_params", "{}")).get("task", "video")
+                raise self.unavailable_error(task, error) from error
+            payload = response.json()
+            job_id = payload.get("id")
+            if not job_id:
+                raise RuntimeError(f"H3 async endpoint returned no job id: {payload}")
+            deadline = time.monotonic() + self.timeout_seconds
+            status_url = f"{base_url}/{job_id}"
+            resolved_job_id = False
+            while True:
+                status_response = await client.get(status_url)
+                if status_response.status_code == 404 and not resolved_job_id:
+                    # Some vLLM-Omni builds return a submission id that
+                    # differs from the id stored in VIDEO_JOBS. Resolve the
+                    # newest matching prompt once, then continue polling.
+                    jobs_response = await client.get(base_url)
+                    jobs_response.raise_for_status()
+                    candidates = [
+                        job for job in jobs_response.json().get("data", []) if job.get("prompt") == data.get("prompt")
+                    ]
+                    if candidates:
+                        job_id = max(candidates, key=lambda job: job.get("created_at") or 0)["id"]
+                        status_url = f"{base_url}/{job_id}"
+                        resolved_job_id = True
+                        continue
+                if status_response.is_error:
+                    # vLLM-Omni serializes a failed async job as HTTP 500
+                    # while still returning the durable job payload. Keep
+                    # the model error instead of exposing only an opaque
+                    # httpx status exception to the render job.
+                    try:
+                        failed_payload = status_response.json()
+                    except ValueError:
+                        failed_payload = {}
+                    if failed_payload.get("status") == "failed":
+                        error = failed_payload.get("error") or failed_payload
+                        raise RuntimeError(f"H3 async job {job_id} failed: {error}")
+                status_response.raise_for_status()
+                status_payload = status_response.json()
+                status = status_payload.get("status")
+                if status == "completed":
+                    content_response = await client.get(f"{status_url}/content")
+                    content_response.raise_for_status()
+                    break
+                if status == "failed":
+                    raise RuntimeError(f"H3 async job {job_id} failed: {status_payload.get('error') or status_payload}")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"H3 async job {job_id} exceeded {self.timeout_seconds}s")
+                await asyncio.sleep(2)
+            temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+            temporary.write_bytes(content_response.content)
+            os.replace(temporary, output_path)
+            return output_path
+        finally:
+            if "client" in locals():
+                await client.aclose()
+            for handle in handles:
+                handle.close()
+
+    @staticmethod
+    def _media_type(path: Path) -> str:
+        suffix = path.suffix.lower()
+        return {
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+        }.get(suffix, "application/octet-stream")
